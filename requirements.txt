@@ -1,5 +1,7 @@
-requests
-numpy
-matplotlib
-mplfinance
-pandas
+Flask==3.0.0
+requests==2.31.0
+numpy==1.26.2
+matplotlib==3.8.2
+mplfinance==0.12.10b0
+pandas==2.1.4
+gunicorn==21.2.0
