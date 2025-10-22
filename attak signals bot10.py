@@ -1,4 +1,4 @@
-# bot_con_ia_mejorado_visible_token.py
+# bot_web_service.py
 import requests
 import time
 import json
@@ -16,6 +16,14 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
 from io import BytesIO
+from flask import Flask, request, jsonify
+import threading
+import logging
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # ---------------------------
 # Optimizador IA (Mejorado)
 # ---------------------------
@@ -49,7 +57,7 @@ class OptimizadorIA:
                     except Exception:
                         continue
         except FileNotFoundError:
-            print("⚠ No se encontró operaciones_log.csv (optimizador)")
+            logger.warning("⚠ No se encontró operaciones_log.csv (optimizador)")
         return datos
 
     def evaluar_configuracion(self, trend_threshold, min_strength, entry_margin):
@@ -85,7 +93,7 @@ class OptimizadorIA:
 
     def buscar_mejores_parametros(self):
         if not self.datos or len(self.datos) < self.min_samples:
-            print(f"ℹ️ No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
+            logger.info(f"ℹ️ No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
             return None
             
         mejor_score = -1e9
@@ -97,12 +105,12 @@ class OptimizadorIA:
         
         combos = list(itertools.product(trend_values, strength_values, margin_values))
         total = len(combos)
-        print(f"🔎 Optimizador: probando {total} combinaciones...")
+        logger.info(f"🔎 Optimizador: probando {total} combinaciones...")
         
         for idx, (t, s, m) in enumerate(combos, start=1):
             score = self.evaluar_configuracion(t, s, m)
             if idx % 100 == 0 or idx == total:
-                print(f"   · probado {idx}/{total} combos (mejor score actual: {mejor_score:.4f})")
+                logger.info(f"   · probado {idx}/{total} combos (mejor score actual: {mejor_score:.4f})")
             if score > mejor_score:
                 mejor_score = score
                 mejores_param = {
@@ -115,14 +123,14 @@ class OptimizadorIA:
                 }
                 
         if mejores_param:
-            print("✅ Optimizador: mejores parámetros encontrados:", mejores_param)
+            logger.info("✅ Optimizador: mejores parámetros encontrados: " + str(mejores_param))
             try:
                 with open("mejores_parametros.json", "w", encoding='utf-8') as f:
                     json.dump(mejores_param, f, indent=2)
             except Exception as e:
-                print("⚠ Error guardando mejores_parametros.json:", e)
+                logger.warning(f"⚠ Error guardando mejores_parametros.json: {e}")
         else:
-            print("⚠ No se encontró una configuración mejor")
+            logger.warning("⚠ No se encontró una configuración mejor")
             
         return mejores_param
 
@@ -130,11 +138,14 @@ class OptimizadorIA:
 # BOT PRINCIPAL (MEJORADO)
 # ---------------------------
 class TradingBot:
-    def __init__(self, auto_optimize=False, log_path="operaciones_log.csv", telegram_token=None, telegram_chat_ids=None):
+    def __init__(self, auto_optimize=False, log_path="operaciones_log.csv"):
         self.log_path = log_path
         self.auto_optimize = auto_optimize
-        self.telegram_token_override = telegram_token
-        self.telegram_chat_ids_override = telegram_chat_ids
+        
+        # Obtener configuración de variables de entorno
+        self.telegram_token = os.environ.get('TELEGRAM_TOKEN')
+        telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_IDS', '')
+        self.telegram_chat_ids = telegram_chat_ids_str.split(',') if telegram_chat_ids_str else []
         
         self.ultima_optimizacion = datetime.now()
         self.operaciones_desde_optimizacion = 0
@@ -142,9 +153,13 @@ class TradingBot:
         
         # Nuevo: historial de breakouts
         self.breakout_history = {}
+        
+        # Estado del bot
+        self.is_running = False
+        self.bot_thread = None
 
         # Configuración automática con los parámetros especificados
-        print("🔧 Cargando configuración predefinida...")
+        logger.info("🔧 Cargando configuración predefinida...")
         self.config = {
             'candle_period': 390,
             'interval': '3m',
@@ -160,11 +175,6 @@ class TradingBot:
                 'BCHUSDT','EOSUSDT','XMRUSDT','TRXUSDT','XTZUSDT','AAVEUSDT','SUSHIUSDT','MKRUSDT','COMPUSDT','YFIUSDT',
                 'SNXUSDT','CRVUSDT','RENUSDT','1INCHUSDT','OCEANUSDT','BANDUSDT','NEOUSDT','QTUMUSDT','ZILUSDT','HOTUSDT',
                 'ENJUSDT','MANAUSDT','BATUSDT','ZRXUSDT','OMGUSDT'
-            ],
-            'telegram_token': "7969091726:AAFVTZAlWN0aA6uMtJgWfnQhzTRD3cpx4wM",
-            'telegram_chat_ids': [
-                "1570204748",
-                "-1002272872445"
             ]
         }
         
@@ -174,11 +184,6 @@ class TradingBot:
                 json.dump(self.config, f, indent=2)
         except Exception:
             pass
-
-        if self.telegram_token_override is not None:
-            self.config['telegram_token'] = self.telegram_token_override
-        if self.telegram_chat_ids_override is not None:
-            self.config['telegram_chat_ids'] = self.telegram_chat_ids_override
 
         self.ultimos_datos = {}
         self.operaciones_activas = {}
@@ -191,7 +196,7 @@ class TradingBot:
             horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 3600
             
             if self.operaciones_desde_optimizacion >= 8 or horas_desde_opt >= 4:
-                print("🔄 Iniciando re-optimización automática...")
+                logger.info("🔄 Iniciando re-optimización automática...")
                 ia = OptimizadorIA(log_path=self.log_path, min_samples=12)
                 nuevos_parametros = ia.buscar_mejores_parametros()
                 
@@ -199,10 +204,10 @@ class TradingBot:
                     self.actualizar_parametros(nuevos_parametros)
                     self.ultima_optimizacion = datetime.now()
                     self.operaciones_desde_optimizacion = 0
-                    print("✅ Parámetros actualizados en tiempo real")
+                    logger.info("✅ Parámetros actualizados en tiempo real")
                     
         except Exception as e:
-            print(f"⚠ Error en re-optimización automática: {e}")
+            logger.error(f"⚠ Error en re-optimización automática: {e}")
 
     def actualizar_parametros(self, nuevos_parametros):
         self.config['trend_threshold_degrees'] = nuevos_parametros.get('trend_threshold_degrees', self.config['trend_threshold_degrees'])
@@ -322,11 +327,9 @@ class TradingBot:
                 }
                 
                 mensaje_cierre = self.generar_mensaje_cierre(datos_operacion)
-                token = self.config.get('telegram_token')
-                chats = self.config.get('telegram_chat_ids', [])
-                if token and chats:
+                if self.telegram_token and self.telegram_chat_ids:
                     try:
-                        self._enviar_telegram_simple(mensaje_cierre, token, chats)
+                        self._enviar_telegram_simple(mensaje_cierre, self.telegram_token, self.telegram_chat_ids)
                     except Exception:
                         pass
                 self.registrar_operacion(datos_operacion)
@@ -337,7 +340,7 @@ class TradingBot:
                 
                 self.operaciones_desde_optimizacion += 1
                 self.total_operaciones += 1
-                print(f"     📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
+                logger.info(f"     📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
                 
                 self.reoptimizar_periodicamente()
                 
@@ -372,106 +375,6 @@ class TradingBot:
         """
         return mensaje
 
-    def configurar_parametros(self):
-        print("🤖 CONFIGURACIÓN DEL BOT DE TRADING CON REGRESIÓN LINEAL")
-        print("=" * 60)
-        while True:
-            try:
-                candle_period = int(input("Número de velas para análisis (20-600): "))
-                if 20 <= candle_period <= 600:
-                    break
-                else:
-                    print("❌ Por favor ingresa un valor entre 20 y 600")
-            except ValueError:
-                print("❌ Por favor ingresa un número válido")
-        print("\n⏰ Timeframes disponibles:")
-        timeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d']
-        for i, tf in enumerate(timeframes, 1):
-            print(f"   {i}. {tf}")
-        while True:
-            try:
-                tf_choice = int(input("Selecciona el timeframe (1-8): "))
-                if 1 <= tf_choice <= 8:
-                    interval = timeframes[tf_choice - 1]
-                    break
-                else:
-                    print("❌ Selección inválida")
-            except ValueError:
-                print("❌ Por favor ingresa un número")
-        while True:
-            try:
-                trend_threshold = float(input("Umbral mínimo de ángulo en grados (1-45): "))
-                if 1 <= trend_threshold <= 45:
-                    break
-                else:
-                    print("❌ Valor fuera de rango")
-            except ValueError:
-                print("❌ Por favor ingresa un número decimal")
-        while True:
-            try:
-                scan_interval = int(input("Intervalo de escaneo en minutos (1-30): "))
-                if 1 <= scan_interval <= 30:
-                    break
-                else:
-                    print("❌ Por favor ingresa un valor entre 1 y 30")
-            except ValueError:
-                print("❌ Por favor ingresa un número válido")
-        while True:
-            try:
-                min_strength = float(input("Ángulo mínimo para tendencia (5-30 grados): "))
-                if 5 <= min_strength <= 30:
-                    break
-                else:
-                    print("❌ Valor fuera de rango")
-            except ValueError:
-                print("❌ Por favor ingresa un número decimal")
-        while True:
-            try:
-                min_width = float(input("Ancho mínimo del canal % (0.05-1.0): "))
-                if 0.05 <= min_width <= 1.0:
-                    min_channel_width = min_width / 100
-                    break
-                else:
-                    print("❌ Valor fuera de rango")
-            except ValueError:
-                print("❌ Por favor ingresa un número decimal")
-        while True:
-            try:
-                entry_margin = float(input("Margen de entrada % (0.1-2.0): "))
-                if 0.1 <= entry_margin <= 2.0:
-                    entry_margin = entry_margin / 100
-                    break
-                else:
-                    print("❌ Valor fuera de rango")
-            except ValueError:
-                print("❌ Por favor ingresa un número decimal")
-        symbols = [
-            'BTCUSDT','ETHUSDT','ADAUSDT','DOTUSDT','LINKUSDT',
-            'BNBUSDT','XRPUSDT','SOLUSDT','MATICUSDT','AVAXUSDT',
-            'DOGEUSDT','LTCUSDT','ATOMUSDT','UNIUSDT','XLMUSDT',
-            'ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT','ETCUSDT'
-            'BCHUSDT','EOSUSDT','XMRUSDT','TRXUSDT','XTZUSDT',
-            'AAVEUSDT','SUSHIUSDT','MKRUSDT','COMPUSDT','YFIUSDT',
-            'SNXUSDT','CRVUSDT','RENUSDT','1INCHUSDT','OCEANUSDT',
-            'BANDUSDT','NEOUSDT','QTUMUSDT','ZILUSDT','HOTUSDT',
-            'ENJUSDT','MANAUSDT','BATUSDT','ZRXUSDT','OMGUSDT'
-        ]
-        print("\n✅ CONFIGURACIÓN COMPLETADA.")
-        input("\nPresiona ENTER para iniciar el bot...")
-        self.config = {
-            'candle_period': candle_period,
-            'interval': interval,
-            'trend_threshold_degrees': trend_threshold,
-            'entry_margin': entry_margin,
-            'min_rr_ratio': 1.2,
-            'scan_interval_minutes': scan_interval,
-            'min_trend_strength_degrees': min_strength,
-            'min_channel_width': min_channel_width,
-            'symbols': symbols,
-            'telegram_token': None,
-            'telegram_chat_ids': []
-        }
-
     def obtener_datos_mercado(self, simbolo):
         url = "https://api.binance.com/api/v3/klines"
         params = {'symbol': simbolo, 'interval': self.config['interval'], 'limit': self.config['candle_period'] + 14}
@@ -498,7 +401,7 @@ class TradingBot:
             }
             return self.ultimos_datos[simbolo]
         except Exception as e:
-            print(f"❌ Error obteniendo {simbolo}: {e}")
+            logger.error(f"❌ Error obteniendo {simbolo}: {e}")
             return None
 
     def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
@@ -679,13 +582,11 @@ class TradingBot:
         return 1 - (ss_res / ss_tot)
 
     def enviar_telegram(self, mensaje):
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        if not token or not chat_ids:
+        if not self.telegram_token or not self.telegram_chat_ids:
             return False
         resultados = []
-        for chat_id in chat_ids:
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
+        for chat_id in self.telegram_chat_ids:
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
             payload = {'chat_id': chat_id, 'text': mensaje, 'parse_mode': 'HTML'}
             try:
                 r = requests.post(url, json=payload, timeout=10)
@@ -856,10 +757,9 @@ class TradingBot:
             
             return buf
         except Exception as e:
-            print(f"⚠️ Error generando gráfico {simbolo}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"⚠️ Error generando gráfico {simbolo}: {e}")
             return None
+
     def enviar_grafico_telegram(self, buf, token, chat_ids):
         if not buf or not token or not chat_ids:
             return False
@@ -879,14 +779,13 @@ class TradingBot:
                 r = requests.post(url, files=files, data=data, timeout=30)
                 
                 if r.status_code == 200:
-                    print(f"     ✅ Gráfico enviado correctamente a chat {chat_id}")
+                    logger.info(f"     ✅ Gráfico enviado correctamente a chat {chat_id}")
                     exito = True
                 else:
-                    print(f"     ⚠️ Error enviando gráfico a {chat_id}: HTTP {r.status_code}")
-                    print(f"     Respuesta: {r.text}")
+                    logger.warning(f"     ⚠️ Error enviando gráfico a {chat_id}: HTTP {r.status_code}")
                     
             except Exception as e:
-                print(f"     ❌ Excepción enviando gráfico a {chat_id}: {e}")
+                logger.error(f"     ❌ Excepción enviando gráfico a {chat_id}: {e}")
                 
         return exito
 
@@ -976,23 +875,23 @@ class TradingBot:
         return precio_entrada, take_profit, stop_loss
 
     def escanear_mercado(self):
-        print(f"\n🔍 Escaneando {len(self.config['symbols'])} símbolos...")
+        logger.info(f"\n🔍 Escaneando {len(self.config['symbols'])} símbolos...")
         senales_encontradas = 0
         
         for simbolo in self.config['symbols']:
             try:
                 if simbolo in self.operaciones_activas:
-                    print(f"   ⚡ {simbolo} - Operación activa, omitiendo...")
+                    logger.info(f"   ⚡ {simbolo} - Operación activa, omitiendo...")
                     continue
                     
                 datos_mercado = self.obtener_datos_mercado(simbolo)
                 if not datos_mercado:
-                    print(f"   ❌ {simbolo} - Error obteniendo datos")
+                    logger.error(f"   ❌ {simbolo} - Error obteniendo datos")
                     continue
                 
                 info_canal = self.calcular_canal_regresion(datos_mercado)
                 if not info_canal:
-                    print(f"   ❌ {simbolo} - Error calculando canal")
+                    logger.error(f"   ❌ {simbolo} - Error calculando canal")
                     continue
                 
                 # Mostrar información detallada de cada símbolo
@@ -1004,7 +903,7 @@ class TradingBot:
                 else:
                     estado_stoch = "➖ NEUTRO"
                 
-                print(f"   📊 {simbolo} - {info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch}")
+                logger.info(f"   📊 {simbolo} - {info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch}")
                 
                 # Verificar condiciones básicas del canal
                 if (info_canal['nivel_fuerza'] < 2 or 
@@ -1030,13 +929,13 @@ class TradingBot:
                     ultimo_breakout = self.breakout_history[simbolo]
                     tiempo_desde_ultimo = (datetime.now() - ultimo_breakout).total_seconds() / 3600
                     if tiempo_desde_ultimo < 2:
-                        print(f"   ⏳ {simbolo} - Señal reciente, omitiendo...")
+                        logger.info(f"   ⏳ {simbolo} - Señal reciente, omitiendo...")
                         continue
                 
                 # Verificar que el precio no se ha movido demasiado desde la señal
                 movimiento_desde_senal = abs(datos_mercado['precio_actual'] - precio_entrada) / precio_entrada
                 if movimiento_desde_senal > 0.01:
-                    print(f"   🔄 {simbolo} - Precio se movió {movimiento_desde_senal*100:.2f}%, omitiendo...")
+                    logger.info(f"   🔄 {simbolo} - Precio se movió {movimiento_desde_senal*100:.2f}%, omitiendo...")
                     continue
                 
                 # Generar señal
@@ -1047,13 +946,14 @@ class TradingBot:
                 self.breakout_history[simbolo] = datetime.now()
                 
             except Exception as e:
-                print(f"⚠️ Error analizando {simbolo}: {e}")
+                logger.error(f"⚠️ Error analizando {simbolo}: {e}")
                 continue
         
         if senales_encontradas > 0:
-            print(f"✅ Se encontraron {senales_encontradas} señales de trading")
+            logger.info(f"✅ Se encontraron {senales_encontradas} señales de trading")
         else:
-            print("❌ No se encontraron señales en este ciclo")
+            logger.info("❌ No se encontraron señales en este ciclo")
+
     def generar_senal_operacion(self, simbolo, tipo_operacion, precio_entrada, tp, sl, info_canal, datos_mercado):
         if simbolo in self.senales_enviadas:
             return
@@ -1104,12 +1004,9 @@ class TradingBot:
         try:
             buf = self.generar_grafico_profesional(simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion)
             if buf:
-                token = self.config.get('telegram_token')
-                chats = self.config.get('telegram_chat_ids', [])
-                self.enviar_grafico_telegram(buf, token, chats)
-                print(f"     📈 Gráfico generado para {simbolo}")
+                self.enviar_grafico_telegram(buf, self.telegram_token, self.telegram_chat_ids)
         except Exception as e:
-            print(f"     ⚠️ Error generando gráfico para {simbolo}: {e}")
+            logger.error(f"Error generando/enviando gráfico: {e}")
         
         # Registrar operación activa
         self.operaciones_activas[simbolo] = {
@@ -1121,7 +1018,7 @@ class TradingBot:
             'angulo_tendencia': info_canal['angulo_tendencia'],
             'pearson': info_canal['coeficiente_pearson'],
             'r2_score': info_canal['r2_score'],
-            'ancho_canal_relativo': info_canal['ancho_canal'] / ((info_canal['resistencia'] + info_canal['soporte']) / 2),
+            'ancho_canal_relativo': info_canal['ancho_canal'] / datos_mercado['precio_actual'],
             'nivel_fuerza': info_canal['nivel_fuerza'],
             'rango_velas_entrada': info_canal['rango_velas_reciente'],
             'stoch_k': info_canal['stoch_k'],
@@ -1129,16 +1026,14 @@ class TradingBot:
         }
         
         self.senales_enviadas.add(simbolo)
-        print(f"     ✅ Señal de {tipo_operacion} enviada para {simbolo}")
+        logger.info(f"🚀 Señal enviada: {simbolo} {tipo_operacion} a {precio_entrada}")
 
-    def ejecutar(self):
-        print("🚀 Iniciando bot de trading...")
-        print(f"📊 Configuración: {self.config['candle_period']} velas, intervalo {self.config['interval']}")
-        print(f"🎯 Umbral tendencia: {self.config['trend_threshold_degrees']}°, Fuerza mínima: {self.config['min_trend_strength_degrees']}°")
-        print(f"📈 Ratio R/B mínimo: {self.config['min_rr_ratio']}:1")
-        print(f"📱 Telegram configurado: {'Sí' if self.config.get('telegram_token') else 'No'}")
+    def run_bot(self):
+        """Función principal que ejecuta el bot en un bucle"""
+        logger.info("🚀 Iniciando bot de trading...")
+        self.is_running = True
         
-        while True:
+        while self.is_running:
             try:
                 # Verificar operaciones activas
                 self.verificar_cierre_operaciones()
@@ -1146,20 +1041,100 @@ class TradingBot:
                 # Escanear mercado en busca de señales
                 self.escanear_mercado()
                 
-                # Esperar hasta el próximo escaneo
-                print(f"⏰ Próximo escaneo en {self.config['scan_interval_minutes']} minuto(s)...")
+                # Esperar antes del siguiente ciclo
                 time.sleep(self.config['scan_interval_minutes'] * 60)
                 
-            except KeyboardInterrupt:
-                print("\n👋 Bot detenido por el usuario")
-                break
             except Exception as e:
-                print(f"⚠️ Error en el bucle principal: {e}")
-                time.sleep(10)
+                logger.error(f"Error en el bucle principal del bot: {e}")
+                time.sleep(30)  # Esperar 30 segundos antes de reintentar
+
+    def start_bot(self):
+        """Inicia el bot en un hilo separado"""
+        if not self.is_running:
+            self.bot_thread = threading.Thread(target=self.run_bot)
+            self.bot_thread.daemon = True
+            self.bot_thread.start()
+            return True
+        return False
+
+    def stop_bot(self):
+        """Detiene la ejecución del bot"""
+        self.is_running = False
+        if self.bot_thread:
+            self.bot_thread.join(timeout=5)
+        return True
 
 # ---------------------------
-# EJECUCIÓN DEL BOT
+# APLICACIÓN WEB (FLASK)
 # ---------------------------
-if __name__ == "__main__":
-    bot = TradingBot(auto_optimize=False)
-    bot.ejecutar()
+app = Flask(__name__)
+bot = TradingBot(auto_optimize=True)
+
+@app.route('/')
+def index():
+    return jsonify({
+        "status": "running",
+        "bot_active": bot.is_running,
+        "active_operations": len(bot.operaciones_activas),
+        "total_operations": bot.total_operaciones
+    })
+
+@app.route('/start', methods=['POST'])
+def start_bot_endpoint():
+    if bot.start_bot():
+        return jsonify({"status": "success", "message": "Bot iniciado correctamente"})
+    else:
+        return jsonify({"status": "error", "message": "El bot ya está en ejecución"})
+
+@app.route('/stop', methods=['POST'])
+def stop_bot_endpoint():
+    if bot.stop_bot():
+        return jsonify({"status": "success", "message": "Bot detenido correctamente"})
+    else:
+        return jsonify({"status": "error", "message": "El bot no está en ejecución"})
+
+@app.route('/status')
+def status():
+    return jsonify({
+        "status": "running",
+        "bot_active": bot.is_running,
+        "active_operations": list(bot.operaciones_activas.keys()),
+        "total_operations": bot.total_operaciones,
+        "config": {
+            "scan_interval_minutes": bot.config['scan_interval_minutes'],
+            "symbols_count": len(bot.config['symbols'])
+        }
+    })
+
+@app.route('/optimize', methods=['POST'])
+def optimize_parameters():
+    try:
+        ia = OptimizadorIA(log_path=bot.log_path, min_samples=12)
+        nuevos_parametros = ia.buscar_mejores_parametros()
+        
+        if nuevos_parametros:
+            bot.actualizar_parametros(nuevos_parametros)
+            return jsonify({
+                "status": "success", 
+                "message": "Parámetros optimizados correctamente",
+                "parameters": nuevos_parametros
+            })
+        else:
+            return jsonify({
+                "status": "error", 
+                "message": "No se pudieron optimizar los parámetros"
+            })
+    except Exception as e:
+        return jsonify({
+            "status": "error", 
+            "message": f"Error en la optimización: {str(e)}"
+        })
+
+# Iniciar el bot automáticamente al iniciar la aplicación
+if __name__ == '__main__':
+    # Iniciar el bot en un hilo separado
+    bot.start_bot()
+    
+    # Iniciar la aplicación web
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
