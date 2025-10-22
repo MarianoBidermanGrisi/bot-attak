@@ -5,4 +5,13 @@ pandas>=2.2.3
 matplotlib==3.9.0
 mplfinance==0.12.10b0
 python-telegram-bot==21.3
+=======
+Flask==2.3.3
+requests==2.31.0
+numpy==1.26.4
+pandas>=2.2.3
+matplotlib==3.9.0
+mplfinance==0.12.10b0
+python-telegram-bot==21.3
+>>>>>>> b64ec1fe6d27bd204ea69bffac4791dda7ce2a9d
 gunicorn==21.2.0
