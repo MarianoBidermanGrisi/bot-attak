@@ -1,4 +1,3 @@
-# bot_web_service.py
 import requests
 import time
 import json
@@ -20,8 +19,9 @@ from io import BytesIO
 from flask import Flask, request, jsonify
 import threading  # Asegúrate de que threading esté importado
 import logging
-from telegram import Bot
+from telegram import Bot, Update
 from telegram.error import TelegramError
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Configurar logging para que se muestre en stdout/stderr
 # Esto es crucial para que los logs aparezcan en Application Logs
@@ -180,7 +180,7 @@ class TradingBot:
         
         # Obtener configuración de variables de entorno
         self.telegram_token = os.environ.get('TELEGRAM_TOKEN')
-        telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_IDS', '')
+        telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '')  # Cambiado de TELEGRAM_CHAT_IDS a TELEGRAM_CHAT_ID
         self.telegram_chat_ids = [chat_id.strip() for chat_id in telegram_chat_ids_str.split(',') if chat_id.strip()]
         
         logger.info(f"Token Telegram configurado: {'Sí' if self.telegram_token else 'No'}")
@@ -321,11 +321,21 @@ class TradingBot:
                 resultados.append(False)
         return any(resultados)
 
-    def enviar_telegram(self, mensaje):
-        """Envía mensaje a todos los chats configurados"""
+    def enviar_telegram(self, mensaje, chat_id=None):
+        """Envía mensaje a todos los chats configurados o a un chat específico"""
         debug_logger.debug("Preparando envío de mensaje a Telegram")
-        if not self.telegram_token or not self.telegram_chat_ids:
-            logger.warning("No hay token o chat IDs configurados para Telegram")
+        if not self.telegram_token:
+            logger.warning("No hay token configurado para Telegram")
+            return False
+        
+        # Si se especifica un chat_id, enviar solo a ese chat
+        if chat_id:
+            chat_ids = [chat_id]
+        else:
+            chat_ids = self.telegram_chat_ids
+            
+        if not chat_ids:
+            logger.warning("No hay chat IDs configurados para Telegram")
             return False
         
         # Intentar usar python-telegram-bot primero
@@ -337,8 +347,8 @@ class TradingBot:
                 
                 async def enviar_a_todos():
                     resultados = []
-                    for chat_id in self.telegram_chat_ids:
-                        resultado = await self._enviar_telegram_async(mensaje, chat_id)
+                    for cid in chat_ids:
+                        resultado = await self._enviar_telegram_async(mensaje, cid)
                         resultados.append(resultado)
                     return any(resultados)
                 
@@ -351,7 +361,7 @@ class TradingBot:
                 error_logger.error(f"Error con python-telegram-bot, usando método de respaldo: {e}")
         
         # Método de respaldo con requests
-        resultado = self._enviar_telegram_simple(mensaje, self.telegram_token, self.telegram_chat_ids)
+        resultado = self._enviar_telegram_simple(mensaje, self.telegram_token, chat_ids)
         if resultado:
             logger.info("Mensaje enviado con método de respaldo (requests)")
         return resultado
@@ -1195,17 +1205,84 @@ def telegram_webhook():
         update = request.get_json()
         logger.info(f"✅ Update recibido de Telegram: {json.dumps(update, indent=2)}")
         
-        # Aquí puedes procesar los mensajes, como comandos /start, /status, etc.
-        # Por ahora, solo lo registramos y confirmamos la recepción a Telegram.
-        # Ejemplo:
-        # if 'message' in update and '/status' in update['message']['text']:
-        #     bot.enviar_telegram("El bot está funcionando correctamente!")
+        # Procesar el mensaje
+        if 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            
+            # Responder a comandos básicos
+            if text == '/start':
+                respuesta = "¡Hola! Soy el bot de trading. Estoy funcionando correctamente."
+                bot.enviar_telegram(respuesta, chat_id)
+            elif text == '/status':
+                operaciones_activas = len(bot.operaciones_activas)
+                respuesta = f"Estado del bot:\n\n✅ Bot funcionando\n📊 Operaciones activas: {operaciones_activas}\n🔍 Escaneando {len(bot.config['symbols'])} símbolos"
+                bot.enviar_telegram(respuesta, chat_id)
+            elif text == '/help':
+                respuesta = "Comandos disponibles:\n\n/start - Inicia el bot\n/status - Muestra el estado actual\n/help - Muestra esta ayuda"
+                bot.enviar_telegram(respuesta, chat_id)
+            else:
+                # Responder a otros mensajes
+                respuesta = f"Recibí tu mensaje: '{text}'. Usa /help para ver los comandos disponibles."
+                bot.enviar_telegram(respuesta, chat_id)
         
         return jsonify({"status": "ok"}), 200
     else:
         logger.warning("⚠️ Petición recibida en /webhook no es JSON.")
         return jsonify({"error": "Request must be JSON"}), 400
 
+### NUEVO ###
+# Función para configurar el webhook de Telegram
+def setup_telegram_webhook():
+    """Configura el webhook de Telegram para que apunte a nuestro servicio"""
+    if not bot.telegram_token:
+        logger.error("❌ No se puede configurar el webhook: no hay token de Telegram")
+        return False
+    
+    # Obtener la URL del webhook
+    webhook_url = os.environ.get('WEBHOOK_URL')
+    if not webhook_url:
+        # Si no está en variables de entorno, construir la URL automáticamente
+        # Usamos el dominio de Render
+        render_service_url = os.environ.get('RENDER_EXTERNAL_URL')
+        if render_service_url:
+            webhook_url = f"{render_service_url}/webhook"
+        else:
+            logger.error("❌ No se puede configurar el webhook: no hay URL de webhook configurada")
+            return False
+    
+    logger.info(f"🔧 Configurando webhook de Telegram en: {webhook_url}")
+    
+    try:
+        # Eliminar webhook existente si hay uno
+        delete_url = f"https://api.telegram.org/bot{bot.telegram_token}/deleteWebhook"
+        requests.get(delete_url, timeout=10)
+        
+        # Configurar nuevo webhook
+        set_url = f"https://api.telegram.org/bot{bot.telegram_token}/setWebhook"
+        params = {'url': webhook_url}
+        response = requests.get(set_url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('ok'):
+                logger.info("✅ Webhook de Telegram configurado correctamente")
+                return True
+            else:
+                error_logger.error(f"❌ Error configurando webhook: {result.get('description', 'Error desconocido')}")
+                return False
+        else:
+            error_logger.error(f"❌ Error HTTP configurando webhook: {response.status_code}")
+            return False
+    except Exception as e:
+        error_logger.error(f"❌ Excepción configurando webhook: {e}")
+        return False
+
 # Este bloque es para desarrollo local y será ignorado por Gunicorn en Render
 if __name__ == '__main__':
+    # Configurar el webhook antes de iniciar el servidor
+    setup_telegram_webhook()
+    
+    # Iniciar el servidor Flask
     app.run(port=5000, debug=True)
