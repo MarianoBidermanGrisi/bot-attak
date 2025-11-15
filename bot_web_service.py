@@ -1482,7 +1482,7 @@ class TradingBot:
 def crear_config_desde_entorno():
     """Configuración desde variables de entorno"""
     directorio_actual = os.path.dirname(os.path.abspath(__file__))
-    telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '2108159591')
+    telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '-1002272872445')
     telegram_chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
     
     return {
