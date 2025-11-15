@@ -690,8 +690,7 @@ class TradingBot:
         return precio_entrada, take_profit, stop_loss
     def escanear_mercado(self):
         """Escanea el mercado con estrategia Breakout + Reentry"""
-        print(f"
-🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
+        print(f"\🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
         senales_encontradas = 0
         for simbolo in self.config.get('symbols', []):
             try:
@@ -1422,8 +1421,7 @@ class TradingBot:
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
         print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
         print("=" * 70)
-        print("
-🚀 INICIANDO BOT...")
+        print(f"\n🚀 INICIANDO BOT...")
         try:
             while True:
                 nuevas_senales = self.ejecutar_analisis()
