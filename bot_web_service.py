@@ -22,6 +22,7 @@ import logging
 from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import httpx
 
 # Configurar logging para que se muestre en stdout/stderr
 # Esto es crucial para que los logs aparezcan en Application Logs
@@ -180,17 +181,27 @@ class TradingBot:
         
         # Obtener configuración de variables de entorno
         self.telegram_token = os.environ.get('TELEGRAM_TOKEN')
-        telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '')  # Cambiado de TELEGRAM_CHAT_IDS a TELEGRAM_CHAT_ID
+        # CORRECCIÓN: Usar el chat_id correcto según los logs
+        # El chat_id correcto es 1570204748 (no 1572024748)
+        telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '1570204748')  # Valor por defecto corregido
         self.telegram_chat_ids = [chat_id.strip() for chat_id in telegram_chat_ids_str.split(',') if chat_id.strip()]
         
         logger.info(f"Token Telegram configurado: {'Sí' if self.telegram_token else 'No'}")
-        logger.info(f"Chat IDs configurados: {len(self.telegram_chat_ids)}")
+        logger.info(f"Chat IDs configurados: {self.telegram_chat_ids}")
         
-        # Inicializar bot de Telegram
+        # Inicializar bot de Telegram con configuración mejorada
         self.telegram_bot = None
         if self.telegram_token:
             try:
-                self.telegram_bot = Bot(token=self.telegram_token)
+                # Crear bot con configuración de conexión mejorada
+                self.telegram_bot = Bot(
+                    token=self.telegram_token,
+                    base_url="https://api.telegram.org",
+                    request=httpx.AsyncClient(
+                        timeout=10.0,
+                        limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                    )
+                )
                 logger.info("Bot de Telegram inicializado correctamente")
             except Exception as e:
                 error_logger.error(f"Error inicializando bot de Telegram: {e}")
@@ -277,48 +288,75 @@ class TradingBot:
             error_logger.error(f"Error guardando parámetros actualizados: {e}")
 
     async def _enviar_telegram_async(self, mensaje, chat_id):
-        """Envía mensaje usando python-telegram-bot de forma asíncrona"""
+        """Envía mensaje usando python-telegram-bot de forma asíncrona con reintentos"""
         debug_logger.debug(f"Enviando mensaje a Telegram (chat_id={chat_id})")
         if not self.telegram_bot:
             logger.warning("Bot de Telegram no inicializado")
             return False
         
-        try:
-            await self.telegram_bot.send_message(
-                chat_id=chat_id,
-                text=mensaje,
-                parse_mode='HTML'
-            )
-            logger.info(f"Mensaje enviado exitosamente a chat_id={chat_id}")
-            return True
-        except TelegramError as e:
-            error_logger.error(f"Error enviando mensaje a Telegram: {e}")
-            return False
-        except Exception as e:
-            error_logger.error(f"Error inesperado enviando a Telegram: {e}")
-            return False
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await self.telegram_bot.send_message(
+                    chat_id=chat_id,
+                    text=mensaje,
+                    parse_mode='HTML'
+                )
+                logger.info(f"Mensaje enviado exitosamente a chat_id={chat_id}")
+                return True
+            except TelegramError as e:
+                error_logger.error(f"Error enviando mensaje a Telegram (intento {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)  # Esperar antes de reintentar
+                continue
+            except Exception as e:
+                error_logger.error(f"Error inesperado enviando a Telegram (intento {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                continue
+        
+        return False
 
     def _enviar_telegram_simple(self, mensaje, token, chat_ids):
-        """Método de respaldo usando requests"""
+        """Método de respaldo usando requests con mejor manejo de errores"""
         debug_logger.debug(f"Usando método de respaldo para enviar mensaje a {len(chat_ids)} chats")
         if not token or not chat_ids:
             logger.warning("No hay token o chat IDs configurados para Telegram")
             return False
+        
         resultados = []
         for chat_id in chat_ids:
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {'chat_id': chat_id, 'text': mensaje, 'parse_mode': 'HTML'}
-            try:
-                r = requests.post(url, json=payload, timeout=10)
-                if r.status_code == 200:
-                    logger.info(f"Mensaje enviado exitosamente a chat_id={chat_id}")
-                    resultados.append(True)
-                else:
-                    error_logger.error(f"Error enviando mensaje a chat_id={chat_id}: {r.status_code} - {r.text}")
-                    resultados.append(False)
-            except Exception as e:
-                error_logger.error(f"Excepción enviando mensaje a chat_id={chat_id}: {e}")
-                resultados.append(False)
+            payload = {
+                'chat_id': chat_id,
+                'text': mensaje,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
+            }
+            
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    r = requests.post(url, json=payload, timeout=15)
+                    if r.status_code == 200:
+                        response_data = r.json()
+                        if response_data.get('ok'):
+                            logger.info(f"Mensaje enviado exitosamente a chat_id={chat_id}")
+                            resultados.append(True)
+                            break
+                        else:
+                            error_logger.error(f"Error API Telegram para chat_id={chat_id}: {response_data.get('description', 'Error desconocido')}")
+                    else:
+                        error_logger.error(f"Error HTTP enviando mensaje a chat_id={chat_id}: {r.status_code} - {r.text}")
+                    
+                    if attempt < max_retries - 1:
+                        time.sleep(1)  # Esperar antes de reintentar
+                        
+                except Exception as e:
+                    error_logger.error(f"Excepción enviando mensaje a chat_id={chat_id} (intento {attempt + 1}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+        
         return any(resultados)
 
     def enviar_telegram(self, mensaje, chat_id=None):
@@ -364,6 +402,9 @@ class TradingBot:
         resultado = self._enviar_telegram_simple(mensaje, self.telegram_token, chat_ids)
         if resultado:
             logger.info("Mensaje enviado con método de respaldo (requests)")
+        else:
+            error_logger.error("No se pudo enviar el mensaje con ningún método")
+        
         return resultado
 
     def inicializar_log(self):
@@ -932,30 +973,38 @@ class TradingBot:
             return None
 
     async def _enviar_grafico_async(self, buf, chat_id):
-        """Envía gráfico usando python-telegram-bot de forma asíncrona"""
+        """Envía gráfico usando python-telegram-bot de forma asíncrona con reintentos"""
         debug_logger.debug(f"Enviando gráfico a chat_id={chat_id}")
         if not self.telegram_bot:
             logger.warning("Bot de Telegram no inicializado para enviar gráfico")
             return False
         
-        try:
-            buf.seek(0)
-            await self.telegram_bot.send_photo(
-                chat_id=chat_id,
-                photo=buf,
-                caption="Gráfico de análisis técnico"
-            )
-            logger.info(f"Gráfico enviado exitosamente a chat_id={chat_id}")
-            return True
-        except TelegramError as e:
-            error_logger.error(f"Error enviando gráfico a Telegram: {e}")
-            return False
-        except Exception as e:
-            error_logger.error(f"Error inesperado enviando gráfico a Telegram: {e}")
-            return False
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                buf.seek(0)
+                await self.telegram_bot.send_photo(
+                    chat_id=chat_id,
+                    photo=buf,
+                    caption="Gráfico de análisis técnico"
+                )
+                logger.info(f"Gráfico enviado exitosamente a chat_id={chat_id}")
+                return True
+            except TelegramError as e:
+                error_logger.error(f"Error enviando gráfico a Telegram (intento {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                continue
+            except Exception as e:
+                error_logger.error(f"Error inesperado enviando gráfico a Telegram (intento {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                continue
+        
+        return False
 
     def enviar_grafico_telegram(self, buf, token, chat_ids):
-        """Envía gráfico a todos los chats configurados"""
+        """Envía gráfico a todos los chats configurados con mejor manejo de errores"""
         debug_logger.debug(f"Preparando envío de gráfico a {len(chat_ids)} chats")
         if not buf or not token or not chat_ids:
             logger.warning("Parámetros inválidos para enviar gráfico")
@@ -987,21 +1036,33 @@ class TradingBot:
         exito = False
         for chat_id in chat_ids:
             url = f"https://api.telegram.org/bot{token}/sendPhoto"
-            try:
-                buf.seek(0)
-                files = {'photo': ('grafico.png', buf.read(), 'image/png')}
-                data = {'chat_id': chat_id}
-                
-                r = requests.post(url, files=files, data=data, timeout=30)
-                
-                if r.status_code == 200:
-                    logger.info(f"     ✅ Gráfico enviado correctamente a chat {chat_id}")
-                    exito = True
-                else:
-                    error_logger.error(f"     ⚠️ Error enviando gráfico a {chat_id}: HTTP {r.status_code}")
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    buf.seek(0)
+                    files = {'photo': ('grafico.png', buf.read(), 'image/png')}
+                    data = {'chat_id': chat_id}
                     
-            except Exception as e:
-                error_logger.error(f"     ❌ Excepción enviando gráfico a {chat_id}: {e}")
+                    r = requests.post(url, files=files, data=data, timeout=30)
+                    
+                    if r.status_code == 200:
+                        response_data = r.json()
+                        if response_data.get('ok'):
+                            logger.info(f"     ✅ Gráfico enviado correctamente a chat {chat_id}")
+                            exito = True
+                            break
+                        else:
+                            error_logger.error(f"     ⚠️ Error API Telegram enviando gráfico a {chat_id}: {response_data.get('description', 'Error desconocido')}")
+                    else:
+                        error_logger.error(f"     ⚠️ Error HTTP enviando gráfico a {chat_id}: {r.status_code}")
+                        
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        
+                except Exception as e:
+                    error_logger.error(f"     ❌ Excepción enviando gráfico a {chat_id} (intento {attempt + 1}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
                 
         return exito
 
@@ -1211,20 +1272,68 @@ def telegram_webhook():
             chat_id = message['chat']['id']
             text = message.get('text', '')
             
+            # CORRECCIÓN: Guardar el chat_id correcto si no está configurado
+            if not bot.telegram_chat_ids or str(chat_id) not in [str(cid) for cid in bot.telegram_chat_ids]:
+                logger.warning(f"Chat ID {chat_id} no está en la lista configurada. Usando este chat_id.")
+                bot.telegram_chat_ids = [str(chat_id)]
+            
             # Responder a comandos básicos
             if text == '/start':
-                respuesta = "¡Hola! Soy el bot de trading. Estoy funcionando correctamente."
+                respuesta = "¡Hola! Soy el bot de trading. Estoy funcionando correctamente. Usa /help para ver los comandos disponibles."
                 bot.enviar_telegram(respuesta, chat_id)
             elif text == '/status':
                 operaciones_activas = len(bot.operaciones_activas)
-                respuesta = f"Estado del bot:\n\n✅ Bot funcionando\n📊 Operaciones activas: {operaciones_activas}\n🔍 Escaneando {len(bot.config['symbols'])} símbolos"
+                ultimo_escaneo = datetime.now().strftime('%H:%M:%S')
+                respuesta = f"""<b>🤖 ESTADO DEL BOT</b>
+
+✅ <b>Bot funcionando correctamente</b>
+📊 <b>Operaciones activas:</b> {operaciones_activas}
+🔍 <b>Símbolos escaneados:</b> {len(bot.config['symbols'])}
+⏰ <b>Último escaneo:</b> {ultimo_escaneo}
+💬 <b>Tu Chat ID:</b> {chat_id}
+
+📈 <b>Últimas operaciones:</b>
+"""
+                # Agregar información de las últimas 5 operaciones si existen
+                try:
+                    if os.path.exists(bot.archivo_log):
+                        with open(bot.archivo_log, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
+                            if len(lines) > 1:  # Hay más que solo el encabezado
+                                # Obtener las últimas 5 operaciones (inverso)
+                                for line in reversed(lines[-6:-1]):  # Excluir encabezado
+                                    parts = line.strip().split(',')
+                                    if len(parts) >= 9:
+                                        symbol = parts[1]
+                                        tipo = parts[2]
+                                        resultado = parts[7]
+                                        pnl = parts[8]
+                                        timestamp = parts[0]
+                                        respuesta += f"\n• {symbol} {tipo} - {resultado} ({pnl}%)"
+                except Exception as e:
+                    error_logger.error(f"Error leyendo log de operaciones: {e}")
+                
                 bot.enviar_telegram(respuesta, chat_id)
             elif text == '/help':
-                respuesta = "Comandos disponibles:\n\n/start - Inicia el bot\n/status - Muestra el estado actual\n/help - Muestra esta ayuda"
+                respuesta = """<b>📚 COMANDOS DISPONIBLES</b>
+
+/start - Inicia el bot y muestra mensaje de bienvenida
+/status - Muestra el estado actual del bot y operaciones activas
+/help - Muestra esta ayuda
+
+📊 <b>Funciones automáticas:</b>
+• Escaneo continuo del mercado cada minuto
+• Detección de señales de trading
+• Gestión automática de operaciones activas
+• Optimización automática de parámetros
+
+💡 <b>Nota:</b> El bot opera automáticamente 24/7. Los comandos son solo para consultar el estado."""
                 bot.enviar_telegram(respuesta, chat_id)
             else:
                 # Responder a otros mensajes
-                respuesta = f"Recibí tu mensaje: '{text}'. Usa /help para ver los comandos disponibles."
+                respuesta = f"""❓ No entendí el comando: <code>{text}</code>
+
+Usa <code>/help</code> para ver los comandos disponibles."""
                 bot.enviar_telegram(respuesta, chat_id)
         
         return jsonify({"status": "ok"}), 200
