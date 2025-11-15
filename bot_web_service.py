@@ -22,7 +22,6 @@ import logging
 from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
 # Configurar logging para que se muestre en stdout/stderr
 # Esto es crucial para que los logs aparezcan en Application Logs
 logging.basicConfig(
@@ -31,21 +30,18 @@ logging.basicConfig(
     stream=sys.stdout  # Forzar salida a stdout
 )
 logger = logging.getLogger(__name__)
-
 # También configurar un logger para errores específicos
 error_logger = logging.getLogger('error_logger')
 error_handler = logging.StreamHandler(sys.stderr)  # Enviar errores a stderr
 error_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 error_logger.addHandler(error_handler)
 error_logger.setLevel(logging.ERROR)
-
 # Agregar un logger para depuración
 debug_logger = logging.getLogger('debug_logger')
 debug_handler = logging.StreamHandler(sys.stdout)
 debug_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 debug_logger.addHandler(debug_handler)
 debug_logger.setLevel(logging.DEBUG)
-
 # ---------------------------
 # Optimizador IA (Mejorado)
 # ---------------------------
@@ -56,7 +52,6 @@ class OptimizadorIA:
         self.min_samples = min_samples
         self.datos = self.cargar_datos()
         logger.info(f"OptimizadorIA inicializado con {len(self.datos)} datos")
-
     def cargar_datos(self):
         logger.info(f"Cargando datos desde {self.log_path}")
         datos = []
@@ -88,13 +83,11 @@ class OptimizadorIA:
         except Exception as e:
             error_logger.error(f"Error cargando datos: {e}")
         return datos
-
     def evaluar_configuracion(self, trend_threshold, min_strength, entry_margin):
         debug_logger.debug(f"Evaluando configuración: trend={trend_threshold}, strength={min_strength}, margin={entry_margin}")
         if not self.datos:
             logger.warning("No hay datos para evaluar configuración")
             return -99999
-            
         filtradas = [
             op for op in self.datos
             if abs(op['angulo']) >= trend_threshold
@@ -103,44 +96,33 @@ class OptimizadorIA:
             and op.get('nivel_fuerza', 1) >= 2
             and op.get('r2', 0) >= 0.4
         ]
-        
         n = len(filtradas)
         if n < max(8, int(0.15 * len(self.datos))):
             debug_logger.debug(f"Configuración rechazada: solo {n} operaciones filtradas")
             return -10000 - n
-            
         pnls = [op['pnl'] for op in filtradas]
         pnl_mean = statistics.mean(pnls) if filtradas else 0
         pnl_std = statistics.stdev(pnls) if len(pnls) > 1 else 0
-        
         winrate = sum(1 for op in filtradas if op['pnl'] > 0) / n if n > 0 else 0
-        
         score = (pnl_mean - 0.5 * pnl_std) * winrate * math.sqrt(n)
-        
         ops_calidad = [op for op in filtradas if op.get('r2', 0) >= 0.6 and op.get('nivel_fuerza', 1) >= 3]
         if ops_calidad:
             score *= 1.2
-            
         debug_logger.debug(f"Configuración evaluada: score={score}, n={n}")
         return score
-
     def buscar_mejores_parametros(self):
         logger.info("Iniciando búsqueda de mejores parámetros")
         if not self.datos or len(self.datos) < self.min_samples:
             logger.info(f"ℹ️ No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
             return None
-            
         mejor_score = -1e9
         mejores_param = None
-        
         trend_values = [3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40]
         strength_values = [3, 5, 8, 10, 12, 15, 18, 20, 25, 30]
         margin_values = [0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003, 0.004, 0.005, 0.008, 0.01]
-        
         combos = list(itertools.product(trend_values, strength_values, margin_values))
         total = len(combos)
         logger.info(f"🔎 Optimizador: probando {total} combinaciones...")
-        
         for idx, (t, s, m) in enumerate(combos, start=1):
             score = self.evaluar_configuracion(t, s, m)
             if idx % 100 == 0 or idx == total:
@@ -155,7 +137,6 @@ class OptimizadorIA:
                     'evaluated_samples': len(self.datos),
                     'total_combinations': total
                 }
-                
         if mejores_param:
             logger.info("✅ Optimizador: mejores parámetros encontrados: " + str(mejores_param))
             try:
@@ -166,9 +147,7 @@ class OptimizadorIA:
                 error_logger.error(f"⚠ Error guardando mejores_parametros.json: {e}")
         else:
             logger.warning("⚠ No se encontró una configuración mejor")
-            
         return mejores_param
-
 # ---------------------------
 # BOT PRINCIPAL (MEJORADO)
 # ---------------------------
@@ -177,33 +156,26 @@ class TradingBot:
         logger.info("Inicializando TradingBot")
         self.log_path = log_path
         self.auto_optimize = auto_optimize
-        
         # Obtener configuración de variables de entorno
         self.telegram_token = os.environ.get('TELEGRAM_TOKEN')
         # CORRECCIÓN: Usar el chat_id correcto según los logs
         telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '1570204748')  # Valor por defecto corregido
         self.telegram_chat_ids = [chat_id.strip() for chat_id in telegram_chat_ids_str.split(',') if chat_id.strip()]
-        
         logger.info(f"Token Telegram configurado: {'Sí' if self.telegram_token else 'No'}")
         logger.info(f"Chat IDs configurados: {self.telegram_chat_ids}")
-        
         # CORRECCIÓN: No inicializar el Bot aquí para evitar problemas con el event loop
         self.telegram_bot = None
         if self.telegram_token:
             self.telegram_bot = Bot(token=self.telegram_token)
             logger.info("Bot de Telegram inicializado correctamente")
-        
         self.ultima_optimizacion = datetime.now()
         self.operaciones_desde_optimizacion = 0
         self.total_operaciones = 0
-        
         # Nuevo: historial de breakouts
         self.breakout_history = {}
-        
         # Estado del bot
         self.is_running = False
         self.bot_thread = None
-
         # Configuración automática con los parámetros especificados
         logger.info("🔧 Cargando configuración predefinida...")
         self.config = {
@@ -213,8 +185,9 @@ class TradingBot:
             'entry_margin': 0.01,
             'min_rr_ratio': 1.5,
             'scan_interval_minutes': 1,
-            'min_trend_strength_degrees': 0.4,
-            'min_channel_width': 0.001,
+            'min_trend_strength_degrees': 15,
+            # CAMBIO CLAVE: Reducir min_channel_width de 1.0 a 0.01 (1%) para hacerlo realista
+            'min_channel_width': 0.01,
             'symbols': [
                 'BTCUSDT','ETHUSDT','ADAUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','MATICUSDT','AVAXUSDT',
                 'DOGEUSDT','LTCUSDT','ATOMUSDT','UNIUSDT','XLMUSDT','ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT','ETCUSDT',
@@ -224,7 +197,6 @@ class TradingBot:
             ]
         }
         logger.info(f"Configuración cargada con {len(self.config['symbols'])} símbolos")
-        
         # Guardar la configuración aplicada
         try:
             with open("parametros_predefinidos.json", "w", encoding='utf-8') as f:
@@ -232,24 +204,20 @@ class TradingBot:
             logger.info("Configuración guardada en parametros_predefinidos.json")
         except Exception as e:
             error_logger.error(f"Error guardando configuración: {e}")
-
         self.ultimos_datos = {}
         self.operaciones_activas = {}
         self.senales_enviadas = set()
         self.archivo_log = self.log_path
         self.inicializar_log()
         logger.info("TradingBot inicializado completamente")
-
     def reoptimizar_periodicamente(self):
         logger.info("Verificando si se necesita reoptimización")
         try:
             horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 3600
-            
             if self.operaciones_desde_optimizacion >= 8 or horas_desde_opt >= 4:
                 logger.info("🔄 Iniciando re-optimización automática...")
                 ia = OptimizadorIA(log_path=self.log_path, min_samples=12)
                 nuevos_parametros = ia.buscar_mejores_parametros()
-                
                 if nuevos_parametros:
                     self.actualizar_parametros(nuevos_parametros)
                     self.ultima_optimizacion = datetime.now()
@@ -257,23 +225,19 @@ class TradingBot:
                     logger.info("✅ Parámetros actualizados en tiempo real")
                 else:
                     logger.warning("No se encontraron nuevos parámetros óptimos")
-                    
         except Exception as e:
             error_logger.error(f"⚠ Error en re-optimización automática: {e}")
-
     def actualizar_parametros(self, nuevos_parametros):
         logger.info(f"Actualizando parámetros: {nuevos_parametros}")
         self.config['trend_threshold_degrees'] = nuevos_parametros.get('trend_threshold_degrees', self.config['trend_threshold_degrees'])
         self.config['min_trend_strength_degrees'] = nuevos_parametros.get('min_trend_strength_degrees', self.config['min_trend_strength_degrees'])
         self.config['entry_margin'] = nuevos_parametros.get('entry_margin', self.config['entry_margin'])
-        
         try:
             with open("parametros_actualizados.json", "w", encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2)
             logger.info("Parámetros actualizados guardados en parametros_actualizados.json")
         except Exception as e:
             error_logger.error(f"Error guardando parámetros actualizados: {e}")
-
     # CORRECCIÓN: Usar solo requests para evitar problemas con asyncio
     def enviar_telegram(self, mensaje, chat_id=None):
         """Envía mensaje usando solo requests (método síncrono)"""
@@ -281,17 +245,14 @@ class TradingBot:
         if not self.telegram_token:
             logger.warning("No hay token configurado para Telegram")
             return False
-        
         # Si se especifica un chat_id, enviar solo a ese chat
         if chat_id:
             chat_ids = [chat_id]
         else:
             chat_ids = self.telegram_chat_ids
-            
         if not chat_ids:
             logger.warning("No hay chat IDs configurados para Telegram")
             return False
-        
         # Usar solo requests para evitar problemas con asyncio
         resultados = []
         for cid in chat_ids:
@@ -302,7 +263,6 @@ class TradingBot:
                 'parse_mode': 'HTML',
                 'disable_web_page_preview': True
             }
-            
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -317,17 +277,13 @@ class TradingBot:
                             error_logger.error(f"Error API Telegram para chat_id={cid}: {response_data.get('description', 'Error desconocido')}")
                     else:
                         error_logger.error(f"Error HTTP enviando mensaje a chat_id={cid}: {r.status_code} - {r.text}")
-                    
                     if attempt < max_retries - 1:
                         time.sleep(1)  # Esperar antes de reintentar
-                        
                 except Exception as e:
                     error_logger.error(f"Excepción enviando mensaje a chat_id={cid} (intento {attempt + 1}): {e}")
                     if attempt < max_retries - 1:
                         time.sleep(1)
-        
         return any(resultados)
-
     def inicializar_log(self):
         logger.info(f"Inicializando log de operaciones en {self.archivo_log}")
         try:
@@ -350,7 +306,6 @@ class TradingBot:
                 logger.info("Archivo de log ya existe")
         except Exception as e:
             error_logger.error(f"Error inicializando log: {e}")
-
     def registrar_operacion(self, datos_operacion):
         debug_logger.debug(f"Registrando operación: {datos_operacion.get('symbol', 'Unknown')}")
         try:
@@ -379,7 +334,6 @@ class TradingBot:
             logger.info(f"Operación registrada: {datos_operacion['symbol']} {datos_operacion['tipo']} {datos_operacion['resultado']}")
         except Exception as e:
             error_logger.error(f"Error registrando operación: {e}")
-
     def verificar_cierre_operaciones(self):
         debug_logger.debug("Verificando cierre de operaciones activas")
         if not self.operaciones_activas:
@@ -387,7 +341,6 @@ class TradingBot:
             return []
         operaciones_cerradas = []
         logger.info(f"Verificando {len(self.operaciones_activas)} operaciones activas")
-        
         for simbolo, operacion in list(self.operaciones_activas.items()):
             debug_logger.debug(f"Verificando operación para {simbolo}")
             datos = self.obtener_datos_mercado(simbolo)
@@ -417,7 +370,6 @@ class TradingBot:
                     pnl_percent = ((operacion['precio_entrada'] - precio_actual) / operacion['precio_entrada']) * 100
                 tiempo_entrada = datetime.fromisoformat(operacion['timestamp_entrada'])
                 duracion_minutos = (datetime.now() - tiempo_entrada).total_seconds() / 60
-                
                 datos_operacion = {
                     'timestamp': datetime.now().isoformat(),
                     'symbol': simbolo,
@@ -438,7 +390,6 @@ class TradingBot:
                     'stoch_k': operacion.get('stoch_k', 0),
                     'stoch_d': operacion.get('stoch_d', 0)
                 }
-                
                 mensaje_cierre = self.generar_mensaje_cierre(datos_operacion)
                 self.enviar_telegram(mensaje_cierre)
                 self.registrar_operacion(datos_operacion)
@@ -446,17 +397,13 @@ class TradingBot:
                 del self.operaciones_activas[simbolo]
                 if simbolo in self.senales_enviadas:
                     self.senales_enviadas.remove(simbolo)
-                
                 self.operaciones_desde_optimizacion += 1
                 self.total_operaciones += 1
                 logger.info(f"     📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
-                
                 self.reoptimizar_periodicamente()
-                
         if operaciones_cerradas:
             logger.info(f"Cerradas {len(operaciones_cerradas)} operaciones: {', '.join(operaciones_cerradas)}")
         return operaciones_cerradas
-
     def generar_mensaje_cierre(self, datos_operacion):
         emoji = "🟢" if datos_operacion['resultado'] == "TP" else "🔴"
         color_emoji = "✅" if datos_operacion['resultado'] == "TP" else "❌"
@@ -466,17 +413,13 @@ class TradingBot:
             pnl_absoluto = datos_operacion['precio_entrada'] - datos_operacion['precio_salida']
         mensaje = f"""
 {emoji} <b>OPERACIÓN CERRADA - {datos_operacion['symbol']}</b>
-
 {color_emoji} <b>RESULTADO: {datos_operacion['resultado']}</b>
-
 📊 Tipo: {datos_operacion['tipo']}
 💰 Entrada: {datos_operacion['precio_entrada']:.8f}
 🎯 Salida: {datos_operacion['precio_salida']:.8f}
-
 💵 PnL Absoluto: {pnl_absoluto:.8f}
 📈 PnL %: {datos_operacion['pnl_percent']:.2f}%
 ⏰ Duración: {datos_operacion['duracion_minutos']:.1f} minutos
-
 📐 Ángulo Tendencia: {datos_operacion['angulo_tendencia']:.1f}°
 📊 Pearson: {datos_operacion['pearson']:.3f}
 🎯 R² Score: {datos_operacion['r2_score']:.3f}
@@ -485,7 +428,6 @@ class TradingBot:
 🕒 {datos_operacion['timestamp']}
         """
         return mensaje
-
     def obtener_datos_mercado(self, simbolo):
         debug_logger.debug(f"Obteniendo datos de mercado para {simbolo}")
         url = "https://api.binance.com/api/v3/klines"
@@ -495,12 +437,10 @@ class TradingBot:
             if respuesta.status_code != 200:
                 error_logger.error(f"Error en API Binance para {simbolo}: {respuesta.status_code}")
                 return None
-                
             datos = respuesta.json()
             if not isinstance(datos, list) or len(datos) == 0:
                 error_logger.error(f"Respuesta inválida de Binance para {simbolo}")
                 return None
-                
             maximos = []
             minimos = []
             cierres = []
@@ -510,7 +450,6 @@ class TradingBot:
                 minimos.append(float(vela[3]))
                 cierres.append(float(vela[4]))
                 tiempos.append(i)
-                
             self.ultimos_datos[simbolo] = {
                 'maximos': maximos,
                 'minimos': minimos,
@@ -523,18 +462,15 @@ class TradingBot:
         except Exception as e:
             error_logger.error(f"❌ Error obteniendo {simbolo}: {e}")
             return None
-
     def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
         """Calcula el indicador Stochástico"""
         debug_logger.debug("Calculando indicador Stochástico")
         if len(datos_mercado['cierres']) < period:
             logger.warning("Datos insuficientes para calcular Stochástico")
             return 50, 50
-            
         cierres = datos_mercado['cierres']
         maximos = datos_mercado['maximos']
         minimos = datos_mercado['minimos']
-        
         # Calcular %K
         k_values = []
         for i in range(period-1, len(cierres)):
@@ -545,24 +481,20 @@ class TradingBot:
             else:
                 k = 100 * (cierres[i] - lowest_low) / (highest_high - lowest_low)
             k_values.append(k)
-        
         # Calcular %K suavizado
         if len(k_values) >= k_period:
             k_smoothed = []
             for i in range(k_period-1, len(k_values)):
                 k_avg = sum(k_values[i-k_period+1:i+1]) / k_period
                 k_smoothed.append(k_avg)
-            
             # Calcular %D
             if len(k_smoothed) >= d_period:
                 d = sum(k_smoothed[-d_period:]) / d_period
                 k_final = k_smoothed[-1]
                 debug_logger.debug(f"Stochástico calculado: K={k_final:.2f}, D={d:.2f}")
                 return k_final, d
-        
         logger.warning("Error en cálculo de Stochástico, usando valores por defecto")
         return 50, 50
-
     def calcular_regresion_lineal(self, x, y):
         debug_logger.debug("Calculando regresión lineal")
         if len(x) != len(y) or len(x) == 0:
@@ -583,7 +515,6 @@ class TradingBot:
         intercepto = (sum_y - pendiente * sum_x) / n if n else 0
         debug_logger.debug(f"Regresión lineal: pendiente={pendiente:.6f}, intercepto={intercepto:.6f}")
         return pendiente, intercepto
-
     def calcular_pearson_y_angulo(self, x, y):
         debug_logger.debug("Calculando Pearson y ángulo")
         if len(x) != len(y) or len(x) < 2:
@@ -609,7 +540,6 @@ class TradingBot:
         angulo_grados = math.degrees(angulo_radianes)
         debug_logger.debug(f"Pearson={pearson:.4f}, ángulo={angulo_grados:.2f}°")
         return pearson, angulo_grados
-
     def clasificar_fuerza_tendencia(self, angulo_grados):
         angulo_abs = abs(angulo_grados)
         if angulo_abs < 3:
@@ -622,7 +552,6 @@ class TradingBot:
             return "💚 Fuerte", 4
         else:
             return "💙 Muy Fuerte", 5
-
     def determinar_direccion_tendencia(self, angulo_grados, umbral_minimo=1):
         if abs(angulo_grados) < umbral_minimo:
             return "⚪ RANGO"
@@ -630,7 +559,6 @@ class TradingBot:
             return "🟢 ALCISTA"
         else:
             return "🔴 BAJISTA"
-
     def calcular_canal_regresion(self, datos_mercado):
         debug_logger.debug("Calculando canal de regresión")
         if not datos_mercado or len(datos_mercado['maximos']) < self.config['candle_period']:
@@ -670,12 +598,9 @@ class TradingBot:
         pearson, angulo_tendencia = self.calcular_pearson_y_angulo(tiempos_reg, cierres)
         fuerza_texto, nivel_fuerza = self.clasificar_fuerza_tendencia(angulo_tendencia)
         direccion = self.determinar_direccion_tendencia(angulo_tendencia, 1)
-        
         rango_reciente = max(maximos[-5:]) - min(minimos[-5:]) if len(maximos) >= 5 else 0
-        
         # Calcular Stochástico
         stoch_k, stoch_d = self.calcular_stochastic(datos_mercado)
-        
         resultado = {
             'resistencia': resistencia_superior,
             'soporte': soporte_inferior,
@@ -703,10 +628,8 @@ class TradingBot:
             'stoch_k': stoch_k,
             'stoch_d': stoch_d
         }
-        
         debug_logger.debug(f"Canal calculado: dirección={direccion}, ángulo={angulo_tendencia:.2f}°, fuerza={fuerza_texto}")
         return resultado
-
     def calcular_r2(self, y_real, x, pendiente, intercepto):
         if len(y_real) != len(x):
             logger.warning("Longitudes diferentes en cálculo R²")
@@ -721,7 +644,6 @@ class TradingBot:
         r2 = 1 - (ss_res / ss_tot)
         debug_logger.debug(f"R² calculado: {r2:.4f}")
         return r2
-    
     def generar_grafico_profesional(self, simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion):
         debug_logger.debug(f"Generando gráfico para {simbolo}")
         try:
@@ -735,9 +657,7 @@ class TradingBot:
             if respuesta.status_code != 200:
                 error_logger.error(f"Error en API Binance para gráfico {simbolo}: {respuesta.status_code}")
                 return None
-                
             klines = respuesta.json()
-            
             df_data = []
             for kline in klines:
                 df_data.append({
@@ -748,16 +668,13 @@ class TradingBot:
                     'Close': float(kline[4]),
                     'Volume': float(kline[5])
                 })
-            
             df = pd.DataFrame(df_data)
             df.set_index('Date', inplace=True)
-            
             # Calcular líneas del canal de regresión
             tiempos_reg = list(range(len(df)))
             resistencia_values = []
             soporte_values = []
             media_values = []
-            
             for i, t in enumerate(tiempos_reg):
                 resist = info_canal['pendiente_resistencia'] * t + \
                         (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
@@ -765,35 +682,28 @@ class TradingBot:
                      (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
                 med = info_canal['pendiente_tendencia'] * t + \
                      (info_canal['linea_tendencia'] - info_canal['pendiente_tendencia'] * tiempos_reg[-1])
-                
                 resistencia_values.append(resist)
                 soporte_values.append(sop)
                 media_values.append(med)
-            
             df['Resistencia'] = resistencia_values
             df['Soporte'] = soporte_values
             df['Media'] = media_values
-            
             # Calcular Estocástico para el gráfico inferior
             period = 14
             k_period = 3
             d_period = 3
-            
             stoch_k_values = []
-            
             for i in range(len(df)):
                 if i < period - 1:
                     stoch_k_values.append(50)
                 else:
                     highest_high = df['High'].iloc[i-period+1:i+1].max()
                     lowest_low = df['Low'].iloc[i-period+1:i+1].min()
-                    
                     if highest_high == lowest_low:
                         k = 50
                     else:
                         k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
                     stoch_k_values.append(k)
-            
             # Suavizar %K
             k_smoothed = []
             for i in range(len(stoch_k_values)):
@@ -802,7 +712,6 @@ class TradingBot:
                 else:
                     k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
                     k_smoothed.append(k_avg)
-            
             # Calcular %D
             stoch_d_values = []
             for i in range(len(k_smoothed)):
@@ -811,50 +720,41 @@ class TradingBot:
                 else:
                     d = sum(k_smoothed[i-d_period+1:i+1]) / d_period
                     stoch_d_values.append(d)
-            
             df['Stoch_K'] = k_smoothed
             df['Stoch_D'] = stoch_d_values
-            
             # Preparar plots adicionales para el gráfico principal
             apds = [
                 mpf.make_addplot(df['Resistencia'], color='#5444ff', linestyle='--', 
                                width=2, label='Resistencia', panel=0),
                 mpf.make_addplot(df['Soporte'], color="#5444ff", linestyle='--', 
                                width=2, label='Soporte', panel=0),
-                
             ]
-            
             # Añadir líneas de entrada, TP y SL al gráfico principal
             if precio_entrada and tp and sl:
                 entry_line = [precio_entrada] * len(df)
                 tp_line = [tp] * len(df)
                 sl_line = [sl] * len(df)
-                
                 apds.append(mpf.make_addplot(entry_line, color='#FFD700', linestyle='-', 
                                            width=2, label='Entrada', panel=0))
                 apds.append(mpf.make_addplot(tp_line, color='#00FF00', linestyle='-', 
                                            width=2, label='TP', panel=0))
                 apds.append(mpf.make_addplot(sl_line, color='#FF0000', linestyle='-', 
                                            width=2, label='SL', panel=0))
-            
             # Añadir Estocástico al panel inferior
             apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, 
                                          label='%K', panel=1, ylabel='Estocástico'))
             apds.append(mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, 
                                          label='%D', panel=1))
-            
             # Líneas de sobrecompra y sobreventa en el estocástico
             overbought = [80] * len(df)
             oversold = [20] * len(df)
             middle = [50] * len(df)
-            
             apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', 
                                          width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', 
                                          width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot(middle, color="#E4E2E2", linestyle=':', 
                                          width=0.6, panel=1, alpha=0.3))
-            
             # Crear el gráfico con dos paneles
             fig, axes = mpf.plot(df, type='candle', style='nightclouds',
                                title=f'{simbolo} | {tipo_operacion} | Ángulo: {info_canal["angulo_tendencia"]:.1f}° | Stoch: {info_canal["stoch_k"]:.1f}/{info_canal["stoch_d"]:.1f}',
@@ -864,12 +764,10 @@ class TradingBot:
                                returnfig=True,
                                figsize=(14, 10),
                                panel_ratios=(3, 1))
-            
             # Ajustar límites del panel del estocástico
             axes[2].set_ylim([0, 100])
             axes[2].set_ylabel('Estocástico', fontsize=10)
             axes[2].grid(True, alpha=0.3)
-            
             # Añadir anotaciones de texto para los niveles
             if precio_entrada and tp and sl:
                 axes[0].text(len(df)-1, precio_entrada, f' Entrada: {precio_entrada:.8f}', 
@@ -881,18 +779,15 @@ class TradingBot:
                 axes[0].text(len(df)-1, sl, f' SL: {sl:.8f}', 
                             va='center', ha='left', color='#FF0000', fontsize=9,
                             bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
-            
             buf = BytesIO()
             plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
             buf.seek(0)
             plt.close(fig)
-            
             logger.info(f"Gráfico generado exitosamente para {simbolo}")
             return buf
         except Exception as e:
             error_logger.error(f"⚠️ Error generando gráfico {simbolo}: {e}")
             return None
-
     # CORRECCIÓN: Simplificar el envío de gráficos
     def enviar_grafico_telegram(self, buf, chat_id=None):
         """Envía gráfico usando solo requests"""
@@ -900,17 +795,14 @@ class TradingBot:
         if not buf or not self.telegram_token:
             logger.warning("Parámetros inválidos para enviar gráfico")
             return False
-        
         # Si se especifica un chat_id, enviar solo a ese chat
         if chat_id:
             chat_ids = [chat_id]
         else:
             chat_ids = self.telegram_chat_ids
-            
         if not chat_ids:
             logger.warning("No hay chat IDs configurados para Telegram")
             return False
-        
         exito = False
         for cid in chat_ids:
             url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
@@ -920,9 +812,7 @@ class TradingBot:
                     buf.seek(0)
                     files = {'photo': ('grafico.png', buf.read(), 'image/png')}
                     data = {'chat_id': cid}
-                    
                     r = requests.post(url, files=files, data=data, timeout=30)
-                    
                     if r.status_code == 200:
                         response_data = r.json()
                         if response_data.get('ok'):
@@ -933,24 +823,19 @@ class TradingBot:
                             error_logger.error(f"     ⚠️ Error API Telegram enviando gráfico a {cid}: {response_data.get('description', 'Error desconocido')}")
                     else:
                         error_logger.error(f"     ⚠️ Error HTTP enviando gráfico a {cid}: {r.status_code}")
-                        
                     if attempt < max_retries - 1:
                         time.sleep(1)
-                        
                 except Exception as e:
                     error_logger.error(f"     ❌ Excepción enviando gráfico a {cid} (intento {attempt + 1}): {e}")
                     if attempt < max_retries - 1:
                         time.sleep(1)
-                
         return exito
-
     def detectar_touch_canal(self, simbolo, info_canal, datos_mercado):
         """Detecta si el precio está TOCANDO el canal (no solo acercándose)"""
         debug_logger.debug(f"Detectando toque de canal para {simbolo}")
         if not info_canal:
             logger.warning(f"No hay información de canal para {simbolo}")
             return None
-        
         precio_actual = datos_mercado['precio_actual']
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
@@ -963,25 +848,20 @@ class TradingBot:
         stoch_k = info_canal['stoch_k']
         stoch_d = info_canal['stoch_d']
         precio_medio = (resistencia + soporte) / 2
-        
         # Verificar si el canal es válido
         if ancho_canal / precio_medio < self.config['min_channel_width']:
             debug_logger.debug(f"Canal demasiado estrecho para {simbolo}: {ancho_canal/precio_medio:.6f}")
             return None
-        
         # Verificar fuerza mínima de tendencia
         if abs(angulo) < self.config['min_trend_strength_degrees']:
             debug_logger.debug(f"Tendencia demasiado débil para {simbolo}: {abs(angulo):.2f}°")
             return None
-        
         # Verificar calidad del canal
         if abs(pearson) < 0.4 or r2 < 0.4:
             debug_logger.debug(f"Canal de baja calidad para {simbolo}: pearson={abs(pearson):.3f}, r2={r2:.3f}")
             return None
-        
         # Calcular tolerancia para "tocar" el canal (muy pequeña)
         tolerancia = 0.0005 * precio_medio  # 0.05% de tolerancia
-        
         # Detectar TOQUE en SOPORTE con Stochástico OVERSOLD para LONG
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
             distancia_soporte = abs(precio_actual - soporte)
@@ -990,7 +870,6 @@ class TradingBot:
                 if stoch_k <= 25 and stoch_d <= 30:
                     logger.info(f"Señal LONG detectada para {simbolo}: toque en soporte con Stochástico oversold")
                     return "LONG"
-        
         # Detectar TOQUE en RESISTENCIA con Stochástico OVERBOUGHT para SHORT
         elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
             distancia_resistencia = abs(precio_actual - resistencia)
@@ -999,33 +878,26 @@ class TradingBot:
                 if stoch_k >= 75 and stoch_d >= 70:
                     logger.info(f"Señal SHORT detectada para {simbolo}: toque en resistencia con Stochástico overbought")
                     return "SHORT"
-                    
         return None
-
     def generar_mensaje_senal(self, simbolo, tipo_operacion, info_canal, precio_entrada, tp, sl):
         emoji = "🟢" if tipo_operacion == "LONG" else "🔴"
         direccion = "ALCISTA" if tipo_operacion == "LONG" else "BAJISTA"
         rr_ratio = abs(tp - precio_entrada) / abs(sl - precio_entrada) if sl != precio_entrada else 0
-        
         mensaje = f"""
 {emoji} <b>SEÑAL DE TRADING DETECTADA</b>
-
 📊 <b>{simbolo}</b> - {direccion}
 💰 <b>Precio Entrada:</b> {precio_entrada:.8f}
 🎯 <b>Take Profit:</b> {tp:.8f}
 🛑 <b>Stop Loss:</b> {sl:.8f}
-
 📈 <b>Riesgo/Beneficio:</b> 1:{rr_ratio:.2f}
 📐 <b>Ángulo Tendencia:</b> {info_canal['angulo_tendencia']:.1f}°
 💪 <b>Fuerza:</b> {info_canal['fuerza_texto']}
 📊 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
 🎯 <b>R²:</b> {info_canal['r2_score']:.3f}
 📊 <b>Stoch K/D:</b> {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f}
-
 🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
         """
         return mensaje
-
     ### NUEVO ###
     def escanear_y_enviar_senales(self):
         """Función principal que escanea todos los símbolos y envía señales si se detectan."""
@@ -1033,42 +905,36 @@ class TradingBot:
         for simbolo in self.config['symbols']:
             if simbolo in self.operaciones_activas or simbolo in self.senales_enviadas:
                 continue
-            
             datos_mercado = self.obtener_datos_mercado(simbolo)
             if not datos_mercado:
                 continue
-            
             info_canal = self.calcular_canal_regresion(datos_mercado)
             if not info_canal:
                 continue
-            
             tipo_operacion = self.detectar_touch_canal(simbolo, info_canal, datos_mercado)
             if tipo_operacion:
+                # ¡CORRECCIÓN! Añadir este log para confirmar la detección de señal
+                logger.info(f"✅ SEÑAL DETECTADA: {simbolo} - {tipo_operacion}")
                 precio_entrada = datos_mercado['precio_actual']
                 ancho_canal = info_canal['ancho_canal']
-                
                 if tipo_operacion == "LONG":
                     tp = precio_entrada + (ancho_canal * self.config['min_rr_ratio'])
                     sl = precio_entrada - (ancho_canal * self.config['entry_margin'])
                 else: # SHORT
                     tp = precio_entrada - (ancho_canal * self.config['min_rr_ratio'])
                     sl = precio_entrada + (ancho_canal * self.config['entry_margin'])
-                
                 # Validar R/R ratio
                 rr_ratio = abs(tp - precio_entrada) / abs(sl - precio_entrada)
                 if rr_ratio < self.config['min_rr_ratio']:
                     logger.info(f"Señal para {simbolo} descartada: R/R ratio ({rr_ratio:.2f}) inferior al mínimo ({self.config['min_rr_ratio']})")
                     continue
-                
                 # Enviar señal
                 mensaje = self.generar_mensaje_senal(simbolo, tipo_operacion, info_canal, precio_entrada, tp, sl)
                 self.enviar_telegram(mensaje)
-                
                 # Generar y enviar gráfico
                 buf = self.generar_grafico_profesional(simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion)
                 if buf:
                     self.enviar_grafico_telegram(buf)
-                
                 # Registrar operación activa
                 self.operaciones_activas[simbolo] = {
                     'tipo': tipo_operacion,
@@ -1087,21 +953,15 @@ class TradingBot:
                 }
                 self.senales_enviadas.add(simbolo)
                 logger.info(f"✅ Señal enviada para {simbolo} y operación activa registrada.")
-        
         logger.info("🏁 Escaneo del mercado finalizado.")
-
-
 # ---------------------------
 # APLICACIÓN FLASK Y CONFIGURACIÓN
 # ---------------------------
-
 app = Flask(__name__)
-
 ### CAMBIO ###
 # Instanciamos el bot de trading una sola vez a nivel global
 # Esto asegura que el estado del bot (operaciones activas, etc.) se mantenga entre peticiones
 bot = TradingBot(auto_optimize=True)
-
 ### NUEVO ###
 # Función que se ejecutará en un hilo separado para no bloquear el servidor web
 def run_bot_loop():
@@ -1110,32 +970,25 @@ def run_bot_loop():
         try:
             # 1. Verificar si alguna operación activa debe cerrarse
             bot.verificar_cierre_operaciones()
-            
             # 2. Escanear el mercado en busca de nuevas señales
             bot.escanear_y_enviar_senales()
-            
             # 3. Esperar el intervalo configurado antes del siguiente escaneo
             time.sleep(bot.config['scan_interval_minutes'] * 60)
-            
         except Exception as e:
             error_logger.error(f"Ocurrió un error en el hilo principal del bot: {e}")
             # En caso de error, esperar un minuto antes de reintentar para evitar bucles de error rápidos
             time.sleep(60)
-
 ### NUEVO ###
 # Iniciar el hilo del bot cuando la aplicación se carga
 # daemon=True asegura que el hilo se cerrará cuando la aplicación principal se detenga
 bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
 bot_thread.start()
 logger.info("✅ Hilo del bot iniciado en segundo plano.")
-
-
 ### CAMBIO ###
 # Ruta principal para health checks (usada por Render)
 @app.route('/')
 def index():
     return "Bot de Trading está en línea y operativo.", 200
-
 ### NUEVO ###
 # Ruta del webhook para recibir actualizaciones de Telegram
 @app.route('/webhook', methods=['POST'])
@@ -1143,18 +996,15 @@ def telegram_webhook():
     if request.is_json:
         update = request.get_json()
         logger.info(f"✅ Update recibido de Telegram: {json.dumps(update, indent=2)}")
-        
         # Procesar el mensaje
         if 'message' in update:
             message = update['message']
             chat_id = message['chat']['id']
             text = message.get('text', '')
-            
             # CORRECCIÓN: Guardar el chat_id correcto si no está configurado
             if not bot.telegram_chat_ids or str(chat_id) not in [str(cid) for cid in bot.telegram_chat_ids]:
                 logger.warning(f"Chat ID {chat_id} no está en la lista configurada. Usando este chat_id.")
                 bot.telegram_chat_ids = [str(chat_id)]
-            
             # Responder a comandos básicos
             if text == '/start':
                 respuesta = "¡Hola! Soy el bot de trading. Estoy funcionando correctamente. Usa /help para ver los comandos disponibles."
@@ -1163,13 +1013,11 @@ def telegram_webhook():
                 operaciones_activas = len(bot.operaciones_activas)
                 ultimo_escaneo = datetime.now().strftime('%H:%M:%S')
                 respuesta = f"""<b>🤖 ESTADO DEL BOT</b>
-
 ✅ <b>Bot funcionando correctamente</b>
 📊 <b>Operaciones activas:</b> {operaciones_activas}
 🔍 <b>Símbolos escaneados:</b> {len(bot.config['symbols'])}
 ⏰ <b>Último escaneo:</b> {ultimo_escaneo}
 💬 <b>Tu Chat ID:</b> {chat_id}
-
 📈 <b>Últimas operaciones:</b>
 """
                 # Agregar información de las últimas 5 operaciones si existen
@@ -1187,38 +1035,32 @@ def telegram_webhook():
                                         resultado = parts[7]
                                         pnl = parts[8]
                                         timestamp = parts[0]
-                                        respuesta += f"\n• {symbol} {tipo} - {resultado} ({pnl}%)"
+                                        respuesta += f"
+• {symbol} {tipo} - {resultado} ({pnl}%)"
                 except Exception as e:
                     error_logger.error(f"Error leyendo log de operaciones: {e}")
-                
                 bot.enviar_telegram(respuesta, chat_id)
             elif text == '/help':
                 respuesta = """<b>📚 COMANDOS DISPONIBLES</b>
-
 /start - Inicia el bot y muestra mensaje de bienvenida
 /status - Muestra el estado actual del bot y operaciones activas
 /help - Muestra esta ayuda
-
 📊 <b>Funciones automáticas:</b>
 • Escaneo continuo del mercado cada minuto
 • Detección de señales de trading
 • Gestión automática de operaciones activas
 • Optimización automática de parámetros
-
 💡 <b>Nota:</b> El bot opera automáticamente 24/7. Los comandos son solo para consultar el estado."""
                 bot.enviar_telegram(respuesta, chat_id)
             else:
                 # Responder a otros mensajes
                 respuesta = f"""❓ No entendí el comando: <code>{text}</code>
-
 Usa <code>/help</code> para ver los comandos disponibles."""
                 bot.enviar_telegram(respuesta, chat_id)
-        
         return jsonify({"status": "ok"}), 200
     else:
         logger.warning("⚠️ Petición recibida en /webhook no es JSON.")
         return jsonify({"error": "Request must be JSON"}), 400
-
 ### NUEVO ###
 # Función para configurar el webhook de Telegram
 def setup_telegram_webhook():
@@ -1226,7 +1068,6 @@ def setup_telegram_webhook():
     if not bot.telegram_token:
         logger.error("❌ No se puede configurar el webhook: no hay token de Telegram")
         return False
-    
     # Obtener la URL del webhook
     webhook_url = os.environ.get('WEBHOOK_URL')
     if not webhook_url:
@@ -1238,19 +1079,15 @@ def setup_telegram_webhook():
         else:
             logger.error("❌ No se puede configurar el webhook: no hay URL de webhook configurada")
             return False
-    
     logger.info(f"🔧 Configurando webhook de Telegram en: {webhook_url}")
-    
     try:
         # Eliminar webhook existente si hay uno
         delete_url = f"https://api.telegram.org/bot{bot.telegram_token}/deleteWebhook"
         requests.get(delete_url, timeout=10)
-        
         # Configurar nuevo webhook
         set_url = f"https://api.telegram.org/bot{bot.telegram_token}/setWebhook"
         params = {'url': webhook_url}
         response = requests.get(set_url, params=params, timeout=10)
-        
         if response.status_code == 200:
             result = response.json()
             if result.get('ok'):
@@ -1265,11 +1102,9 @@ def setup_telegram_webhook():
     except Exception as e:
         error_logger.error(f"❌ Excepción configurando webhook: {e}")
         return False
-
 # Este bloque es para desarrollo local y será ignorado por Gunicorn en Render
 if __name__ == '__main__':
     # Configurar el webhook antes de iniciar el servidor
     setup_telegram_webhook()
-    
     # Iniciar el servidor Flask
     app.run(port=5000, debug=True)
