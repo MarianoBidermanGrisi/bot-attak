@@ -213,8 +213,8 @@ class TradingBot:
             'entry_margin': 0.01,
             'min_rr_ratio': 1.5,
             'scan_interval_minutes': 1,
-            'min_trend_strength_degrees': 15,
-            'min_channel_width': 1.0,
+            'min_trend_strength_degrees': 0.4,
+            'min_channel_width': 0.001,
             'symbols': [
                 'BTCUSDT','ETHUSDT','ADAUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','MATICUSDT','AVAXUSDT',
                 'DOGEUSDT','LTCUSDT','ATOMUSDT','UNIUSDT','XLMUSDT','ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT','ETCUSDT',
