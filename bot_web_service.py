@@ -22,7 +22,7 @@ import logging
 from telegram import Bot, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import httpx
+import asyncio  # ¡Importante! Agregar esta importación
 
 # Configurar logging para que se muestre en stdout/stderr
 # Esto es crucial para que los logs aparezcan en Application Logs
@@ -182,26 +182,18 @@ class TradingBot:
         # Obtener configuración de variables de entorno
         self.telegram_token = os.environ.get('TELEGRAM_TOKEN')
         # CORRECCIÓN: Usar el chat_id correcto según los logs
-        # El chat_id correcto es 1570204748 (no 1572024748)
         telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '1570204748')  # Valor por defecto corregido
         self.telegram_chat_ids = [chat_id.strip() for chat_id in telegram_chat_ids_str.split(',') if chat_id.strip()]
         
         logger.info(f"Token Telegram configurado: {'Sí' if self.telegram_token else 'No'}")
         logger.info(f"Chat IDs configurados: {self.telegram_chat_ids}")
         
-        # Inicializar bot de Telegram con configuración mejorada
+        # Inicializar bot de Telegram de forma simplificada
         self.telegram_bot = None
         if self.telegram_token:
             try:
-                # Crear bot con configuración de conexión mejorada
-                self.telegram_bot = Bot(
-                    token=self.telegram_token,
-                    base_url="https://api.telegram.org",
-                    request=httpx.AsyncClient(
-                        timeout=10.0,
-                        limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
-                    )
-                )
+                # CORRECCIÓN: Inicialización simplificada sin httpx personalizado
+                self.telegram_bot = Bot(token=self.telegram_token)
                 logger.info("Bot de Telegram inicializado correctamente")
             except Exception as e:
                 error_logger.error(f"Error inicializando bot de Telegram: {e}")
@@ -379,10 +371,7 @@ class TradingBot:
         # Intentar usar python-telegram-bot primero
         if self.telegram_bot:
             try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
+                # CORRECCIÓN: Usar asyncio.run() en lugar de crear loop manualmente
                 async def enviar_a_todos():
                     resultados = []
                     for cid in chat_ids:
@@ -390,8 +379,7 @@ class TradingBot:
                         resultados.append(resultado)
                     return any(resultados)
                 
-                resultado = loop.run_until_complete(enviar_a_todos())
-                loop.close()
+                resultado = asyncio.run(enviar_a_todos())
                 if resultado:
                     logger.info("Mensaje enviado con python-telegram-bot")
                     return True
@@ -1013,10 +1001,7 @@ class TradingBot:
         # Intentar usar python-telegram-bot primero
         if self.telegram_bot:
             try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
+                # CORRECCIÓN: Usar asyncio.run() en lugar de crear loop manualmente
                 async def enviar_a_todos():
                     resultados = []
                     for chat_id in self.telegram_chat_ids:
@@ -1024,8 +1009,7 @@ class TradingBot:
                         resultados.append(resultado)
                     return any(resultados)
                 
-                resultado = loop.run_until_complete(enviar_a_todos())
-                loop.close()
+                resultado = asyncio.run(enviar_a_todos())
                 if resultado:
                     logger.info("Gráfico enviado con python-telegram-bot")
                     return True
