@@ -1027,6 +1027,7 @@ def telegram_webhook():
                             lines = f.readlines()
                             if len(lines) > 1:  # Hay más que solo el encabezado
                                 # Obtener las últimas 5 operaciones (inverso)
+                                                                # Obtener las últimas 5 operaciones (inverso)
                                 for line in reversed(lines[-6:-1]):  # Excluir encabezado
                                     parts = line.strip().split(',')
                                     if len(parts) >= 9:
@@ -1035,8 +1036,7 @@ def telegram_webhook():
                                         resultado = parts[7]
                                         pnl = parts[8]
                                         timestamp = parts[0]
-                                        respuesta += (f"
-• {symbol} {tipo} - {resultado} ({pnl}%)")
+                                        respuesta += f"• {symbol} {tipo} - {resultado} ({pnl}%)"
                 except Exception as e:
                     error_logger.error(f"Error leyendo log de operaciones: {e}")
                 bot.enviar_telegram(respuesta, chat_id)
