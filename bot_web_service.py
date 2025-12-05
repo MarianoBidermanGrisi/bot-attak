@@ -575,6 +575,11 @@ class TradingBot:
                                figsize=(14, 10),
                                panel_ratios=(3, 1, 1) if 'xKVO' in df.columns else (3, 1))
             
+            # --- MENSAJE DE DEPURACIÓN ---
+            print(f"ℹ️ Número de paneles generados en breakout: {len(axes)}")
+            for i, ax in enumerate(axes):
+                print(f"   Panel {i}: {ax.get_ylabel()}")
+
             # --- CORRECCIÓN DE ESCALA ---
             if 'xKVO' in df.columns:
                 # Panel 1: Stochastic → índice 1
@@ -990,6 +995,11 @@ class TradingBot:
                                figsize=(14, 10),
                                panel_ratios=panel_ratios)
             
+            # --- MENSAJE DE DEPURACIÓN ---
+            print(f"ℹ️ Número de paneles generados en profesional: {len(axes)}")
+            for i, ax in enumerate(axes):
+                print(f"   Panel {i}: {ax.get_ylabel()}")
+
             # --- CORRECCIÓN DE ESCALA ---
             if extra_panels:
                 # Panel 1: Stochastic → índice 1
