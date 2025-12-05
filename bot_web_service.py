@@ -1,5 +1,6 @@
 # bot_web_service.py
 # Adaptación para Render del bot Breakout + Reentry
+# ✅ INCLUYE KVO: Klinger Volume Oscillator como filtro de entrada y panel gráfico
 import requests
 import time
 import json
@@ -28,32 +29,8 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------
 # [INICIO DEL CÓDIGO DEL BOT NUEVO]
-# Copiado íntegro de Pasted_Text_1763228298547.txt y corregido para Render
 # ---------------------------
 
-# bot_breakout_reentry.py
-# VERSIÓN COMPLETA con estrategia Breakout + Reentry
-import requests
-import time
-import json
-import os
-from datetime import datetime, timedelta
-import numpy as np
-import math
-import csv
-import itertools
-import statistics
-import random
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-import pandas as pd
-from io import BytesIO
-
-# ---------------------------
-# Optimizador IA
-# ---------------------------
 class OptimizadorIA:
     def __init__(self, log_path="operaciones_log.csv", min_samples=15):
         self.log_path = log_path
@@ -148,9 +125,7 @@ class OptimizadorIA:
             print("⚠ No se encontró una configuración mejor")
         return mejores_param
 
-# ---------------------------
-# BOT PRINCIPAL - BREAKOUT + REENTRY
-# ---------------------------
+
 class TradingBot:
     def __init__(self, config):
         self.config = config
@@ -262,6 +237,43 @@ class TradingBot:
             print("💾 Estado guardado correctamente")
         except Exception as e:
             print(f"⚠ Error guardando estado: {e}")
+
+    def calcular_kvo(self, df, fast=34, slow=55, trig=13):
+        """Calcula Klinger Volume Oscillator (KVO) y su Trigger"""
+        df = df.copy()
+        df['hlc3'] = (df['High'] + df['Low'] + df['Close']) / 3
+        df['xTrend'] = np.where(df['hlc3'] > df['hlc3'].shift(1), df['Volume'] * 100, -df['Volume'] * 100)
+        df['xFast'] = df['xTrend'].ewm(span=fast, adjust=False).mean()
+        df['xSlow'] = df['xTrend'].ewm(span=slow, adjust=False).mean()
+        df['xKVO'] = df['xFast'] - df['xSlow']
+        df['xTrigger'] = df['xKVO'].ewm(span=trig, adjust=False).mean()
+        return df
+
+    def obtener_dataframe_completo(self, simbolo, timeframe, num_velas):
+        """Obtiene un DataFrame con OHLCV para cálculos avanzados (KVO, etc.)"""
+        url = "https://api.binance.com/api/v3/klines"
+        params = {'symbol': simbolo, 'interval': timeframe, 'limit': num_velas}
+        try:
+            respuesta = requests.get(url, params=params, timeout=10)
+            klines = respuesta.json()
+            if not isinstance(klines, list) or len(klines) == 0:
+                return None
+            df_data = []
+            for k in klines:
+                df_data.append({
+                    'Date': pd.to_datetime(k[0], unit='ms'),
+                    'Open': float(k[1]),
+                    'High': float(k[2]),
+                    'Low': float(k[3]),
+                    'Close': float(k[4]),
+                    'Volume': float(k[5])
+                })
+            df = pd.DataFrame(df_data)
+            df.set_index('Date', inplace=True)
+            return df
+        except Exception as e:
+            print(f"⚠️ Error obteniendo df para KVO ({simbolo}): {e}")
+            return None
 
     def buscar_configuracion_optima_simbolo(self, simbolo):
         """Busca la mejor combinación de velas/timeframe"""
@@ -425,32 +437,26 @@ class TradingBot:
     def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
         """
         Envía alerta de BREAKOUT detectado a Telegram con gráfico
-        LÓGICA CORREGIDA:
-        - BREAKOUT_LONG → Ruptura de resistencia en canal BAJISTA (oportunidad de reversión alcista)
-        - BREAKOUT_SHORT → Ruptura de soporte en canal ALCISTA (oportunidad de reversión bajista)
         """
         precio_cierre = datos_mercado['cierres'][-1]
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
         direccion_canal = info_canal['direccion']
-        # Determinar tipo de ruptura CORREGIDO SEGÚN TU ESTRATEGIA
         if tipo_breakout == "BREAKOUT_LONG":
-            # Para un LONG, nos interesa la ruptura del SOPORTE hacia arriba
             emoji_principal = "🚀"
             tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
             direccion_emoji = "⬇️"
             contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
             expectativa = "posible entrada en long si el precio reingresa al canal"
-        else:  # BREAKOUT_SHORT
-            # Para un SHORT, nos interesa la ruptura de la RESISTENCIA hacia abajo
+        else:
             emoji_principal = "📉"
             tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
             contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
             expectativa = "posible entrada en sort si el precio reingresa al canal"
-        # Mensaje de alerta
+
         mensaje = f"""
 {emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
 ⚠️ <b>{tipo_texto}</b> {direccion_emoji}
@@ -480,10 +486,6 @@ class TradingBot:
             print(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
 
     def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
-        """
-        Genera gráfico especial para el momento del BREAKOUT
-        Marca visualmente la ruptura del canal
-        """
         try:
             import matplotlib.font_manager as fm
             plt.rcParams['font.family'] = ['DejaVu Sans', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji']
@@ -507,7 +509,6 @@ class TradingBot:
                 })
             df = pd.DataFrame(df_data)
             df.set_index('Date', inplace=True)
-            # Calcular líneas del canal
             tiempos_reg = list(range(len(df)))
             resistencia_values = []
             soporte_values = []
@@ -520,6 +521,7 @@ class TradingBot:
                 soporte_values.append(sop)
             df['Resistencia'] = resistencia_values
             df['Soporte'] = soporte_values
+
             # Calcular Stochastic
             period = 14
             k_period = 3
@@ -552,21 +554,28 @@ class TradingBot:
                     stoch_d_values.append(d)
             df['Stoch_K'] = k_smoothed
             df['Stoch_D'] = stoch_d_values
-            # Preparar plots
+
+            # Calcular KVO
+            df_kvo = self.calcular_kvo(df)
+            if df_kvo is not None:
+                df['xKVO'] = df_kvo['xKVO']
+                df['xTrigger'] = df_kvo['xTrigger']
+
             apds = [
                 mpf.make_addplot(df['Resistencia'], color='#5444ff', linestyle='--', width=2, panel=0),
                 mpf.make_addplot(df['Soporte'], color="#5444ff", linestyle='--', width=2, panel=0),
             ]
-            # MARCAR ZONA DE BREAKOUT con línea gruesa
+
             precio_breakout = datos_mercado['precio_actual']
             breakout_line = [precio_breakout] * len(df)
             if tipo_breakout == "BREAKOUT_LONG":
-                color_breakout = "#D68F01"  # Verde para alcista
+                color_breakout = "#D68F01"
                 titulo_extra = "🚀 RUPTURA ALCISTA"
             else:
-                color_breakout = '#D68F01'  # Rojo para bajista
+                color_breakout = '#D68F01'
                 titulo_extra = "📉 RUPTURA BAJISTA"
             apds.append(mpf.make_addplot(breakout_line, color=color_breakout, linestyle='-', width=3, panel=0, alpha=0.8))
+
             # Stochastic
             apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
             apds.append(mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1))
@@ -574,7 +583,14 @@ class TradingBot:
             oversold = [20] * len(df)
             apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            # Crear gráfico
+
+            # KVO
+            if 'xKVO' in df.columns:
+                apds.append(mpf.make_addplot(df['xKVO'], color='purple', width=1.2, panel=2, ylabel='KVO'))
+                apds.append(mpf.make_addplot(df['xTrigger'], color='orange', width=1, panel=2))
+                cero_line = [0] * len(df)
+                apds.append(mpf.make_addplot(cero_line, color='white', linestyle='--', width=0.8, panel=2))
+
             fig, axes = mpf.plot(df, type='candle', style='nightclouds',
                                title=f'{simbolo} | {titulo_extra} | {config_optima["timeframe"]} | ⏳ ESPERANDO REENTRY',
                                ylabel='Precio',
@@ -582,9 +598,16 @@ class TradingBot:
                                volume=False,
                                returnfig=True,
                                figsize=(14, 10),
-                               panel_ratios=(3, 1))
-            axes[2].set_ylim([0, 100])
-            axes[2].grid(True, alpha=0.3)
+                               panel_ratios=(3, 1, 1) if 'xKVO' in df.columns else (3, 1))
+            if 'xKVO' in df.columns:
+                axes[2].set_ylim([df['xKVO'].min() - 0.1, df['xKVO'].max() + 0.1])
+                axes[2].grid(True, alpha=0.3)
+                axes[3].set_ylim([0, 100])
+                axes[3].grid(True, alpha=0.3)
+            else:
+                axes[2].set_ylim([0, 100])
+                axes[2].grid(True, alpha=0.3)
+
             buf = BytesIO()
             plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
             buf.seek(0)
@@ -612,26 +635,22 @@ class TradingBot:
             return None
         if abs(pearson) < 0.4 or r2 < 0.4:
             return None
-        # NUEVO: Verificar si ya hubo un breakout reciente (menos de 25 minutos)
         if simbolo in self.breakouts_detectados:
             ultimo_breakout = self.breakouts_detectados[simbolo]
             tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
             if tiempo_desde_ultimo < 115:
                 print(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
                 return None
-        margen_breakout =  precio_cierre
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
             if precio_cierre < soporte:
-                print(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
                 return "BREAKOUT_LONG"
         elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
             if precio_cierre > resistencia:
-                print(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
                 return "BREAKOUT_SHORT"
         return None
 
     def detectar_reentry(self, simbolo, info_canal, datos_mercado):
-        """Detecta si el precio ha REINGRESADO al canal"""
+        """Detecta si el precio ha REINGRESADO al canal (+ Stoch + KVO)"""
         if simbolo not in self.esperando_reentry:
             return None
         breakout_info = self.esperando_reentry[simbolo]
@@ -639,33 +658,49 @@ class TradingBot:
         timestamp_breakout = breakout_info['timestamp']
         tiempo_desde_breakout = (datetime.now() - timestamp_breakout).total_seconds() / 60
         if tiempo_desde_breakout > 120:
-            print(f"     ⏰ {simbolo} - Timeout de reentry (>30 min), cancelando espera")
+            print(f"     ⏰ {simbolo} - Timeout de reentry (>120 min), cancelando espera")
             del self.esperando_reentry[simbolo]
-            # NUEVO: Limpiar también de breakouts_detectados cuando expira el reentry
             if simbolo in self.breakouts_detectados:
                 del self.breakouts_detectados[simbolo]
             return None
+
         precio_actual = datos_mercado['precio_actual']
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
         stoch_k = info_canal['stoch_k']
         stoch_d = info_canal['stoch_d']
         tolerancia = 0.001 * precio_actual
+
+        # Cargar datos para KVO
+        config_optima = breakout_info['config']
+        df_klines = self.obtener_dataframe_completo(simbolo, config_optima['timeframe'], config_optima['num_velas'])
+        if df_klines is None or len(df_klines) < 2:
+            return None
+        df_kvo = self.calcular_kvo(df_klines)
+        if df_kvo is None or 'xKVO' not in df_kvo.columns:
+            return None
+        kvo_prev = df_kvo['xKVO'].iloc[-2]
+        trigger_prev = df_kvo['xTrigger'].iloc[-2]
+        kvo_actual = df_kvo['xKVO'].iloc[-1]
+        trigger_actual = df_kvo['xTrigger'].iloc[-1]
+
         if tipo_breakout == "BREAKOUT_LONG":
             if soporte <= precio_actual <= resistencia:
                 distancia_soporte = abs(precio_actual - soporte)
-                if distancia_soporte <= tolerancia and stoch_k <= 30 and stoch_d <= 30:
-                    print(f"     ✅ {simbolo} - REENTRY LONG confirmado! Entrada en soporte con Stoch oversold")
-                    # NUEVO: Limpiar breakouts_detectados cuando se confirma reentry
+                if (distancia_soporte <= tolerancia and
+                    stoch_k <= 30 and stoch_d <= 30 and
+                    kvo_prev <= trigger_prev and kvo_actual > trigger_actual):
+                    print(f"     ✅ {simbolo} - REENTRY LONG confirmado (Stoch + KVO ↑)")
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
                     return "LONG"
         elif tipo_breakout == "BREAKOUT_SHORT":
             if soporte <= precio_actual <= resistencia:
                 distancia_resistencia = abs(precio_actual - resistencia)
-                if distancia_resistencia <= tolerancia and stoch_k >= 70 and stoch_d >= 70:
-                    print(f"     ✅ {simbolo} - REENTRY SHORT confirmado! Entrada en resistencia con Stoch overbought")
-                    # NUEVO: Limpiar breakouts_detectados cuando se confirma reentry
+                if (distancia_resistencia <= tolerancia and
+                    stoch_k >= 70 and stoch_d >= 70 and
+                    kvo_prev >= trigger_prev and kvo_actual < trigger_actual):
+                    print(f"     ✅ {simbolo} - REENTRY SHORT confirmado (Stoch + KVO ↓)")
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
                     return "SHORT"
@@ -697,7 +732,6 @@ class TradingBot:
         return precio_entrada, take_profit, stop_loss
 
     def escanear_mercado(self):
-        """Escanea el mercado con estrategia Breakout + Reentry"""
         print(f"\n🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
         senales_encontradas = 0
         for simbolo in self.config.get('symbols', []):
@@ -719,32 +753,25 @@ class TradingBot:
                 if not info_canal:
                     print(f"   ❌ {simbolo} - Error calculando canal")
                     continue
-                estado_stoch = ""
-                if info_canal['stoch_k'] <= 30:
-                    estado_stoch = "📉 OVERSOLD"
-                elif info_canal['stoch_k'] >= 70:
-                    estado_stoch = "📈 OVERBOUGHT"
-                else:
-                    estado_stoch = "➖ NEUTRO"
+
+                estado_stoch = "📉 OVERSOLD" if info_canal['stoch_k'] <= 30 else "📈 OVERBOUGHT" if info_canal['stoch_k'] >= 70 else "➖ NEUTRO"
                 precio_actual = datos_mercado['precio_actual']
                 resistencia = info_canal['resistencia']
                 soporte = info_canal['soporte']
-                if precio_actual > resistencia:
-                    posicion = "🔼 FUERA (arriba)"
-                elif precio_actual < soporte:
-                    posicion = "🔽 FUERA (abajo)"
-                else:
-                    posicion = "📍 DENTRO"
+                posicion = "🔼 FUERA (arriba)" if precio_actual > resistencia else "🔽 FUERA (abajo)" if precio_actual < soporte else "📍 DENTRO"
+
                 print(
     f"📊 {simbolo} - {config_optima['timeframe']} - {config_optima['num_velas']}v | "
     f"{info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) | "
     f"Ancho: {info_canal['ancho_canal_porcentual']:.1f}% - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch} | "
     f"Precio: {posicion}"
                 )
+
                 if (info_canal['nivel_fuerza'] < 2 or 
                     abs(info_canal['coeficiente_pearson']) < 0.4 or 
                     info_canal['r2_score'] < 0.4):
                     continue
+
                 if simbolo not in self.esperando_reentry:
                     tipo_breakout = self.detectar_breakout(simbolo, info_canal, datos_mercado)
                     if tipo_breakout:
@@ -754,30 +781,30 @@ class TradingBot:
                             'precio_breakout': precio_actual,
                             'config': config_optima
                         }
-                        # NUEVO: Registrar el breakout detectado para evitar repeticiones
                         self.breakouts_detectados[simbolo] = {
                             'tipo': tipo_breakout,
                             'timestamp': datetime.now(),
                             'precio_breakout': precio_actual
                         }
                         print(f"     🎯 {simbolo} - Breakout registrado, esperando reingreso...")
-                        # NUEVO: Enviar alerta de breakout a Telegram
                         self.enviar_alerta_breakout(simbolo, tipo_breakout, info_canal, datos_mercado, config_optima)
                         continue
+
                 tipo_operacion = self.detectar_reentry(simbolo, info_canal, datos_mercado)
                 if not tipo_operacion:
                     continue
-                precio_entrada, tp, sl = self.calcular_niveles_entrada(
-                    tipo_operacion, info_canal, datos_mercado['precio_actual']
-                )
+
+                precio_entrada, tp, sl = self.calcular_niveles_entrada(tipo_operacion, info_canal, datos_mercado['precio_actual'])
                 if not precio_entrada or not tp or not sl:
                     continue
+
                 if simbolo in self.breakout_history:
                     ultimo_breakout = self.breakout_history[simbolo]
                     tiempo_desde_ultimo = (datetime.now() - ultimo_breakout).total_seconds() / 3600
                     if tiempo_desde_ultimo < 2:
                         print(f"   ⏳ {simbolo} - Señal reciente, omitiendo...")
                         continue
+
                 breakout_info = self.esperando_reentry[simbolo]
                 self.generar_senal_operacion(
                     simbolo, tipo_operacion, precio_entrada, tp, sl, 
@@ -789,12 +816,12 @@ class TradingBot:
             except Exception as e:
                 print(f"⚠️ Error analizando {simbolo}: {e}")
                 continue
+
         if self.esperando_reentry:
             print(f"\n⏳ Esperando reingreso en {len(self.esperando_reentry)} símbolos:")
             for simbolo, info in self.esperando_reentry.items():
                 tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
                 print(f"   • {simbolo} - {info['tipo']} - Esperando {tiempo_espera:.1f} min")
-        # NUEVO: Mostrar breakouts detectados recientemente
         if self.breakouts_detectados:
             print(f"\n⏰ Breakouts detectados recientemente:")
             for simbolo, info in self.breakouts_detectados.items():
@@ -808,19 +835,19 @@ class TradingBot:
 
     def generar_senal_operacion(self, simbolo, tipo_operacion, precio_entrada, tp, sl,
                             info_canal, datos_mercado, config_optima, breakout_info=None):
-        """Genera y envía señal de operación con info de breakout"""
         if simbolo in self.senales_enviadas:
             return
         if precio_entrada is None or tp is None or sl is None:
             print(f"    ❌ Niveles inválidos para {simbolo}, omitiendo señal")
             return
+
         riesgo = abs(precio_entrada - sl)
         beneficio = abs(tp - precio_entrada)
         ratio_rr = beneficio / riesgo if riesgo > 0 else 0
-        # Calcular SL y TP en porcentaje
         sl_percent = abs((sl - precio_entrada) / precio_entrada) * 100
         tp_percent = abs((tp - precio_entrada) / precio_entrada) * 100
         stoch_estado = "📉 SOBREVENTA" if tipo_operacion == "LONG" else "📈 SOBRECOMPRA"
+
         breakout_texto = ""
         if breakout_info:
             tiempo_breakout = (datetime.now() - breakout_info['timestamp']).total_seconds() / 60
@@ -829,6 +856,7 @@ class TradingBot:
 ⏰ Tiempo desde breakout: {tiempo_breakout:.1f} minutos
 💰 Precio breakout: {breakout_info['precio_breakout']:.8f}
 """
+
         mensaje = f"""
 🎯 <b>SEÑAL DE {tipo_operacion} - {simbolo}</b>
 {breakout_texto}
@@ -854,15 +882,16 @@ class TradingBot:
 📊 <b>Stoch K:</b> {info_canal['stoch_k']:.1f}
 📈 <b>Stoch D:</b> {info_canal['stoch_d']:.1f}
 ⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic
+💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic + KVO
         """
+
         token = self.config.get('telegram_token')
         chat_ids = self.config.get('telegram_chat_ids', [])
         if token and chat_ids:
             try:
                 print(f"     📊 Generando gráfico para {simbolo}...")
                 buf = self.generar_grafico_profesional(simbolo, info_canal, datos_mercado, 
-                                                      precio_entrada, tp, sl, tipo_operacion)
+                                                      precio_entrada, tp, sl, tipo_operacion, config_optima)
                 if buf:
                     print(f"     📨 Enviando gráfico por Telegram...")
                     self.enviar_grafico_telegram(buf, token, chat_ids)
@@ -871,6 +900,7 @@ class TradingBot:
                 print(f"     ✅ Señal {tipo_operacion} para {simbolo} enviada")
             except Exception as e:
                 print(f"     ❌ Error enviando señal: {e}")
+
         self.operaciones_activas[simbolo] = {
             'tipo': tipo_operacion,
             'precio_entrada': precio_entrada,
@@ -891,6 +921,142 @@ class TradingBot:
         }
         self.senales_enviadas.add(simbolo)
         self.total_operaciones += 1
+
+    def generar_grafico_profesional(self, simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion, config_optima):
+        try:
+            url = "https://api.binance.com/api/v3/klines"
+            params = {
+                'symbol': simbolo,
+                'interval': config_optima['timeframe'],
+                'limit': config_optima['num_velas']
+            }
+            respuesta = requests.get(url, params=params, timeout=10)
+            klines = respuesta.json()
+            df_data = []
+            for kline in klines:
+                df_data.append({
+                    'Date': pd.to_datetime(kline[0], unit='ms'),
+                    'Open': float(kline[1]),
+                    'High': float(kline[2]),
+                    'Low': float(kline[3]),
+                    'Close': float(kline[4]),
+                    'Volume': float(kline[5])
+                })
+            df = pd.DataFrame(df_data)
+            df.set_index('Date', inplace=True)
+
+            tiempos_reg = list(range(len(df)))
+            resistencia_values = []
+            soporte_values = []
+            for i, t in enumerate(tiempos_reg):
+                resist = info_canal['pendiente_resistencia'] * t + \
+                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
+                sop = info_canal['pendiente_soporte'] * t + \
+                     (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
+                resistencia_values.append(resist)
+                soporte_values.append(sop)
+            df['Resistencia'] = resistencia_values
+            df['Soporte'] = soporte_values
+
+            # Stochastic
+            period = 14
+            k_period = 3
+            d_period = 3
+            stoch_k_values = []
+            for i in range(len(df)):
+                if i < period - 1:
+                    stoch_k_values.append(50)
+                else:
+                    highest_high = df['High'].iloc[i-period+1:i+1].max()
+                    lowest_low = df['Low'].iloc[i-period+1:i+1].min()
+                    if highest_high == lowest_low:
+                        k = 50
+                    else:
+                        k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
+                    stoch_k_values.append(k)
+            k_smoothed = []
+            for i in range(len(stoch_k_values)):
+                if i < k_period - 1:
+                    k_smoothed.append(stoch_k_values[i])
+                else:
+                    k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
+                    k_smoothed.append(k_avg)
+            stoch_d_values = []
+            for i in range(len(k_smoothed)):
+                if i < d_period - 1:
+                    stoch_d_values.append(k_smoothed[i])
+                else:
+                    d = sum(k_smoothed[i-d_period+1:i+1]) / d_period
+                    stoch_d_values.append(d)
+            df['Stoch_K'] = k_smoothed
+            df['Stoch_D'] = stoch_d_values
+
+            # KVO
+            df_kvo = self.calcular_kvo(df)
+
+            apds = [
+                mpf.make_addplot(df['Resistencia'], color='#5444ff', linestyle='--', width=2, panel=0),
+                mpf.make_addplot(df['Soporte'], color="#5444ff", linestyle='--', width=2, panel=0),
+            ]
+
+            if precio_entrada and tp and sl:
+                entry_line = [precio_entrada] * len(df)
+                tp_line = [tp] * len(df)
+                sl_line = [sl] * len(df)
+                apds.append(mpf.make_addplot(entry_line, color='#FFD700', linestyle='-', width=2, panel=0))
+                apds.append(mpf.make_addplot(tp_line, color='#00FF00', linestyle='-', width=2, panel=0))
+                apds.append(mpf.make_addplot(sl_line, color='#FF0000', linestyle='-', width=2, panel=0))
+
+            # Stochastic
+            apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
+            apds.append(mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1))
+            overbought = [80] * len(df)
+            oversold = [20] * len(df)
+            apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
+            apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
+
+            # KVO
+            if df_kvo is not None and 'xKVO' in df_kvo.columns:
+                df['xKVO'] = df_kvo['xKVO']
+                df['xTrigger'] = df_kvo['xTrigger']
+                apds.append(mpf.make_addplot(df['xKVO'], color='purple', width=1.2, panel=2, ylabel='KVO'))
+                apds.append(mpf.make_addplot(df['xTrigger'], color='orange', width=1, panel=2))
+                cero_line = [0] * len(df)
+                apds.append(mpf.make_addplot(cero_line, color='white', linestyle='--', width=0.8, panel=2))
+                panel_ratios = (3, 1, 1)
+                extra_panels = True
+            else:
+                panel_ratios = (3, 1)
+                extra_panels = False
+
+            fig, axes = mpf.plot(df, type='candle', style='nightclouds',
+                               title=f'{simbolo} | {tipo_operacion} | {config_optima["timeframe"]} | Breakout+Reentry',
+                               ylabel='Precio',
+                               addplot=apds,
+                               volume=False,
+                               returnfig=True,
+                               figsize=(14, 10),
+                               panel_ratios=panel_ratios)
+
+            if extra_panels:
+                axes[2].set_ylim([df['xKVO'].min() - 0.1, df['xKVO'].max() + 0.1])
+                axes[2].grid(True, alpha=0.3)
+                axes[3].set_ylim([0, 100])
+                axes[3].grid(True, alpha=0.3)
+            else:
+                axes[2].set_ylim([0, 100])
+                axes[2].grid(True, alpha=0.3)
+
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+            buf.seek(0)
+            plt.close(fig)
+            return buf
+        except Exception as e:
+            print(f"⚠️ Error generando gráfico: {e}")
+            return None
+
+    # ... [resto de los métodos sin cambios: inicializar_log, registrar_operacion, etc.] ...
 
     def inicializar_log(self):
         if not os.path.exists(self.archivo_log):
@@ -934,7 +1100,6 @@ class TradingBot:
             ])
 
     def filtrar_operaciones_ultima_semana(self):
-        """Filtra operaciones de los últimos 7 días"""
         if not os.path.exists(self.archivo_log):
             return []
         try:
@@ -962,13 +1127,11 @@ class TradingBot:
             return []
 
     def contar_breakouts_semana(self):
-        """Cuenta breakouts detectados en la última semana"""
         ops = self.filtrar_operaciones_ultima_semana()
         breakouts = sum(1 for op in ops if op.get('breakout_usado', False))
         return breakouts
 
     def generar_reporte_semanal(self):
-        """Genera reporte automático cada semana"""
         ops_ultima_semana = self.filtrar_operaciones_ultima_semana()
         if not ops_ultima_semana:
             return None
@@ -983,7 +1146,6 @@ class TradingBot:
         perdidas = [abs(op['pnl_percent']) for op in ops_ultima_semana if op['pnl_percent'] < 0]
         avg_ganancia = sum(ganancias)/len(ganancias) if ganancias else 0
         avg_perdida = sum(perdidas)/len(perdidas) if perdidas else 0
-        # Calcular racha actual
         racha_actual = 0
         for op in reversed(ops_ultima_semana):
             if op['resultado'] == 'TP':
@@ -1012,13 +1174,12 @@ class TradingBot:
    → {peor_op['pnl_percent']:+.2f}%
 ━━━━━━━━━━━━━━━━━━━━
 🤖 Bot automático 24/7
-⚡ Estrategia: Breakout + Reentry
+⚡ Estrategia: Breakout + Reentry + KVO
 💎 Acceso Premium: @TuUsuario
     """
         return mensaje
 
     def enviar_reporte_semanal(self):
-        """Envía el reporte semanal por Telegram"""
         mensaje = self.generar_reporte_semanal()
         if not mensaje:
             print("ℹ️ No hay datos suficientes para generar reporte")
@@ -1036,7 +1197,6 @@ class TradingBot:
         return False
 
     def verificar_envio_reporte_automatico(self):
-        """Verifica si debe enviar el reporte semanal (cada lunes a las 9:00)"""
         ahora = datetime.now()
         if ahora.weekday() == 0 and 9 <= ahora.hour < 10:
             archivo_control = "ultimo_reporte.txt"
@@ -1253,110 +1413,6 @@ class TradingBot:
             return 0
         return 1 - (ss_res / ss_tot)
 
-    def generar_grafico_profesional(self, simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion):
-        try:
-            config_optima = self.config_optima_por_simbolo.get(simbolo)
-            if not config_optima:
-                return None
-            url = "https://api.binance.com/api/v3/klines"
-            params = {
-                'symbol': simbolo,
-                'interval': config_optima['timeframe'],
-                'limit': config_optima['num_velas']
-            }
-            respuesta = requests.get(url, params=params, timeout=10)
-            klines = respuesta.json()
-            df_data = []
-            for kline in klines:
-                df_data.append({
-                    'Date': pd.to_datetime(kline[0], unit='ms'),
-                    'Open': float(kline[1]),
-                    'High': float(kline[2]),
-                    'Low': float(kline[3]),
-                    'Close': float(kline[4]),
-                    'Volume': float(kline[5])
-                })
-            df = pd.DataFrame(df_data)
-            df.set_index('Date', inplace=True)
-            tiempos_reg = list(range(len(df)))
-            resistencia_values = []
-            soporte_values = []
-            for i, t in enumerate(tiempos_reg):
-                resist = info_canal['pendiente_resistencia'] * t + \
-                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
-                sop = info_canal['pendiente_soporte'] * t + \
-                     (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
-                resistencia_values.append(resist)
-                soporte_values.append(sop)
-            df['Resistencia'] = resistencia_values
-            df['Soporte'] = soporte_values
-            period = 14
-            k_period = 3
-            d_period = 3
-            stoch_k_values = []
-            for i in range(len(df)):
-                if i < period - 1:
-                    stoch_k_values.append(50)
-                else:
-                    highest_high = df['High'].iloc[i-period+1:i+1].max()
-                    lowest_low = df['Low'].iloc[i-period+1:i+1].min()
-                    if highest_high == lowest_low:
-                        k = 50
-                    else:
-                        k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
-                    stoch_k_values.append(k)
-            k_smoothed = []
-            for i in range(len(stoch_k_values)):
-                if i < k_period - 1:
-                    k_smoothed.append(stoch_k_values[i])
-                else:
-                    k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
-                    k_smoothed.append(k_avg)
-            stoch_d_values = []
-            for i in range(len(k_smoothed)):
-                if i < d_period - 1:
-                    stoch_d_values.append(k_smoothed[i])
-                else:
-                    d = sum(k_smoothed[i-d_period+1:i+1]) / d_period
-                    stoch_d_values.append(d)
-            df['Stoch_K'] = k_smoothed
-            df['Stoch_D'] = stoch_d_values
-            apds = [
-                mpf.make_addplot(df['Resistencia'], color='#5444ff', linestyle='--', width=2, panel=0),
-                mpf.make_addplot(df['Soporte'], color="#5444ff", linestyle='--', width=2, panel=0),
-            ]
-            if precio_entrada and tp and sl:
-                entry_line = [precio_entrada] * len(df)
-                tp_line = [tp] * len(df)
-                sl_line = [sl] * len(df)
-                apds.append(mpf.make_addplot(entry_line, color='#FFD700', linestyle='-', width=2, panel=0))
-                apds.append(mpf.make_addplot(tp_line, color='#00FF00', linestyle='-', width=2, panel=0))
-                apds.append(mpf.make_addplot(sl_line, color='#FF0000', linestyle='-', width=2, panel=0))
-            apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
-            apds.append(mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1))
-            overbought = [80] * len(df)
-            oversold = [20] * len(df)
-            apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            fig, axes = mpf.plot(df, type='candle', style='nightclouds',
-                               title=f'{simbolo} | {tipo_operacion} | {config_optima["timeframe"]} | Breakout+Reentry',
-                               ylabel='Precio',
-                               addplot=apds,
-                               volume=False,
-                               returnfig=True,
-                               figsize=(14, 10),
-                               panel_ratios=(3, 1))
-            axes[2].set_ylim([0, 100])
-            axes[2].grid(True, alpha=0.3)
-            buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
-            buf.seek(0)
-            plt.close(fig)
-            return buf
-        except Exception as e:
-            print(f"⚠️ Error generando gráfico: {e}")
-            return None
-
     def enviar_grafico_telegram(self, buf, token, chat_ids):
         if not buf or not token or not chat_ids:
             return False
@@ -1438,7 +1494,7 @@ class TradingBot:
 
     def iniciar(self):
         print("\n" + "=" * 70)
-        print("🤖 BOT DE TRADING - ESTRATEGIA BREAKOUT + REENTRY")
+        print("🤖 BOT DE TRADING - ESTRATEGIA BREAKOUT + REENTRY + KVO")
         print("🎯 PRIORIDAD: TIMEFRAMES CORTOS (1m > 3m > 5m > 15m > 30m)")
         print("💾 PERSISTENCIA: ACTIVADA")
         print("🔄 REEVALUACIÓN: CADA 2 HORAS")
@@ -1447,7 +1503,7 @@ class TradingBot:
         print(f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}")
         print(f"🕯️ Velas: {self.config.get('velas_options', [])}")
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
-        print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
+        print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch + KVO")
         print("=" * 70)
         print("\n🚀 INICIANDO BOT...")
         try:
@@ -1476,15 +1532,11 @@ class TradingBot:
             except:
                 pass
 
-# ---------------------------
-# CONFIGURACIÓN SIMPLE
-# ---------------------------
+
 def crear_config_desde_entorno():
-    """Configuración desde variables de entorno"""
     directorio_actual = os.path.dirname(os.path.abspath(__file__))
     telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '-1002272872445')
     telegram_chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
-    
     return {
         'min_channel_width_percent': 4.0,
         'trend_threshold_degrees': 16.0,
@@ -1509,18 +1561,15 @@ def crear_config_desde_entorno():
         'estado_file': os.path.join(directorio_actual, 'estado_bot_v23.json')
     }
 
+
 # ---------------------------
 # FLASK APP Y RENDER
 # ---------------------------
-
 app = Flask(__name__)
-
-# Crear bot con configuración desde entorno
 config = crear_config_desde_entorno()
 bot = TradingBot(config)
 
 def run_bot_loop():
-    """Ejecuta el bot en un hilo separado"""
     while True:
         try:
             bot.ejecutar_analisis()
@@ -1529,13 +1578,12 @@ def run_bot_loop():
             print(f"Error en el hilo del bot: {e}", file=sys.stderr)
             time.sleep(60)
 
-# Iniciar hilo del bot
 bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
 bot_thread.start()
 
 @app.route('/')
 def index():
-    return "Bot Breakout + Reentry está en línea.", 200
+    return "Bot Breakout + Reentry + KVO está en línea.", 200
 
 @app.route('/webhook', methods=['POST'])
 def telegram_webhook():
@@ -1545,7 +1593,6 @@ def telegram_webhook():
         return jsonify({"status": "ok"}), 200
     return jsonify({"error": "Request must be JSON"}), 400
 
-# Configuración automática del webhook
 def setup_telegram_webhook():
     token = os.environ.get('TELEGRAM_TOKEN')
     if not token:
