@@ -575,20 +575,21 @@ class TradingBot:
                                figsize=(14, 10),
                                panel_ratios=(3, 1, 1) if 'xKVO' in df.columns else (3, 1))
             
-            # --- CORRECCIÓN: AJUSTAR ESCALAS DE LOS PANELES ---
-            # Panel 1: Stochastic (debe estar entre 0 y 100)
-            if len(axes) > 1:
+            # --- CORRECCIÓN DE ESCALA ---
+            if 'xKVO' in df.columns:
+                # Panel 1: Stochastic → índice 1
                 axes[1].set_ylim([0, 100])
                 axes[1].grid(True, alpha=0.3)
-            # Panel 2: KVO (ajustar a un rango razonable basado en los datos)
-            if 'xKVO' in df.columns and len(axes) > 2:
-                # Calcular un rango dinámico basado en los valores del KVO
+                # Panel 2: KVO → índice 2
                 kvo_min = df['xKVO'].min()
                 kvo_max = df['xKVO'].max()
-                # Para evitar que sea demasiado pequeño, agregar un margen
                 margin = max(abs(kvo_min), abs(kvo_max)) * 0.1
                 axes[2].set_ylim([kvo_min - margin, kvo_max + margin])
                 axes[2].grid(True, alpha=0.3)
+            else:
+                # Solo Stochastic en panel 1
+                axes[1].set_ylim([0, 100])
+                axes[1].grid(True, alpha=0.3)
                 
             buf = BytesIO()
             plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
@@ -707,8 +708,7 @@ class TradingBot:
                 take_profit = precio_entrada - (riesgo * self.config['min_rr_ratio'])
         return precio_entrada, take_profit, stop_loss
     def escanear_mercado(self):
-        print(f"
-🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
+        print(f"\n🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
         senales_encontradas = 0
         for simbolo in self.config.get('symbols', []):
             try:
@@ -785,14 +785,12 @@ class TradingBot:
                 print(f"⚠️ Error analizando {simbolo}: {e}")
                 continue
         if self.esperando_reentry:
-            print(f"
-⏳ Esperando reingreso en {len(self.esperando_reentry)} símbolos:")
+            print(f"\n⏳ Esperando reingreso en {len(self.esperando_reentry)} símbolos:")
             for simbolo, info in self.esperando_reentry.items():
                 tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
                 print(f"   • {simbolo} - {info['tipo']} - Esperando {tiempo_espera:.1f} min")
         if self.breakouts_detectados:
-            print(f"
-⏰ Breakouts detectados recientemente:")
+            print(f"\n⏰ Breakouts detectados recientemente:")
             for simbolo, info in self.breakouts_detectados.items():
                 tiempo_desde_deteccion = (datetime.now() - info['timestamp']).total_seconds() / 60
                 print(f"   • {simbolo} - {info['tipo']} - Hace {tiempo_desde_deteccion:.1f} min")
@@ -992,20 +990,21 @@ class TradingBot:
                                figsize=(14, 10),
                                panel_ratios=panel_ratios)
             
-            # --- CORRECCIÓN: AJUSTAR ESCALAS DE LOS PANELES ---
-            # Panel 1: Stochastic (debe estar entre 0 y 100)
-            if len(axes) > 1:
+            # --- CORRECCIÓN DE ESCALA ---
+            if extra_panels:
+                # Panel 1: Stochastic → índice 1
                 axes[1].set_ylim([0, 100])
                 axes[1].grid(True, alpha=0.3)
-            # Panel 2: KVO (ajustar a un rango razonable basado en los datos)
-            if 'xKVO' in df.columns and len(axes) > 2:
-                # Calcular un rango dinámico basado en los valores del KVO
+                # Panel 2: KVO → índice 2
                 kvo_min = df['xKVO'].min()
                 kvo_max = df['xKVO'].max()
-                # Para evitar que sea demasiado pequeño, agregar un margen
                 margin = max(abs(kvo_min), abs(kvo_max)) * 0.1
                 axes[2].set_ylim([kvo_min - margin, kvo_max + margin])
                 axes[2].grid(True, alpha=0.3)
+            else:
+                # Solo Stochastic en panel 1
+                axes[1].set_ylim([0, 100])
+                axes[1].grid(True, alpha=0.3)
                 
             buf = BytesIO()
             plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
@@ -1417,8 +1416,7 @@ class TradingBot:
         self.guardar_estado()
         return self.escanear_mercado()
     def mostrar_resumen_operaciones(self):
-        print(f"
-📊 RESUMEN OPERACIONES:")
+        print(f"\n📊 RESUMEN OPERACIONES:")
         print(f"   Activas: {len(self.operaciones_activas)}")
         print(f"   Esperando reentry: {len(self.esperando_reentry)}")
         print(f"   Total ejecutadas: {self.total_operaciones}")
@@ -1431,8 +1429,7 @@ class TradingBot:
                 breakout = "🚀" if op.get('breakout_usado', False) else ""
                 print(f"   • {simbolo} {estado} {breakout} - {timeframe} - {velas}v - Ancho: {ancho_canal:.1f}%")
     def iniciar(self):
-        print("
-" + "=" * 70)
+        print("\n" + "=" * 70)
         print("🤖 BOT DE TRADING - ESTRATEGIA BREAKOUT + REENTRY + KVO")
         print("🎯 PRIORIDAD: TIMEFRAMES CORTOS (1m > 3m > 5m > 15m > 30m)")
         print("💾 PERSISTENCIA: ACTIVADA")
@@ -1444,15 +1441,13 @@ class TradingBot:
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
         print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch + KVO")
         print("=" * 70)
-        print("
-🚀 INICIANDO BOT...")
+        print("\n🚀 INICIANDO BOT...")
         try:
             while True:
                 nuevas_senales = self.ejecutar_analisis()
                 self.mostrar_resumen_operaciones()
                 minutos_espera = self.config.get('scan_interval_minutes', 1)
-                print(f"
-✅ Análisis completado. Señales nuevas: {nuevas_senales}")
+                print(f"\n✅ Análisis completado. Señales nuevas: {nuevas_senales}")
                 print(f"⏳ Próximo análisis en {minutos_espera} minutos...")
                 print("-" * 60)
                 for minuto in range(minutos_espera):
@@ -1461,14 +1456,12 @@ class TradingBot:
                     if restantes > 0 and restantes % 5 == 0:
                         print(f"   ⏰ {restantes} minutos restantes...")
         except KeyboardInterrupt:
-            print("
-🛑 Bot detenido por el usuario")
+            print("\n🛑 Bot detenido por el usuario")
             print("💾 Guardando estado final...")
             self.guardar_estado()
             print("👋 ¡Hasta pronto!")
         except Exception as e:
-            print(f"
-❌ Error en el bot: {e}")
+            print(f"\n❌ Error en el bot: {e}")
             print("💾 Intentando guardar estado...")
             try:
                 self.guardar_estado()
