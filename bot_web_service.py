@@ -643,7 +643,6 @@ class TradingBot:
             apds.append(mpf.make_addplot([20]*len(sub_df), color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
             # KVO panel
             apds.append(mpf.make_addplot(sub_df['KVO'], color='purple', width=1.2, panel=2, ylabel='KVO'))
-            apds.append(mpf.make_addplot(sub_df['KVO_Trigger'], color='orange', width=1, panel=2))
             apds.append(mpf.make_addplot([0]*len(sub_df), color='white', linestyle='--', width=1, panel=2))
             fig, axes = mpf.plot(sub_df, type='candle', style='nightclouds',
                                title=f'{simbolo} | {tipo_operacion} | {config_optima["timeframe"]} | Breakout+Reentry+KVO',
@@ -722,7 +721,6 @@ class TradingBot:
             apds.append(mpf.make_addplot([80]*len(sub_df), color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot([20]*len(sub_df), color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot(sub_df['KVO'], color='purple', width=1.2, panel=2, ylabel='KVO'))
-            apds.append(mpf.make_addplot(sub_df['KVO_Trigger'], color='orange', width=1, panel=2))
             apds.append(mpf.make_addplot([0]*len(sub_df), color='white', linestyle='--', width=1, panel=2))
             fig, axes = mpf.plot(sub_df, type='candle', style='nightclouds',
                                 title=f'{simbolo} | {titulo_extra} | {config_optima["timeframe"]} | ⏳ ESPERANDO REENTRY',
