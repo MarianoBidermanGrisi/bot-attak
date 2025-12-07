@@ -1,5 +1,5 @@
 # bot_web_service.py
-# Bot Breakout+Reentry para Bitget - Con sistema de cierre automático
+# Bot Breakout+Reentry COMPLETO - Con órdenes REALES en Bitget
 
 import requests
 import time
@@ -11,29 +11,36 @@ import numpy as np
 import math
 import csv
 import random
+import hmac
+import hashlib
+import base64
 from flask import Flask, request, jsonify
 import threading
 import logging
 
-# Configurar logging para Render
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Configurar logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ---------------------------
 # CONFIGURACIÓN BITGET
 # ---------------------------
-BITGET_API_KEY = os.environ.get('BITGET_API_KEY', 'demo')
-BITGET_SECRET_KEY = os.environ.get('BITGET_SECRET_KEY', 'demo')
-BITGET_PASSPHRASE = os.environ.get('BITGET_PASSPHRASE', 'demo')
+BITGET_API_KEY = os.environ.get('BITGET_API_KEY')
+BITGET_SECRET_KEY = os.environ.get('BITGET_SECRET_KEY')
+BITGET_PASSPHRASE = os.environ.get('BITGET_PASSPHRASE')
+BITGET_REST_URL = "https://api.bitget.com"
 
-# Símbolos para futuros de Bitget
-BITGET_SYMBOLS = [
+# Verificar credenciales
+if not BITGET_API_KEY or not BITGET_SECRET_KEY or not BITGET_PASSPHRASE:
+    logger.error("❌ CREDENCIALES BITGET NO CONFIGURADAS")
+    logger.error("   Configura en Render:")
+    logger.error("   - BITGET_API_KEY")
+    logger.error("   - BITGET_SECRET_KEY")
+    logger.error("   - BITGET_PASSPHRASE")
+    sys.exit(1)
+
+# Símbolos para trading
+SYMBOLS = [
     'BTCUSDT_UMCBL',
     'ETHUSDT_UMCBL',
     'LINKUSDT_UMCBL',
@@ -42,25 +49,156 @@ BITGET_SYMBOLS = [
 ]
 
 # ---------------------------
-# BOT TRADING CON CIERRE AUTOMÁTICO
+# CLASE BITGET API (REAL)
+# ---------------------------
+class BitgetAPI:
+    def __init__(self, api_key, secret_key, passphrase):
+        self.api_key = api_key
+        self.secret_key = secret_key
+        self.passphrase = passphrase
+        self.base_url = BITGET_REST_URL
+        
+        # Sincronizar tiempo
+        self._sync_time()
+        
+        logger.info("✅ API Bitget inicializada (MODO REAL)")
+
+    def _sync_time(self):
+        """Sincroniza tiempo con servidor Bitget"""
+        try:
+            resp = requests.get(f"{self.base_url}/api/v2/public/time", timeout=5)
+            server_time = resp.json()['data']['timestamp']
+            local_time = int(time.time() * 1000)
+            self.time_offset = server_time - local_time
+            logger.info(f"⏰ Offset de tiempo: {self.time_offset}ms")
+        except Exception as e:
+            logger.error(f"Error sincronizando tiempo: {e}")
+            self.time_offset = 0
+
+    def _get_timestamp(self):
+        """Timestamp en milisegundos"""
+        return str(int(time.time() * 1000) + self.time_offset)
+
+    def _sign(self, message):
+        """Firma HMAC-SHA256"""
+        return hmac.new(
+            bytes(self.secret_key, 'utf-8'),
+            bytes(message, 'utf-8'),
+            hashlib.sha256
+        ).digest()
+
+    def _make_request(self, method, endpoint, params=None, data=None):
+        """Realiza petición firmada"""
+        timestamp = self._get_timestamp()
+        
+        if method == "GET" and params:
+            query = '&'.join([f'{k}={v}' for k, v in sorted(params.items())])
+            message = timestamp + method + endpoint + '?' + query
+        else:
+            body = json.dumps(data) if data else ''
+            message = timestamp + method + endpoint + body
+        
+        signature = base64.b64encode(self._sign(message)).decode()
+        
+        headers = {
+            'ACCESS-KEY': self.api_key,
+            'ACCESS-SIGN': signature,
+            'ACCESS-TIMESTAMP': timestamp,
+            'ACCESS-PASSPHRASE': self.passphrase,
+            'Content-Type': 'application/json'
+        }
+        
+        url = self.base_url + endpoint
+        
+        try:
+            if method == "GET":
+                response = requests.get(url, headers=headers, params=params, timeout=10)
+            else:
+                response = requests.post(url, headers=headers, json=data, timeout=10)
+            
+            result = response.json()
+            
+            if result.get('code') != '00000':
+                logger.error(f"Error API Bitget: {result}")
+                return None
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error en petición: {e}")
+            return None
+
+    def get_klines(self, symbol, interval="15m", limit=100):
+        """Obtiene velas"""
+        endpoint = "/api/v2/mix/market/candles"
+        params = {
+            "symbol": symbol,
+            "granularity": interval,
+            "limit": limit
+        }
+        return self._make_request("GET", endpoint, params=params)
+
+    def get_contract_info(self, symbol):
+        """Obtiene información del contrato"""
+        endpoint = "/api/v2/mix/market/contracts"
+        params = {"symbol": symbol}
+        return self._make_request("GET", endpoint, params=params)
+
+    def place_order(self, symbol, side, order_type, size, price=None):
+        """Coloca orden en Bitget"""
+        endpoint = "/api/v2/mix/order/place-order"
+        
+        data = {
+            "symbol": symbol,
+            "side": side,
+            "ordType": order_type,
+            "size": str(size),
+            "marginMode": "isolated"
+        }
+        
+        if price and order_type == "limit":
+            data["price"] = str(price)
+        
+        return self._make_request("POST", endpoint, data=data)
+
+    def place_tp_sl_order(self, symbol, plan_type, trigger_price, execute_price, size, side):
+        """Coloca TP/SL"""
+        endpoint = "/api/v2/mix/order/place-plan-order"
+        
+        data = {
+            "symbol": symbol,
+            "planType": plan_type,
+            "triggerPrice": str(trigger_price),
+            "executePrice": str(execute_price),
+            "size": str(size),
+            "side": side,
+            "triggerType": "market_price"
+        }
+        
+        return self._make_request("POST", endpoint, data=data)
+
+# ---------------------------
+# BOT DE TRADING REAL
 # ---------------------------
 class TradingBot:
     def __init__(self, config):
         self.config = config
+        
+        # Inicializar API Bitget
+        self.api = BitgetAPI(BITGET_API_KEY, BITGET_SECRET_KEY, BITGET_PASSPHRASE)
+        
+        # Variables de trading
+        self.margin_per_trade = 10  # $ por operación
+        self.leverage = 10
         self.operaciones_activas = {}
-        self.historial_operaciones = []
-        self.total_operaciones = 0
-        self.log_file = "trading_log.csv"
+        self.historial = []
+        self.log_file = "bitget_trades.csv"
         
-        # Inicializar archivo de log
-        self._init_log_file()
-        
-        logger.info("🤖 Bot Trading inicializado con cierre automático")
-        logger.info(f"📊 Símbolos: {len(config['symbols'])}")
-        logger.info(f"⏰ Intervalo: {config['scan_interval_minutes']} minutos")
-    
-    def _init_log_file(self):
-        """Inicializa archivo CSV para logs"""
+        self._init_log()
+        logger.info("🤖 Bot de Trading REAL inicializado")
+
+    def _init_log(self):
+        """Inicializa archivo de log"""
         try:
             if not os.path.exists(self.log_file):
                 with open(self.log_file, 'w', newline='', encoding='utf-8') as f:
@@ -69,231 +207,165 @@ class TradingBot:
                         'timestamp', 'symbol', 'signal', 'entry_price',
                         'stop_loss', 'take_profit', 'exit_price',
                         'result', 'pnl_percent', 'duration_min',
-                        'reason'
+                        'order_id', 'size', 'margin', 'leverage'
                     ])
         except Exception as e:
             logger.error(f"Error inicializando log: {e}")
-    
-    def _log_operation(self, operation):
-        """Registra operación en CSV"""
+
+    def _log_trade(self, trade_data):
+        """Registra trade en CSV"""
         try:
             with open(self.log_file, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    operation.get('timestamp', datetime.now().isoformat()),
-                    operation.get('symbol', ''),
-                    operation.get('signal', ''),
-                    operation.get('entry_price', 0),
-                    operation.get('stop_loss', 0),
-                    operation.get('take_profit', 0),
-                    operation.get('exit_price', 0),
-                    operation.get('result', ''),
-                    operation.get('pnl_percent', 0),
-                    operation.get('duration_min', 0),
-                    operation.get('reason', '')
+                    trade_data.get('timestamp', datetime.now().isoformat()),
+                    trade_data.get('symbol', ''),
+                    trade_data.get('signal', ''),
+                    trade_data.get('entry_price', 0),
+                    trade_data.get('stop_loss', 0),
+                    trade_data.get('take_profit', 0),
+                    trade_data.get('exit_price', 0),
+                    trade_data.get('result', ''),
+                    trade_data.get('pnl_percent', 0),
+                    trade_data.get('duration_min', 0),
+                    trade_data.get('order_id', ''),
+                    trade_data.get('size', 0),
+                    self.margin_per_trade,
+                    self.leverage
                 ])
         except Exception as e:
-            logger.error(f"Error registrando operación: {e}")
-    
-    def check_close_conditions(self):
-        """Verifica condiciones de cierre para operaciones activas"""
-        if not self.operaciones_activas:
-            return []
+            logger.error(f"Error registrando trade: {e}")
+
+    def _calculate_position_size(self, symbol, entry_price):
+        """Calcula tamaño de posición para Bitget"""
+        try:
+            # Obtener info del contrato
+            info = self.api.get_contract_info(symbol)
+            if not info or not info.get('data'):
+                return 0
+            
+            contract = info['data'][0]
+            price_tick = float(contract['priceTick'])
+            lot_size = float(contract['lotSz'])
+            min_order = float(contract['minOrderSz'])
+            
+            # Calcular notional
+            notional = self.margin_per_trade * self.leverage
+            
+            # Calcular tamaño
+            size_raw = notional / entry_price
+            size = round(size_raw / lot_size) * lot_size
+            
+            # Ajustar a límites
+            if size < min_order:
+                size = min_order
+            
+            return round(size, 6)
+            
+        except Exception as e:
+            logger.error(f"Error calculando tamaño: {e}")
+            return 0
+
+    def execute_trade(self, signal_data):
+        """Ejecuta trade REAL en Bitget"""
+        symbol = signal_data['symbol']
+        signal = signal_data['signal']
+        entry = signal_data['entry_price']
+        sl = signal_data['stop_loss']
+        tp = signal_data['take_profit']
         
-        closed_ops = []
-        now = datetime.now()
+        # Calcular tamaño
+        size = self._calculate_position_size(symbol, entry)
+        if size <= 0:
+            logger.error(f"Tamaño inválido para {symbol}")
+            return False
         
-        for symbol, position in list(self.operaciones_activas.items()):
-            try:
-                # Obtener precio actual simulado (en modo demo)
-                current_price = self._get_simulated_price(symbol, position['entry_price'])
-                
-                signal = position['signal']
-                entry = position['entry_price']
-                sl = position['stop_loss']
-                tp = position['take_profit']
-                entry_time = datetime.fromisoformat(position['entry_time'])
-                
-                # Calcular duración
-                duration_min = (now - entry_time).total_seconds() / 60
-                
-                # Verificar condiciones de cierre
-                result = None
-                reason = ""
-                
-                if signal == "LONG":
-                    if current_price >= tp:
-                        result = "TP"
-                        reason = "Take Profit alcanzado"
-                    elif current_price <= sl:
-                        result = "SL"
-                        reason = "Stop Loss alcanzado"
-                else:  # SHORT
-                    if current_price <= tp:
-                        result = "TP"
-                        reason = "Take Profit alcanzado"
-                    elif current_price >= sl:
-                        result = "SL"
-                        reason = "Stop Loss alcanzado"
-                
-                # Timeout después de 30 minutos
-                if duration_min > 30 and not result:
-                    result = "TIMEOUT"
-                    reason = "Timeout (30+ minutos)"
-                
-                if result:
-                    # Calcular PnL
-                    if signal == "LONG":
-                        pnl_percent = ((current_price - entry) / entry) * 100
-                    else:
-                        pnl_percent = ((entry - current_price) / entry) * 100
-                    
-                    # Crear registro de cierre
-                    closed_op = {
-                        'timestamp': now.isoformat(),
-                        'symbol': symbol,
-                        'signal': signal,
-                        'entry_price': entry,
-                        'stop_loss': sl,
-                        'take_profit': tp,
-                        'exit_price': current_price,
-                        'result': result,
-                        'pnl_percent': pnl_percent,
-                        'duration_min': duration_min,
-                        'reason': reason
-                    }
-                    
-                    # Registrar en CSV
-                    self._log_operation(closed_op)
-                    
-                    # Agregar al historial
-                    self.historial_operaciones.append(closed_op)
-                    
-                    # Remover de activas
-                    closed_ops.append(symbol)
-                    del self.operaciones_activas[symbol]
-                    
-                    # Enviar notificación
-                    self._send_close_notification(closed_op)
-                    
-                    logger.info(f"📊 {symbol} CERRADO: {result} | PnL: {pnl_percent:.2f}%")
-                    
-            except Exception as e:
-                logger.error(f"Error verificando cierre {symbol}: {e}")
-                continue
+        # Determinar lado
+        side = "buy" if signal == "LONG" else "sell"
+        tp_side = "sell" if signal == "LONG" else "buy"
+        sl_side = "sell" if signal == "LONG" else "buy"
         
-        return closed_ops
-    
-    def _get_simulated_price(self, symbol, base_price):
-        """Simula precio actual para modo demo"""
-        # Variación aleatoria del ±2%
-        variation = random.uniform(-0.02, 0.02)
-        return base_price * (1 + variation)
-    
-    def _send_close_notification(self, operation):
-        """Envía notificación de cierre por Telegram"""
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        
-        if not token or not chat_ids:
-            return
+        logger.info(f"📤 Ejecutando orden REAL en Bitget:")
+        logger.info(f"   Símbolo: {symbol}")
+        logger.info(f"   Señal: {signal}")
+        logger.info(f"   Entrada: {entry}")
+        logger.info(f"   Tamaño: {size}")
+        logger.info(f"   Margen: ${self.margin_per_trade}")
+        logger.info(f"   Leverage: {self.leverage}x")
         
         try:
-            emoji = "✅" if operation['result'] == "TP" else "❌" if operation['result'] == "SL" else "⏰"
-            color = "🟢" if operation['pnl_percent'] > 0 else "🔴"
+            # 1. ORDEN DE ENTRADA (MARKET)
+            order_result = self.api.place_order(
+                symbol=symbol,
+                side=side,
+                order_type="market",
+                size=size
+            )
             
-            message = f"""
-{color} <b>OPERACIÓN CERRADA - {operation['symbol']}</b>
-{emoji} <b>Resultado:</b> {operation['result']}
-📊 <b>Señal:</b> {operation['signal']}
-💰 <b>Entrada:</b> {operation['entry_price']:.4f}
-🎯 <b>Salida:</b> {operation['exit_price']:.4f}
-📈 <b>PnL:</b> {operation['pnl_percent']:+.2f}%
-⏰ <b>Duración:</b> {operation['duration_min']:.1f} min
-📝 <b>Razón:</b> {operation['reason']}
-            """
+            if not order_result:
+                logger.error(f"Error colocando orden de entrada para {symbol}")
+                return False
             
-            for chat_id in chat_ids:
-                url = f"https://api.telegram.org/bot{token}/sendMessage"
-                payload = {
-                    'chat_id': chat_id,
-                    'text': message,
-                    'parse_mode': 'HTML'
-                }
-                requests.post(url, json=payload, timeout=10)
-                
+            order_id = order_result['data']['orderId']
+            logger.info(f"✅ Orden colocada: {order_id}")
+            
+            # Pequeño delay
+            time.sleep(1)
+            
+            # 2. TAKE PROFIT
+            tp_result = self.api.place_tp_sl_order(
+                symbol=symbol,
+                plan_type="normal",
+                trigger_price=tp,
+                execute_price=tp,
+                size=size,
+                side=tp_side
+            )
+            
+            if tp_result:
+                logger.info(f"✅ TP colocado en {tp}")
+            else:
+                logger.warning(f"⚠ Error colocando TP")
+            
+            # 3. STOP LOSS
+            sl_result = self.api.place_tp_sl_order(
+                symbol=symbol,
+                plan_type="normal",
+                trigger_price=sl,
+                execute_price=sl,
+                size=size,
+                side=sl_side
+            )
+            
+            if sl_result:
+                logger.info(f"✅ SL colocado en {sl}")
+            else:
+                logger.warning(f"⚠ Error colocando SL")
+            
+            # Registrar operación activa
+            self.operaciones_activas[symbol] = {
+                'signal': signal,
+                'entry_price': entry,
+                'stop_loss': sl,
+                'take_profit': tp,
+                'size': size,
+                'order_id': order_id,
+                'entry_time': datetime.now().isoformat(),
+                'margin': self.margin_per_trade,
+                'leverage': self.leverage
+            }
+            
+            # Enviar confirmación a Telegram
+            self._send_trade_confirmation(signal_data, order_id, size)
+            
+            return True
+            
         except Exception as e:
-            logger.error(f"Error enviando notificación: {e}")
-    
-    def scan_market(self):
-        """Escanea el mercado en busca de nuevas señales"""
-        logger.info("🔍 Escaneando mercado...")
-        
-        # Primero verificar cierres
-        closed = self.check_close_conditions()
-        if closed:
-            logger.info(f"📊 Operaciones cerradas: {len(closed)}")
-        
-        # Buscar nuevas señales (solo si no hay operación activa en ese símbolo)
-        new_signals = []
-        
-        for symbol in self.config['symbols']:
-            try:
-                # Saltar si ya hay operación activa en este símbolo
-                if symbol in self.operaciones_activas:
-                    continue
-                
-                # Simular análisis (en producción usarías datos reales)
-                if random.random() > 0.7:  # 30% de probabilidad de señal
-                    signal = "LONG" if random.random() > 0.5 else "SHORT"
-                    current_price = random.uniform(90, 110)
-                    
-                    if signal == "LONG":
-                        entry = current_price
-                        sl = entry * 0.98
-                        tp = entry * 1.03
-                    else:
-                        entry = current_price
-                        sl = entry * 1.02
-                        tp = entry * 0.97
-                    
-                    signal_data = {
-                        'symbol': symbol,
-                        'signal': signal,
-                        'entry_price': entry,
-                        'stop_loss': sl,
-                        'take_profit': tp,
-                        'current_price': current_price,
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    
-                    new_signals.append(signal_data)
-                    
-                    # Registrar como operación activa
-                    self.operaciones_activas[symbol] = {
-                        'signal': signal,
-                        'entry_price': entry,
-                        'stop_loss': sl,
-                        'take_profit': tp,
-                        'entry_time': datetime.now().isoformat()
-                    }
-                    
-                    self.total_operaciones += 1
-                    
-                    # Enviar señal
-                    self._send_signal_notification(signal_data)
-                    
-                    logger.info(f"📈 {symbol}: {signal} @ {entry:.4f}")
-                    
-            except Exception as e:
-                logger.error(f"Error analizando {symbol}: {e}")
-                continue
-        
-        logger.info(f"✅ Nuevas señales: {len(new_signals)}")
-        return new_signals
-    
-    def _send_signal_notification(self, signal):
-        """Envía notificación de señal por Telegram"""
+            logger.error(f"❌ Error ejecutando trade: {e}")
+            return False
+
+    def _send_trade_confirmation(self, signal, order_id, size):
+        """Envía confirmación de trade a Telegram"""
         token = self.config.get('telegram_token')
         chat_ids = self.config.get('telegram_chat_ids', [])
         
@@ -304,13 +376,18 @@ class TradingBot:
             emoji = "🟢" if signal['signal'] == "LONG" else "🔴"
             
             message = f"""
-{emoji} <b>SEÑAL {signal['signal']} - {signal['symbol']}</b>
-💰 <b>Precio:</b> {signal['current_price']:.4f}
-🎯 <b>Entrada:</b> {signal['entry_price']:.4f}
+{emoji} <b>ORDEN EJECUTADA EN BITGET</b>
+📊 <b>Símbolo:</b> {signal['symbol']}
+🎯 <b>Señal:</b> {signal['signal']}
+💰 <b>Entrada:</b> {signal['entry_price']:.4f}
+📏 <b>Tamaño:</b> {size}
+💵 <b>Margen:</b> ${self.margin_per_trade}
+📈 <b>Leverage:</b> {self.leverage}x
 🛑 <b>Stop Loss:</b> {signal['stop_loss']:.4f}
 🎯 <b>Take Profit:</b> {signal['take_profit']:.4f}
+🆔 <b>Order ID:</b> {order_id}
 ⏰ <b>Hora:</b> {datetime.now().strftime('%H:%M:%S')}
-🤖 <b>Bot Bitget Auto-Trading</b>
+🤖 <b>Bot Breakout+Reentry</b>
             """
             
             for chat_id in chat_ids:
@@ -323,29 +400,210 @@ class TradingBot:
                 requests.post(url, json=payload, timeout=10)
                 
         except Exception as e:
-            logger.error(f"Error enviando señal: {e}")
-    
-    def run_cycle(self):
-        """Ejecuta un ciclo completo del bot"""
+            logger.error(f"Error enviando confirmación: {e}")
+
+    def analyze_symbol(self, symbol):
+        """Analiza símbolo con estrategia Breakout+Reentry"""
         try:
-            logger.info("\n" + "="*50)
-            logger.info("🔄 CICLO DE TRADING")
-            logger.info("="*50)
+            # Obtener datos
+            result = self.api.get_klines(symbol, "15m", 100)
+            if not result or not result.get('data'):
+                return None
+            
+            data = result['data']
+            closes = [float(c[4]) for c in data]
+            highs = [float(c[2]) for c in data]
+            lows = [float(c[3]) for c in data]
+            
+            if len(closes) < 50:
+                return None
+            
+            current_price = closes[-1]
+            
+            # ESTRATEGIA BREAKOUT + REENTRY
+            # 1. Calcular canal (20 periodos)
+            lookback = 20
+            if len(closes) < lookback:
+                return None
+            
+            # Regresión lineal
+            x = np.arange(len(closes[-lookback:]))
+            y = np.array(closes[-lookback:])
+            
+            A = np.vstack([x, np.ones(len(x))]).T
+            m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+            
+            # Calcular desviación
+            y_pred = m * x + c
+            residuals = y - y_pred
+            std = np.std(residuals)
+            
+            # Bandas del canal
+            upper_band = y_pred + std
+            lower_band = y_pred - std
+            
+            current_upper = upper_band[-1]
+            current_lower = lower_band[-1]
+            
+            # Calcular ángulo de tendencia
+            price_range = max(y) - min(y)
+            if price_range > 0:
+                angle = math.degrees(math.atan(m * len(x) / price_range))
+            else:
+                angle = 0
+            
+            # Calcular RSI simple
+            changes = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+            gains = sum(max(change, 0) for change in changes[-14:])
+            losses = sum(abs(min(change, 0)) for change in changes[-14:])
+            
+            if losses == 0:
+                rsi = 100
+            else:
+                rs = gains / losses
+                rsi = 100 - (100 / (1 + rs))
+            
+            # Calcular Stochastic
+            period = 14
+            if len(closes) >= period:
+                lowest = min(lows[-period:])
+                highest = max(highs[-period:])
+                if highest != lowest:
+                    stoch = 100 * (current_price - lowest) / (highest - lowest)
+                else:
+                    stoch = 50
+            else:
+                stoch = 50
+            
+            # DETECCIÓN DE SEÑAL
+            signal = None
+            
+            # Condiciones para LONG (Breakout + Reentry)
+            if (current_price > current_lower and  # Reingreso al canal
+                angle > 10 and  # Tendencia alcista
+                stoch < 30 and  # Oversold
+                rsi < 40):  # No sobrecomprado
+                
+                # Verificar que estaba fuera del canal
+                prev_price = closes[-2]
+                if prev_price < current_lower:
+                    signal = "LONG"
+            
+            # Condiciones para SHORT
+            elif (current_price < current_upper and  # Reingreso al canal
+                  angle < -10 and  # Tendencia bajista
+                  stoch > 70 and  # Overbought
+                  rsi > 60):  # Sobrecomprado
+                
+                # Verificar que estaba fuera del canal
+                prev_price = closes[-2]
+                if prev_price > current_upper:
+                    signal = "SHORT"
+            
+            if signal:
+                # Calcular niveles
+                atr = np.mean([highs[i] - lows[i] for i in range(-14, 0)])
+                
+                if signal == "LONG":
+                    entry = current_price
+                    sl = entry - (atr * 1.5)
+                    tp = entry + (atr * 2.5)
+                else:
+                    entry = current_price
+                    sl = entry + (atr * 1.5)
+                    tp = entry - (atr * 2.5)
+                
+                # Ratio riesgo/beneficio mínimo
+                risk = abs(entry - sl)
+                reward = abs(tp - entry)
+                rr_ratio = reward / risk if risk > 0 else 0
+                
+                if rr_ratio < 1.5:
+                    # Ajustar TP para mantener ratio mínimo
+                    if signal == "LONG":
+                        tp = entry + (risk * 1.5)
+                    else:
+                        tp = entry - (risk * 1.5)
+                
+                return {
+                    'symbol': symbol,
+                    'signal': signal,
+                    'entry_price': round(entry, 6),
+                    'stop_loss': round(sl, 6),
+                    'take_profit': round(tp, 6),
+                    'current_price': current_price,
+                    'rsi': round(rsi, 1),
+                    'stoch': round(stoch, 1),
+                    'angle': round(angle, 1),
+                    'channel_width': round((current_upper - current_lower) / current_price * 100, 2),
+                    'timestamp': datetime.now().isoformat()
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error analizando {symbol}: {e}")
+            return None
+
+    def scan_market(self):
+        """Escanea el mercado"""
+        logger.info("🔍 Escaneando mercado (estrategia Breakout+Reentry)...")
+        
+        signals = []
+        
+        for symbol in self.config['symbols']:
+            try:
+                # Saltar si ya hay operación activa
+                if symbol in self.operaciones_activas:
+                    continue
+                
+                # Analizar símbolo
+                analysis = self.analyze_symbol(symbol)
+                
+                if analysis:
+                    logger.info(f"📈 Señal encontrada: {symbol} {analysis['signal']}")
+                    logger.info(f"   Precio: {analysis['current_price']:.4f}")
+                    logger.info(f"   RSI: {analysis['rsi']:.1f}, Stoch: {analysis['stoch']:.1f}")
+                    logger.info(f"   Ángulo: {analysis['angle']:.1f}°, Canal: {analysis['channel_width']:.1f}%")
+                    
+                    signals.append(analysis)
+                    
+                    # EJECUTAR TRADE REAL
+                    success = self.execute_trade(analysis)
+                    
+                    if success:
+                        logger.info(f"✅ Trade ejecutado en Bitget para {symbol}")
+                    else:
+                        logger.error(f"❌ Error ejecutando trade para {symbol}")
+                
+            except Exception as e:
+                logger.error(f"Error procesando {symbol}: {e}")
+                continue
+        
+        logger.info(f"✅ Señales encontradas: {len(signals)}")
+        return signals
+
+    def run_cycle(self):
+        """Ejecuta ciclo de trading"""
+        try:
+            logger.info("\n" + "="*60)
+            logger.info("🔄 CICLO DE TRADING REAL")
+            logger.info("="*60)
             
             signals = self.scan_market()
             
             logger.info(f"\n📊 RESUMEN:")
             logger.info(f"   Activas: {len(self.operaciones_activas)}")
-            logger.info(f"   Historial: {len(self.historial_operaciones)}")
-            logger.info(f"   Total: {self.total_operaciones}")
+            logger.info(f"   Señales: {len(signals)}")
             
             if self.operaciones_activas:
                 for symbol, pos in self.operaciones_activas.items():
                     entry_time = datetime.fromisoformat(pos['entry_time'])
                     duration = (datetime.now() - entry_time).total_seconds() / 60
-                    logger.info(f"   • {symbol}: {pos['signal']} @ {pos['entry_price']:.4f} ({duration:.1f}min)")
+                    pnl = ((pos['current_price'] - pos['entry_price']) / pos['entry_price'] * 100) if 'current_price' in pos else 0
+                    logger.info(f"   • {symbol}: {pos['signal']} @ {pos['entry_price']:.4f} ({duration:.1f}min) PnL: {pnl:.2f}%")
             
-            logger.info("="*50)
+            logger.info("="*60)
             
             return len(signals)
             
@@ -357,15 +615,12 @@ class TradingBot:
 # CONFIGURACIÓN
 # ---------------------------
 def create_config():
-    """Crea configuración del bot"""
+    """Crea configuración"""
     telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '')
     chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
     
-    if not chat_ids:
-        chat_ids = ['-1002272872445']
-    
     return {
-        'symbols': BITGET_SYMBOLS,
+        'symbols': SYMBOLS,
         'scan_interval_minutes': 5,
         'telegram_token': os.environ.get('TELEGRAM_TOKEN', ''),
         'telegram_chat_ids': chat_ids
@@ -381,20 +636,22 @@ app = Flask(__name__)
 config = create_config()
 bot = TradingBot(config)
 bot_thread = None
-bot_running = False
+bot_running = True  # Siempre activo
 
 def bot_loop():
-    """Loop principal del bot"""
+    """Loop principal"""
     global bot_running
-    bot_running = True
     
-    logger.info("🚀 Bot iniciado")
+    logger.info("🚀 Bot de Trading REAL iniciado")
+    logger.info(f"💵 Margen por operación: ${bot.margin_per_trade}")
+    logger.info(f"📈 Apalancamiento: {bot.leverage}x")
+    logger.info(f"📊 Símbolos: {len(bot.config['symbols'])}")
+    logger.info("🎯 Estrategia: Breakout + Reentry con confirmación RSI/Stochastic")
     
     while bot_running:
         try:
             signals = bot.run_cycle()
             
-            # Esperar para próximo ciclo
             wait_min = config['scan_interval_minutes']
             logger.info(f"⏳ Próximo ciclo en {wait_min} minutos...")
             
@@ -406,149 +663,53 @@ def bot_loop():
         except Exception as e:
             logger.error(f"Error en loop: {e}")
             time.sleep(60)
-    
-    logger.info("🛑 Bot detenido")
-
-@app.route('/')
-def index():
-    """Endpoint principal"""
-    status = {
-        'status': 'online',
-        'bot': 'Bitget Auto-Trading',
-        'bot_running': bot_running,
-        'active_operations': len(bot.operaciones_activas),
-        'total_operations': bot.total_operaciones,
-        'symbols': len(config['symbols']),
-        'interval_minutes': config['scan_interval_minutes'],
-        'timestamp': datetime.now().isoformat()
-    }
-    return jsonify(status)
-
-@app.route('/health')
-def health():
-    """Health check"""
-    return jsonify({'status': 'healthy'})
-
-@app.route('/start', methods=['POST'])
-def start_bot():
-    """Inicia el bot"""
-    global bot_thread, bot_running
-    
-    if bot_running:
-        return jsonify({'status': 'error', 'message': 'Ya está ejecutándose'})
-    
-    bot_thread = threading.Thread(target=bot_loop, daemon=True)
-    bot_thread.start()
-    
-    return jsonify({
-        'status': 'success',
-        'message': 'Bot iniciado',
-        'running': True
-    })
-
-@app.route('/stop', methods=['POST'])
-def stop_bot():
-    """Detiene el bot"""
-    global bot_running
-    
-    bot_running = False
-    return jsonify({
-        'status': 'success',
-        'message': 'Bot detenido',
-        'running': False
-    })
-
-@app.route('/scan', methods=['POST'])
-def scan_now():
-    """Ejecuta escaneo inmediato"""
-    try:
-        signals = bot.run_cycle()
-        return jsonify({
-            'status': 'success',
-            'signals_found': signals,
-            'active_ops': len(bot.operaciones_activas)
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)})
-
-@app.route('/status')
-def get_status():
-    """Estado detallado"""
-    active_list = []
-    for symbol, pos in bot.operaciones_activas.items():
-        entry_time = datetime.fromisoformat(pos['entry_time'])
-        duration = (datetime.now() - entry_time).total_seconds() / 60
-        active_list.append({
-            'symbol': symbol,
-            'signal': pos['signal'],
-            'entry': pos['entry_price'],
-            'duration_min': round(duration, 1)
-        })
-    
-    return jsonify({
-        'bot_running': bot_running,
-        'active_count': len(bot.operaciones_activas),
-        'active_operations': active_list,
-        'history_count': len(bot.historial_operaciones),
-        'total_operations': bot.total_operaciones,
-        'scan_interval': config['scan_interval_minutes']
-    })
-
-@app.route('/clear', methods=['POST'])
-def clear_operations():
-    """Limpia operaciones antiguas"""
-    try:
-        # Cerrar todas las operaciones activas por timeout
-        now = datetime.now()
-        cleared = []
-        
-        for symbol, pos in list(bot.operaciones_activas.items()):
-            entry_time = datetime.fromisoformat(pos['entry_time'])
-            duration = (now - entry_time).total_seconds() / 60
-            
-            closed_op = {
-                'timestamp': now.isoformat(),
-                'symbol': symbol,
-                'signal': pos['signal'],
-                'entry_price': pos['entry_price'],
-                'stop_loss': pos['stop_loss'],
-                'take_profit': pos['take_profit'],
-                'exit_price': bot._get_simulated_price(symbol, pos['entry_price']),
-                'result': 'CLEARED',
-                'pnl_percent': 0,
-                'duration_min': duration,
-                'reason': 'Limpieza manual'
-            }
-            
-            bot._log_operation(closed_op)
-            bot.historial_operaciones.append(closed_op)
-            cleared.append(symbol)
-            del bot.operaciones_activas[symbol]
-        
-        return jsonify({
-            'status': 'success',
-            'cleared': len(cleared),
-            'operations': cleared
-        })
-        
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)})
 
 # Iniciar bot automáticamente
 def auto_start():
-    """Inicia el bot automáticamente"""
     time.sleep(5)
-    
-    global bot_thread, bot_running
-    
-    if not bot_running:
-        logger.info("🤖 Inicio automático del bot...")
-        bot_thread = threading.Thread(target=bot_loop, daemon=True)
-        bot_thread.start()
+    global bot_thread
+    bot_thread = threading.Thread(target=bot_loop, daemon=True)
+    bot_thread.start()
 
-# Iniciar thread de autoinicio
+# Iniciar thread
 start_thread = threading.Thread(target=auto_start, daemon=True)
 start_thread.start()
+
+@app.route('/')
+def index():
+    return jsonify({
+        'status': 'online',
+        'bot': 'Bitget Breakout+Reentry Bot',
+        'trading': 'ACTIVO',
+        'strategy': 'Breakout + Reentry con RSI/Stochastic',
+        'margin_per_trade': f'${bot.margin_per_trade}',
+        'leverage': f'{bot.leverage}x',
+        'active_trades': len(bot.operaciones_activas),
+        'symbols': bot.config['symbols']
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'healthy'})
+
+@app.route('/trades')
+def get_trades():
+    active = []
+    for symbol, pos in bot.operaciones_activas.items():
+        active.append({
+            'symbol': symbol,
+            'signal': pos['signal'],
+            'entry': pos['entry_price'],
+            'sl': pos['stop_loss'],
+            'tp': pos['take_profit'],
+            'size': pos.get('size', 0),
+            'order_id': pos.get('order_id', '')
+        })
+    
+    return jsonify({
+        'active_trades': active,
+        'count': len(active)
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
