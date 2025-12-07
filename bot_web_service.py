@@ -25,9 +25,11 @@ import base64
 from flask import Flask, request, jsonify
 import threading
 import logging
+
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
 # ---------------------------
 # Cliente Bitget API
 # ---------------------------
@@ -37,21 +39,20 @@ class BitgetClient:
         self.api_secret = api_secret
         self.passphrase = passphrase
         self.base_url = "https://api.bitget.com"
+
     def _generate_signature(self, timestamp, method, request_path, body=''):
-        if body:
-            body = json.dumps(body) if isinstance(body, dict) else body
-        else:
-            body = ''
-        message = timestamp + method.upper() + request_path + body
+        body_str = json.dumps(body, separators=(',', ':')) if isinstance(body, dict) else str(body) if body else ''
+        message = timestamp + method.upper() + request_path + body_str
         mac = hmac.new(
             bytes(self.api_secret, encoding='utf8'),
             bytes(message, encoding='utf8'),
             digestmod='sha256'
         )
         return base64.b64encode(mac.digest()).decode()
+
     def _get_headers(self, method, request_path, body=''):
         timestamp = str(int(time.time() * 1000))
-        body_str = json.dumps(body) if isinstance(body, dict) else body if body else ''
+        body_str = json.dumps(body, separators=(',', ':')) if isinstance(body, dict) else str(body) if body else ''
         sign = self._generate_signature(timestamp, method.upper(), request_path, body_str)
         return {
             'Content-Type': 'application/json',
@@ -61,6 +62,7 @@ class BitgetClient:
             'ACCESS-PASSPHRASE': self.passphrase,
             'locale': 'en-US'
         }
+
     def get_account_info(self, product_type='umcbl'):
         try:
             request_path = f'/api/v2/mix/account/accounts'
@@ -81,6 +83,7 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error en get_account_info V2: {e}")
             return None
+
     def get_symbol_info(self, symbol):
         try:
             request_path = f'/api/v2/mix/market/contracts'
@@ -103,6 +106,7 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error obteniendo info del símbolo V2: {e}")
             return None
+
     def place_order(self, symbol, side, order_type, size, price=None, 
                     client_order_id=None, time_in_force='normal'):
         try:
@@ -141,6 +145,7 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error colocando orden V2: {e}")
             return None
+
     def place_plan_order(self, symbol, side, trigger_price, order_type, size, 
                          price=None, plan_type='normal_plan'):
         try:
@@ -174,6 +179,7 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error colocando plan order V2: {e}")
             return None
+
     def set_leverage(self, symbol, leverage, hold_side='long'):
         try:
             request_path = '/api/v2/mix/account/set-leverage'
@@ -201,6 +207,7 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error en set_leverage V2: {e}")
             return False
+
     def get_positions(self, symbol=None, product_type='umcbl'):
         try:
             request_path = '/api/v2/mix/position/all-position'
@@ -222,6 +229,7 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error obteniendo posiciones V2: {e}")
             return []
+
     def get_klines(self, symbol, interval='5m', limit=200):
         try:
             interval_map = {
@@ -259,6 +267,7 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error en get_klines V2: {e}")
             return None
+
 # ---------------------------
 # Optimizador IA
 # ---------------------------
@@ -267,6 +276,7 @@ class OptimizadorIA:
         self.log_path = log_path
         self.min_samples = min_samples
         self.datos = self.cargar_datos()
+
     def cargar_datos(self):
         datos = []
         try:
@@ -293,6 +303,7 @@ class OptimizadorIA:
         except FileNotFoundError:
             logger.warning("No se encontró operaciones_log.csv (optimizador)")
         return datos
+
     def evaluar_configuracion(self, trend_threshold, min_strength, entry_margin):
         if not self.datos:
             return -99999
@@ -316,6 +327,7 @@ class OptimizadorIA:
         if ops_calidad:
             score *= 1.2
         return score
+
     def buscar_mejores_parametros(self):
         if not self.datos or len(self.datos) < self.min_samples:
             logger.info(f"No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
@@ -352,6 +364,7 @@ class OptimizadorIA:
         else:
             logger.warning("No se encontró una configuración mejor")
         return mejores_param
+
 # ---------------------------
 # BOT PRINCIPAL - BITGET FUTURES
 # ---------------------------
@@ -400,6 +413,7 @@ class TradingBot:
         self.inicializar_log()
         # Verificar conexión y balance
         self.verificar_conexion_bitget()
+
     def verificar_conexion_bitget(self):
         try:
             accounts = self.bitget.get_account_info()
@@ -419,6 +433,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error conectando con Bitget: {e}")
             return False
+
     def ejecutar_operacion_real(self, simbolo, tipo_operacion, precio_entrada, tp, sl, info_canal, config_optima):
         try:
             logger.info(f"EJECUTANDO OPERACIÓN REAL EN BITGET")
@@ -527,6 +542,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error ejecutando operación: {e}")
             return None
+
     def cargar_estado(self):
         try:
             if os.path.exists(self.estado_file):
@@ -563,6 +579,7 @@ class TradingBot:
                 logger.info(f"Esperando reentry: {len(self.esperando_reentry)}")
         except Exception as e:
             logger.warning(f"Error cargando estado previo: {e}")
+
     def guardar_estado(self):
         try:
             estado = {
@@ -596,6 +613,7 @@ class TradingBot:
             logger.info("Estado guardado correctamente")
         except Exception as e:
             logger.warning(f"Error guardando estado: {e}")
+
     def buscar_configuracion_optima_simbolo(self, simbolo):
         if simbolo in self.config_optima_por_simbolo:
             config_optima = self.config_optima_por_simbolo[simbolo]
@@ -669,6 +687,7 @@ class TradingBot:
             self.ultima_busqueda_config[simbolo] = datetime.now()
             logger.info(f"Config óptima: {mejor_config['timeframe']} - {mejor_config['num_velas']} velas - Ancho: {mejor_config['ancho_canal']:.1f}%")
         return mejor_config
+
     def obtener_datos_mercado_config(self, simbolo, timeframe, num_velas):
         try:
             klines = self.bitget.get_klines(simbolo, timeframe, num_velas + 14)
@@ -692,6 +711,7 @@ class TradingBot:
         except Exception as e:
             logger.warning(f"Error obteniendo datos de {simbolo}: {e}")
             return None
+
     def calcular_canal_regresion_config(self, datos_mercado, candle_period):
         if not datos_mercado or len(datos_mercado['maximos']) < candle_period:
             return None
@@ -749,6 +769,7 @@ class TradingBot:
             'timeframe': datos_mercado.get('timeframe', 'N/A'),
             'num_velas': candle_period
         }
+
     def detectar_breakout(self, simbolo, info_canal, datos_mercado):
         if not info_canal:
             return None
@@ -780,6 +801,7 @@ class TradingBot:
                 logger.info(f"{simbolo} - BREAKOUT SHORT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
                 return "BREAKOUT_SHORT"
         return None
+
     def detectar_reentry(self, simbolo, info_canal, datos_mercado):
         if simbolo not in self.esperando_reentry:
             return None
@@ -816,6 +838,7 @@ class TradingBot:
                         del self.breakouts_detectados[simbolo]
                     return "SHORT"
         return None
+
     def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual):
         if not info_canal:
             return None, None, None
@@ -835,6 +858,7 @@ class TradingBot:
             # TP en la parte opuesta del canal (soporte)
             take_profit = soporte
         return precio_entrada, take_profit, stop_loss
+
     def escanear_mercado(self):
         logger.info(f"Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
         senales_encontradas = 0
@@ -948,6 +972,7 @@ class TradingBot:
         else:
             logger.info("No se encontraron señales en este ciclo")
         return senales_encontradas
+
     def generar_senal_operacion(self, simbolo, tipo_operacion, precio_entrada, tp, sl,
                             info_canal, datos_mercado, config_optima, breakout_info=None):
         if simbolo in self.senales_enviadas:
@@ -1018,6 +1043,7 @@ class TradingBot:
                 logger.error(f"Error enviando señal: {e}")
         self.senales_enviadas.add(simbolo)
         self.total_operaciones += 1
+
     def verificar_cierre_operaciones(self):
         if not self.operaciones_activas:
             return []
@@ -1111,6 +1137,7 @@ class TradingBot:
                 logger.error(f"Error verificando operación {simbolo}: {e}")
                 continue
         return operaciones_cerradas
+
     def generar_mensaje_cierre(self, datos_operacion):
         emoji = "🟢" if datos_operacion['resultado'] == "TP" else "🔴"
         color_emoji = "✅" if datos_operacion['resultado'] == "TP" else "❌"
@@ -1142,6 +1169,7 @@ class TradingBot:
 🕒 {datos_operacion['timestamp']}
         """
         return mensaje
+
     def inicializar_log(self):
         if not os.path.exists(self.archivo_log):
             with open(self.archivo_log, 'w', newline='', encoding='utf-8') as f:
@@ -1155,6 +1183,7 @@ class TradingBot:
                     'nivel_fuerza', 'timeframe_utilizado', 'velas_utilizadas',
                     'stoch_k', 'stoch_d', 'breakout_usado', 'leverage', 'capital_usado'
                 ])
+
     def registrar_operacion(self, datos_operacion):
         with open(self.archivo_log, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -1183,6 +1212,7 @@ class TradingBot:
                 datos_operacion.get('leverage', self.leverage),
                 datos_operacion.get('capital_usado', self.capital_por_operacion)
             ])
+
     def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
         if len(datos_mercado['cierres']) < period:
             return 50, 50
@@ -1208,6 +1238,7 @@ class TradingBot:
                 k_final = k_smoothed[-1]
                 return k_final, d
         return 50, 50
+
     def calcular_regresion_lineal(self, x, y):
         if len(x) != len(y) or len(x) == 0:
             return None
@@ -1225,6 +1256,7 @@ class TradingBot:
             pendiente = (n * sum_xy - sum_x * sum_y) / denom
         intercepto = (sum_y - pendiente * sum_x) / n if n else 0
         return pendiente, intercepto
+
     def calcular_pearson_y_angulo(self, x, y):
         if len(x) != len(y) or len(x) < 2:
             return 0, 0
@@ -1246,6 +1278,7 @@ class TradingBot:
         angulo_radianes = math.atan(pendiente * len(x) / (max(y) - min(y)) if (max(y) - min(y)) != 0 else 0)
         angulo_grados = math.degrees(angulo_radianes)
         return pearson, angulo_grados
+
     def clasificar_fuerza_tendencia(self, angulo_grados):
         angulo_abs = abs(angulo_grados)
         if angulo_abs < 3:
@@ -1258,6 +1291,7 @@ class TradingBot:
             return "💚 Fuerte", 4
         else:
             return "💙 Muy Fuerte", 5
+
     def determinar_direccion_tendencia(self, angulo_grados, umbral_minimo=1):
         if abs(angulo_grados) < umbral_minimo:
             return "⚪ RANGO"
@@ -1265,6 +1299,7 @@ class TradingBot:
             return "🟢 ALCISTA"
         else:
             return "🔴 BAJISTA"
+
     def calcular_r2(self, y_real, x, pendiente, intercepto):
         if len(y_real) != len(x):
             return 0
@@ -1275,6 +1310,7 @@ class TradingBot:
         if ss_tot == 0:
             return 0
         return 1 - (ss_res / ss_tot)
+
     def generar_grafico_profesional(self, simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion):
         try:
             config_optima = self.config_optima_por_simbolo.get(simbolo)
@@ -1374,6 +1410,7 @@ class TradingBot:
         except Exception as e:
             logger.warning(f"Error generando gráfico: {e}")
             return None
+
     def enviar_grafico_telegram(self, buf, token, chat_ids):
         if not buf or not token or not chat_ids:
             return False
@@ -1391,6 +1428,7 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"Error enviando gráfico: {e}")
         return exito
+
     def _enviar_telegram_simple(self, mensaje, token, chat_ids):
         if not token or not chat_ids:
             return False
@@ -1404,6 +1442,7 @@ class TradingBot:
             except Exception:
                 resultados.append(False)
         return any(resultados)
+
     def reoptimizar_periodicamente(self):
         try:
             horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 7200
@@ -1418,6 +1457,7 @@ class TradingBot:
                     logger.info("Parámetros actualizados en tiempo real")
         except Exception as e:
             logger.warning(f"Error en re-optimización automática: {e}")
+
     def actualizar_parametros(self, nuevos_parametros):
         self.config['trend_threshold_degrees'] = nuevos_parametros.get('trend_threshold_degrees', 
                                                                         self.config.get('trend_threshold_degrees', 16))
@@ -1425,6 +1465,7 @@ class TradingBot:
                                                                            self.config.get('min_trend_strength_degrees', 16))
         self.config['entry_margin'] = nuevos_parametros.get('entry_margin', 
                                                              self.config.get('entry_margin', 0.001))
+
     def ejecutar_analisis(self):
         if random.random() < 0.1:
             self.reoptimizar_periodicamente()
@@ -1433,6 +1474,7 @@ class TradingBot:
             logger.info(f"Operaciones cerradas: {', '.join(cierres)}")
         self.guardar_estado()
         return self.escanear_mercado()
+
     def mostrar_resumen_operaciones(self):
         logger.info(f"RESUMEN OPERACIONES:")
         logger.info(f"Activas: {len(self.operaciones_activas)}")
@@ -1446,10 +1488,12 @@ class TradingBot:
                 velas = op.get('velas_utilizadas', 0)
                 breakout = "🚀" if op.get('breakout_usado', False) else ""
                 logger.info(f"{simbolo} {estado} {breakout} - {timeframe} - {velas}v - Ancho: {ancho_canal:.1f}%")
+
 # ---------------------------
 # FLASK APP Y RENDER
 # ---------------------------
 app = Flask(__name__)
+
 def crear_config_desde_entorno():
     directorio_actual = os.path.dirname(os.path.abspath(__file__))
     telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '')
@@ -1491,9 +1535,11 @@ def crear_config_desde_entorno():
         'log_path': os.path.join(directorio_actual, 'operaciones_bitget.csv'),
         'estado_file': os.path.join(directorio_actual, 'estado_bot_bitget.json')
     }
+
 # Crear bot con configuración desde entorno
 config = crear_config_desde_entorno()
 bot = TradingBot(config)
+
 def run_bot_loop():
     """Ejecuta el bot en un hilo separado"""
     while True:
@@ -1503,6 +1549,7 @@ def run_bot_loop():
         except Exception as e:
             logger.error(f"Error en el hilo del bot: {e}")
             time.sleep(60)
+
 # Iniciar hilo del bot solo si las credenciales están configuradas
 if config['bitget_api_key'] and config['bitget_api_secret'] and config['bitget_passphrase']:
     bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
@@ -1510,9 +1557,11 @@ if config['bitget_api_key'] and config['bitget_api_secret'] and config['bitget_p
     logger.info("Bot iniciado con credenciales Bitget")
 else:
     logger.warning("Credenciales de Bitget no configuradas. Bot funcionará en modo demo.")
+
 @app.route('/')
 def index():
     return "Bot Breakout + Reentry para Bitget está en línea.", 200
+
 @app.route('/webhook', methods=['POST'])
 def telegram_webhook():
     if request.is_json:
@@ -1520,6 +1569,7 @@ def telegram_webhook():
         logger.info(f"Update recibido: {json.dumps(update)}")
         return jsonify({"status": "ok"}), 200
     return jsonify({"error": "Request must be JSON"}), 400
+
 def setup_telegram_webhook():
     token = os.environ.get('TELEGRAM_TOKEN')
     if not token:
@@ -1536,6 +1586,9 @@ def setup_telegram_webhook():
         requests.get(f"https://api.telegram.org/bot{token}/setWebhook?url={webhook_url}")
     except Exception as e:
         logger.error(f"Error configurando webhook: {e}")
+
 if __name__ == '__main__':
+    # Bind al puerto que Render espera
+    port = int(os.environ.get('PORT', 10000))
     setup_telegram_webhook()
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False)
