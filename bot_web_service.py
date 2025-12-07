@@ -1,5 +1,5 @@
 # bot_web_service.py
-# Adaptación para Render del bot Breakout + Reentry con Bitget WebSocket + REST
+# Adaptación para Render del bot Breakout + Reentry con API de Bitget
 import requests
 import time
 import json
@@ -8,6 +8,8 @@ import sys
 import hmac
 import hashlib
 import base64
+import websocket
+import threading
 from datetime import datetime, timedelta
 import numpy as np
 import math
@@ -15,169 +17,20 @@ import csv
 import itertools
 import statistics
 import random
-import pandas as pd
-from io import BytesIO
 from flask import Flask, request, jsonify
-import threading
 import logging
-import websocket
-from urllib.parse import urlencode
 
 # Configurar logging básico
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ---------------------------
-# UTILIDADES BITGET
+# [INICIO DEL CÓDIGO DEL BOT NUEVO]
+# Adaptado para Bitget API
 # ---------------------------
-def get_bitget_timestamp():
-    return str(int(time.time() * 1000))
-
-def sign_bitget(message, secret):
-    return base64.b64encode(hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()).decode()
-
-def get_bitget_time_offset():
-    try:
-        url = "https://api.bitget.com/api/v2/public/time"
-        response = requests.get(url, timeout=10)
-        server_time = response.json().get("data", {}).get("serverTime")
-        local_time = int(time.time() * 1000)
-        return int(server_time) - local_time
-    except Exception as e:
-        print(f"⚠️ Error al obtener offset de tiempo: {e}")
-        return 0
-
-time_offset = get_bitget_time_offset()
 
 # ---------------------------
-# CLASE DE COMUNICACIÓN CON BITGET
-# ---------------------------
-class BitgetAPI:
-    def __init__(self, api_key, secret_key, passphrase):
-        self.api_key = api_key
-        self.secret_key = secret_key
-        self.passphrase = passphrase
-        self.base_url = "https://api.bitget.com"
-        self.contracts_cache = {}
-        self.session = requests.Session()
-
-    def _make_request(self, method, endpoint, params=None, data=None):
-        url = self.base_url + endpoint
-        timestamp = str(int(time.time() * 1000) + time_offset)
-        params_str = urlencode(sorted(params.items())) if params else ""
-        body_str = json.dumps(data) if data else ""
-        pre_sign = timestamp + method.upper() + endpoint + params_str + body_str
-        signature = sign_bitget(pre_sign, self.secret_key)
-
-        headers = {
-            "ACCESS-KEY": self.api_key,
-            "ACCESS-SIGN": signature,
-            "ACCESS-TIMESTAMP": timestamp,
-            "ACCESS-PASSPHRASE": self.passphrase,
-            "Content-Type": "application/json"
-        }
-
-        for attempt in range(3):
-            try:
-                response = self.session.request(method, url, headers=headers, params=params, json=data, timeout=10)
-                result = response.json()
-                if result.get("code") == "00000":
-                    return result.get("data", {})
-                else:
-                    print(f"❌ Bitget API error {endpoint}: {result}")
-                    time.sleep(0.5 * (2 ** attempt))
-            except Exception as e:
-                print(f"⚠️ Request error en {endpoint}: {e}")
-                time.sleep(1)
-        return None
-
-    def get_contracts(self, symbol):
-        if symbol in self.contracts_cache:
-            return self.contracts_cache[symbol]
-        data = self._make_request("GET", f"/api/v2/mix/market/contracts?symbol={symbol}")
-        if data:
-            contract = data[0] if isinstance(data, list) else data
-            self.contracts_cache[symbol] = contract
-            return contract
-        return None
-
-    def set_margin_mode(self, symbol, margin_mode="isolated"):
-        data = {
-            "productType": "mix",
-            "marginCoin": "USDT",
-            "symbol": symbol,
-            "marginMode": margin_mode
-        }
-        return self._make_request("POST", "/api/v2/mix/account/set-margin-mode", data=data)
-
-    def set_position_mode(self, mode="one-way"):
-        data = {
-            "productType": "mix",
-            "marginCoin": "USDT",
-            "holdMode": mode
-        }
-        return self._make_request("POST", "/api/v2/mix/account/set-position-mode", data=data)
-
-    def set_leverage(self, symbol, leverage=10):
-        data = {
-            "productType": "mix",
-            "marginCoin": "USDT",
-            "symbol": symbol,
-            "leverage": str(leverage)
-        }
-        return self._make_request("POST", "/api/v2/mix/account/set-leverage", data=data)
-
-    def place_order(self, symbol, side, size, ord_type="market", price=None):
-        data = {
-            "symbol": symbol,
-            "productType": "mix",
-            "marginCoin": "USDT",
-            "size": str(size),
-            "side": side,
-            "ordType": ord_type,
-            "marginMode": "isolated"
-        }
-        if price:
-            data["price"] = str(price)
-        return self._make_request("POST", "/api/v2/mix/order/place-order", data=data)
-
-    def place_plan_order(self, symbol, side, size, plan_type, trigger_price, execute_price=None):
-        data = {
-            "symbol": symbol,
-            "productType": "mix",
-            "marginCoin": "USDT",
-            "size": str(size),
-            "side": side,
-            "planType": plan_type,
-            "triggerPrice": str(trigger_price)
-        }
-        if execute_price:
-            data["executePrice"] = str(execute_price)
-        return self._make_request("POST", "/api/v2/mix/order/place-plan-order", data=data)
-
-    def get_klines(self, symbol, timeframe, limit=200):
-        valid_intervals = {"1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H"}
-        interval = valid_intervals.get(timeframe, "1m")
-        params = {"symbol": symbol, "granularity": interval, "limit": str(limit)}
-        data = self._make_request("GET", "/api/v2/mix/market/candles", params=params)
-        if not data:
-            return None
-        # Orden inverso: más antiguo primero
-        data.reverse()
-        maximos = [float(c[2]) for c in data]
-        minimos = [float(c[3]) for c in data]
-        cierres = [float(c[4]) for c in data]
-        tiempos = list(range(len(data)))
-        return {
-            'maximos': maximos,
-            'minimos': minimos,
-            'cierres': cierres,
-            'tiempos': tiempos,
-            'precio_actual': cierres[-1] if cierres else 0
-        }
-
-# ---------------------------
-# OPTIMIZADOR IA (sin cambios)
+# Optimizador IA
 # ---------------------------
 class OptimizadorIA:
     def __init__(self, log_path="operaciones_log.csv", min_samples=15):
@@ -199,9 +52,9 @@ class OptimizadorIA:
                         ancho_relativo = float(row.get('ancho_canal_relativo', 0))
                         nivel_fuerza = int(row.get('nivel_fuerza', 1))
                         datos.append({
-                            'pnl': pnl,
-                            'angulo': angulo,
-                            'pearson': pearson,
+                            'pnl': pnl, 
+                            'angulo': angulo, 
+                            'pearson': pearson, 
                             'r2': r2,
                             'ancho_relativo': ancho_relativo,
                             'nivel_fuerza': nivel_fuerza
@@ -274,162 +127,7 @@ class OptimizadorIA:
         return mejores_param
 
 # ---------------------------
-# CLASE DE DATOS EN TIEMPO REAL (WEBSOCKET)
-# ---------------------------
-class BitgetWebSocket:
-    def __init__(self, symbols, api_key=None, secret_key=None, passphrase=None):
-        self.symbols = symbols
-        self.api_key = api_key
-        self.secret_key = secret_key
-        self.passphrase = passphrase
-        self.ws_public = None
-        self.ws_private = None
-        self.last_pong = time.time()
-        self.candles = {sym: [] for sym in symbols}
-        self.lock = threading.Lock()
-        self.running = True
-
-    def start(self):
-        threading.Thread(target=self._run_public, daemon=True).start()
-        if self.api_key:
-            threading.Thread(target=self._run_private, daemon=True).start()
-
-    def _run_public(self):
-        url = "wss://ws.bitget.com/v2/ws/public"
-        self.ws_public = websocket.WebSocketApp(
-            url,
-            on_open=self._on_open_public,
-            on_message=self._on_message_public,
-            on_error=self._on_error,
-            on_close=self._on_close
-        )
-        while self.running:
-            try:
-                self.ws_public.run_forever(ping_interval=25, ping_timeout=10)
-            except Exception as e:
-                print(f"⚠️ Error en WebSocket público: {e}")
-            if self.running:
-                time.sleep(5)
-
-    def _run_private(self):
-        url = "wss://ws.bitget.com/v2/ws/private"
-        self.ws_private = websocket.WebSocketApp(
-            url,
-            on_open=self._on_open_private,
-            on_message=self._on_message_private,
-            on_error=self._on_error,
-            on_close=self._on_close
-        )
-        while self.running:
-            try:
-                self.ws_private.run_forever(ping_interval=25, ping_timeout=10)
-            except Exception as e:
-                print(f"⚠️ Error en WebSocket privado: {e}")
-            if self.running:
-                time.sleep(5)
-
-    def _on_open_public(self, ws):
-        print("🟢 WebSocket público conectado")
-        args = [{"channel": "candle1m", "instId": sym, "instType": "mc"} for sym in self.symbols]
-        ws.send(json.dumps({"op": "subscribe", "args": args}))
-
-    def _on_open_private(self, ws):
-        print("🔒 WebSocket privado conectado")
-        timestamp = str(int(time.time()))
-        message = timestamp + "GET" + "/user/verify"
-        sign = sign_bitget(message, self.secret_key)
-        login_data = {
-            "op": "login",
-            "args": [{
-                "apiKey": self.api_key,
-                "passphrase": self.passphrase,
-                "timestamp": timestamp,
-                "sign": sign
-            }]
-        }
-        ws.send(json.dumps(login_data))
-
-    def _on_message_public(self, ws, message):
-        try:
-            data = json.loads(message)
-            if "event" in data:
-                if data["event"] == "subscribe":
-                    return
-                elif data["event"] == "error":
-                    print(f"❌ WebSocket error: {data}")
-                    return
-            if "arg" in data and "data" in data:
-                channel = data["arg"].get("channel")
-                instId = data["arg"].get("instId")
-                if channel == "candle1m" and instId in self.candles:
-                    candles_data = data["data"]
-                    for c in candles_data:
-                        # c = [ts, open, high, low, close, vol, volCcy]
-                        candle = {
-                            'timestamp': int(c[0]),
-                            'open': float(c[1]),
-                            'high': float(c[2]),
-                            'low': float(c[3]),
-                            'close': float(c[4]),
-                            'volume': float(c[5])
-                        }
-                        with self.lock:
-                            if not self.candles[instId] or self.candles[instId][-1]['timestamp'] != candle['timestamp']:
-                                self.candles[instId].append(candle)
-                                if len(self.candles[instId]) > 300:
-                                    self.candles[instId].pop(0)
-        except Exception as e:
-            print(f"⚠️ Error procesando mensaje público: {e}")
-
-    def _on_message_private(self, ws, message):
-        try:
-            data = json.loads(message)
-            if "event" in data and data["event"] == "login":
-                if data.get("code") == "0":
-                    print("✅ Autenticación WebSocket privada exitosa")
-                    args = [
-                        {"channel": "orders", "instType": "mc"},
-                        {"channel": "positions", "instType": "mc"}
-                    ]
-                    ws.send(json.dumps({"op": "subscribe", "args": args}))
-                else:
-                    print(f"❌ Error de autenticación privada: {data}")
-        except Exception as e:
-            print(f"⚠️ Error en mensaje privado: {e}")
-
-    def _on_error(self, ws, error):
-        print(f"⚠️ WebSocket error: {error}")
-
-    def _on_close(self, ws, close_status_code, close_msg):
-        print("🔴 WebSocket desconectado")
-
-    def get_candles(self, symbol, num_velas):
-        with self.lock:
-            candles = self.candles.get(symbol, [])
-            if len(candles) < num_velas:
-                return None
-            selected = candles[-num_velas:]
-            maximos = [c['high'] for c in selected]
-            minimos = [c['low'] for c in selected]
-            cierres = [c['close'] for c in selected]
-            tiempos = list(range(len(selected)))
-            return {
-                'maximos': maximos,
-                'minimos': minimos,
-                'cierres': cierres,
-                'tiempos': tiempos,
-                'precio_actual': cierres[-1] if cierres else 0
-            }
-
-    def stop(self):
-        self.running = False
-        if self.ws_public:
-            self.ws_public.close()
-        if self.ws_private:
-            self.ws_private.close()
-
-# ---------------------------
-# BOT PRINCIPAL - BREAKOUT + REENTRY (ADAPTADO A BITGET)
+# BOT PRINCIPAL - BREAKOUT + REENTRY
 # ---------------------------
 class TradingBot:
     def __init__(self, config):
@@ -442,29 +140,36 @@ class TradingBot:
         self.breakout_history = {}
         self.config_optima_por_simbolo = {}
         self.ultima_busqueda_config = {}
+        # NUEVO: Tracking de breakouts y reingresos
+        self.breakouts_detectados = {}
+        self.esperando_reentry = {}
         self.estado_file = config.get('estado_file', 'estado_bot.json')
+        
+        # Configuración de API de Bitget
+        self.api_key = os.environ.get('BITGET_API_KEY')
+        self.secret_key = os.environ.get('BITGET_SECRET_KEY')
+        self.passphrase = os.environ.get('BITGET_PASSPHRASE')
+        self.base_url = "https://api.bitget.com"
+        self.ws_public_url = "wss://ws.bitget.com/v2/ws/public"
+        self.ws_private_url = "wss://ws.bitget.com/v2/ws/private"
+        
+        # WebSocket connections
+        self.ws_public = None
+        self.ws_private = None
+        self.ws_thread = None
+        self.ws_connected = False
+        self.last_ping = time.time()
+        self.ws_reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        
+        # Rate limiting
+        self.last_request_time = 0
+        self.request_interval = 0.1  # 100ms between requests to respect rate limits
+        
+        # Contract information cache
+        self.contract_info = {}
+        
         self.cargar_estado()
-
-        # Inicializar API
-        self.api = BitgetAPI(
-            api_key=config['bitget_api_key'],
-            secret_key=config['bitget_secret_key'],
-            passphrase=config['bitget_passphrase']
-        )
-
-        # Inicializar WebSocket
-        self.ws = BitgetWebSocket(
-            symbols=config['symbols'],
-            api_key=config['bitget_api_key'],
-            secret_key=config['bitget_secret_key'],
-            passphrase=config['bitget_passphrase']
-        )
-        self.ws.start()
-
-        # Configurar cuenta
-        self.configurar_cuenta()
-
-        # Optimización
         parametros_optimizados = None
         if self.auto_optimize:
             try:
@@ -480,28 +185,250 @@ class TradingBot:
                                                                                    self.config.get('min_trend_strength_degrees', 16))
             self.config['entry_margin'] = parametros_optimizados.get('entry_margin', 
                                                                      self.config.get('entry_margin', 0.001))
-
         self.ultimos_datos = {}
         self.operaciones_activas = {}
         self.senales_enviadas = set()
         self.archivo_log = self.log_path
         self.inicializar_log()
+        
+        # Inicializar WebSocket para datos de mercado
+        self.inicializar_websocket()
+
+    def generar_firma(self, timestamp, method, request_path, body=""):
+        """Generar firma para API de Bitget"""
+        message = timestamp + method + request_path + body
+        signature = hmac.new(
+            self.secret_key.encode('utf-8'),
+            message.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        return base64.b64encode(signature).decode('utf-8')
+
+    def hacer_request(self, method, endpoint, params=None, data=None):
+        """Realizar request a API de Bitget con autenticación"""
+        # Rate limiting
+        current_time = time.time()
+        if current_time - self.last_request_time < self.request_interval:
+            time.sleep(self.request_interval - (current_time - self.last_request_time))
+        self.last_request_time = time.time()
+        
+        url = f"{self.base_url}{endpoint}"
+        timestamp = str(int(time.time() * 1000))
+        
+        headers = {
+            "ACCESS-KEY": self.api_key,
+            "ACCESS-PASSPHRASE": self.passphrase,
+            "ACCESS-TIMESTAMP": timestamp,
+            "Content-Type": "application/json"
+        }
+        
+        if params:
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            request_path = f"{endpoint}?{query_string}"
+        else:
+            request_path = endpoint
+            
+        body = json.dumps(data) if data else ""
+        headers["ACCESS-SIGN"] = self.generar_firma(timestamp, method.upper(), request_path, body)
+        
+        try:
+            if method.upper() == "GET":
+                response = requests.get(url, headers=headers, params=params, timeout=10)
+            elif method.upper() == "POST":
+                response = requests.post(url, headers=headers, json=data, timeout=10)
+            else:
+                raise ValueError(f"Método no soportado: {method}")
+                
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Error en request a {endpoint}: {e}")
+            return None
+
+    def inicializar_websocket(self):
+        """Inicializar conexiones WebSocket para datos de mercado"""
+        def ws_thread():
+            while self.ws_reconnect_attempts < self.max_reconnect_attempts:
+                try:
+                    print(f"🔌 Intentando conectar WebSocket (intento {self.ws_reconnect_attempts + 1})...")
+                    self.ws_public = websocket.WebSocketApp(
+                        self.ws_public_url,
+                        on_open=self.on_ws_open,
+                        on_message=self.on_ws_message,
+                        on_error=self.on_ws_error,
+                        on_close=self.on_ws_close
+                    )
+                    
+                    # Iniciar conexión
+                    self.ws_public.run_forever()
+                    break  # Si la conexión fue exitosa, salir del bucle
+                    
+                except Exception as e:
+                    print(f"❌ Error en conexión WebSocket: {e}")
+                    self.ws_reconnect_attempts += 1
+                    if self.ws_reconnect_attempts < self.max_reconnect_attempts:
+                        print(f"🔄 Reintentando en 10 segundos...")
+                        time.sleep(10)
+                    else:
+                        print("❌ Máximo de intentos de reconexión alcanzado")
+            
+        self.ws_thread = threading.Thread(target=ws_thread, daemon=True)
+        self.ws_thread.start()
+
+    def on_ws_open(self, ws):
+        """Manejar apertura de WebSocket"""
+        print("✅ WebSocket conectado")
+        self.ws_connected = True
+        self.ws_reconnect_attempts = 0  # Resetear contador de reconexiones
+        self.last_ping = time.time()
+        
+        # Suscribir a los canales necesarios
+        self.suscribir_canales()
+
+    def on_ws_message(self, ws, message):
+        """Manejar mensajes de WebSocket"""
+        try:
+            data = json.loads(message)
+            
+            # Manejar ping/pong
+            if data.get("event") == "ping":
+                ws.send(json.dumps({"op": "pong"}))
+                self.last_ping = time.time()
+                return
+                
+            # Procesar datos de velas
+            if data.get("arg") and data.get("arg").get("channel") == "candle1m":
+                self.procesar_datos_vela(data)
+                
+        except Exception as e:
+            print(f"Error procesando mensaje WebSocket: {e}")
+
+    def on_ws_error(self, ws, error):
+        """Manejar errores de WebSocket"""
+        print(f"❌ Error WebSocket: {error}")
+        self.ws_connected = False
+
+    def on_ws_close(self, ws, close_status_code, close_msg):
+        """Manejar cierre de WebSocket"""
+        print("🔴 WebSocket desconectado")
+        self.ws_connected = False
+        
+        # Intentar reconectar después de 5 segundos
+        time.sleep(5)
+        self.inicializar_websocket()
+
+    def suscribir_canales(self):
+        """Suscribir a canales de WebSocket"""
+        if not self.ws_connected:
+            return
+            
+        # Suscribir a datos de velas para cada símbolo
+        for symbol in self.config.get('symbols', []):
+            subscribe_msg = {
+                "op": "subscribe",
+                "args": [{
+                    "instType": "MC",
+                    "channel": "candle1m",
+                    "instId": symbol
+                }]
+            }
+            self.ws_public.send(json.dumps(subscribe_msg))
+            print(f"📡 Suscrito a velas de {symbol}")
+
+    def procesar_datos_vela(self, data):
+        """Procesar datos de velas recibidos por WebSocket"""
+        try:
+            symbol = data.get("arg", {}).get("instId")
+            if not symbol or symbol not in self.config.get('symbols', []):
+                return
+                
+            # Extraer datos de la vela
+            candle_data = data.get("data", [])
+            if not candle_data:
+                return
+                
+            # Procesar solo la vela más reciente
+            latest_candle = candle_data[0]
+            timestamp, open_price, high_price, low_price, close_price, volume = latest_candle
+            
+            # Actualizar datos en memoria
+            if symbol not in self.ultimos_datos:
+                self.ultimos_datos[symbol] = {
+                    'maximos': [],
+                    'minimos': [],
+                    'cierres': [],
+                    'tiempos': [],
+                    'timeframe': '1m'
+                }
+                
+            # Agregar nuevos datos
+            self.ultimos_datos[symbol]['maximos'].append(float(high_price))
+            self.ultimos_datos[symbol]['minimos'].append(float(low_price))
+            self.ultimos_datos[symbol]['cierres'].append(float(close_price))
+            self.ultimos_datos[symbol]['tiempos'].append(len(self.ultimos_datos[symbol]['tiempos']))
+            
+            # Mantener solo los últimos 200 datos
+            max_len = 200
+            if len(self.ultimos_datos[symbol]['maximos']) > max_len:
+                self.ultimos_datos[symbol]['maximos'] = self.ultimos_datos[symbol]['maximos'][-max_len:]
+                self.ultimos_datos[symbol]['minimos'] = self.ultimos_datos[symbol]['minimos'][-max_len:]
+                self.ultimos_datos[symbol]['cierres'] = self.ultimos_datos[symbol]['cierres'][-max_len:]
+                self.ultimos_datos[symbol]['tiempos'] = list(range(len(self.ultimos_datos[symbol]['cierres'])))
+                
+            # Actualizar precio actual
+            self.ultimos_datos[symbol]['precio_actual'] = float(close_price)
+            
+        except Exception as e:
+            print(f"Error procesando datos de vela: {e}")
+
+    def obtener_info_contrato(self, symbol):
+        """Obtener información del contrato para un símbolo"""
+        if symbol in self.contract_info:
+            return self.contract_info[symbol]
+            
+        params = {"symbol": symbol, "instType": "MC"}
+        response = self.hacer_request("GET", "/api/v2/mix/market/contracts", params)
+        
+        if response and response.get("code") == "0" and response.get("data"):
+            contract_data = response["data"][0]
+            self.contract_info[symbol] = {
+                "minOrderSz": float(contract_data.get("minOrderSz", 0)),
+                "maxOrderSz": float(contract_data.get("maxOrderSz", 0)),
+                "priceTick": float(contract_data.get("priceTick", 0)),
+                "lotSz": float(contract_data.get("lotSz", 0)),
+                "leverage": int(contract_data.get("leverage", 10))
+            }
+            return self.contract_info[symbol]
+            
+        return None
 
     def configurar_cuenta(self):
-        print("⚙️ Configurando cuenta Bitget...")
-        for symbol in self.config['symbols'][:5]:  # Limitar a 5 para evitar límite
-            try:
-                self.api.set_margin_mode(symbol, "isolated")
-                self.api.set_leverage(symbol, 10)
-                time.sleep(0.1)
-            except Exception as e:
-                print(f"⚠️ Error configurando {symbol}: {e}")
-
-        # Modo posición (una sola vez)
-        try:
-            self.api.set_position_mode("one-way")
-        except Exception as e:
-            print(f"⚠️ Error configurando modo posición: {e}")
+        """Configurar modo de margen, posición y apalancamiento"""
+        # Configurar modo de margen aislado
+        margin_data = {"marginMode": "isolated"}
+        response = self.hacer_request("POST", "/api/v2/mix/account/set-margin-mode", data=margin_data)
+        if response and response.get("code") != "0":
+            print(f"Error configurando modo de margen: {response}")
+            
+        # Configurar modo de posición one-way
+        position_data = {"positionMode": "one-way"}
+        response = self.hacer_request("POST", "/api/v2/mix/account/set-position-mode", data=position_data)
+        if response and response.get("code") != "0":
+            print(f"Error configurando modo de posición: {response}")
+            
+        # Configurar apalancamiento para cada símbolo
+        for symbol in self.config.get('symbols', []):
+            contract_info = self.obtener_info_contrato(symbol)
+            if contract_info:
+                leverage = contract_info.get("leverage", 10)
+                leverage_data = {
+                    "symbol": symbol,
+                    "leverage": str(leverage),
+                    "marginCoin": "USDT"
+                }
+                response = self.hacer_request("POST", "/api/v2/mix/account/set-leverage", data=leverage_data)
+                if response and response.get("code") != "0":
+                    print(f"Error configurando apalancamiento para {symbol}: {response}")
 
     def cargar_estado(self):
         """Carga el estado previo del bot incluyendo breakouts"""
@@ -517,17 +444,17 @@ class TradingBot:
                 if 'breakout_history' in estado:
                     for simbolo, fecha_str in estado['breakout_history'].items():
                         estado['breakout_history'][simbolo] = datetime.fromisoformat(fecha_str)
-
-                self.esperando_reentry = {}
-                self.breakouts_detectados = {}
+                # Cargar breakouts y reingresos esperados
                 if 'esperando_reentry' in estado:
                     for simbolo, info in estado['esperando_reentry'].items():
                         info['timestamp'] = datetime.fromisoformat(info['timestamp'])
-                        self.esperando_reentry[simbolo] = info
+                        estado['esperando_reentry'][simbolo] = info
+                    self.esperando_reentry = estado['esperando_reentry']
                 if 'breakouts_detectados' in estado:
                     for simbolo, info in estado['breakouts_detectados'].items():
                         info['timestamp'] = datetime.fromisoformat(info['timestamp'])
-                        self.breakouts_detectados[simbolo] = info
+                        estado['breakouts_detectados'][simbolo] = info
+                    self.breakouts_detectados = estado['breakouts_detectados']
                 self.ultima_optimizacion = estado.get('ultima_optimizacion', datetime.now())
                 self.operaciones_desde_optimizacion = estado.get('operaciones_desde_optimizacion', 0)
                 self.total_operaciones = estado.get('total_operaciones', 0)
@@ -588,17 +515,15 @@ class TradingBot:
             else:
                 print(f"   🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
         print(f"   🔍 Buscando configuración óptima para {simbolo}...")
-
         timeframes = self.config.get('timeframes', ['1m', '3m', '5m', '15m', '30m'])
         velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
         mejor_config = None
         mejor_puntaje = -999999
         prioridad_timeframe = {'1m': 200, '3m': 150, '5m': 120, '15m': 100, '30m': 80}
-
         for timeframe in timeframes:
             for num_velas in velas_options:
                 try:
-                    datos = self.api.get_klines(simbolo, timeframe, num_velas + 14)
+                    datos = self.obtener_datos_mercado_config(simbolo, timeframe, num_velas)
                     if not datos:
                         continue
                     canal_info = self.calcular_canal_regresion_config(datos, num_velas)
@@ -622,12 +547,11 @@ class TradingBot:
                                 }
                 except Exception:
                     continue
-
         if not mejor_config:
             for timeframe in timeframes:
                 for num_velas in velas_options:
                     try:
-                        datos = self.api.get_klines(simbolo, timeframe, num_velas + 14)
+                        datos = self.obtener_datos_mercado_config(simbolo, timeframe, num_velas)
                         if not datos:
                             continue
                         canal_info = self.calcular_canal_regresion_config(datos, num_velas)
@@ -650,7 +574,6 @@ class TradingBot:
                                 }
                     except Exception:
                         continue
-
         if mejor_config:
             self.config_optima_por_simbolo[simbolo] = mejor_config
             self.ultima_busqueda_config[simbolo] = datetime.now()
@@ -658,15 +581,64 @@ class TradingBot:
         return mejor_config
 
     def obtener_datos_mercado_config(self, simbolo, timeframe, num_velas):
-        """Obtiene datos de WebSocket si está listo, sino usa REST para histórico inicial"""
-        datos_ws = self.ws.get_candles(simbolo, num_velas + 14)
-        if datos_ws and len(datos_ws['cierres']) >= num_velas:
-            return datos_ws
-        else:
-            print(f"   ⏳ Usando REST para datos históricos de {simbolo}...")
-            return self.api.get_klines(simbolo, timeframe, num_velas + 14)
+        """Obtiene datos con configuración específica usando API REST de Bitget"""
+        # Primero verificar si ya tenemos datos en memoria desde WebSocket
+        if simbolo in self.ultimos_datos and len(self.ultimos_datos[simbolo]['cierres']) >= num_velas:
+            return self.ultimos_datos[simbolo]
+            
+        # Si no hay suficientes datos, obtenerlos de la API REST
+        # Convertir timeframe al formato correcto de Bitget
+        bitget_timeframe = {
+            '1m': '1m',
+            '3m': '3m',
+            '5m': '5m',
+            '15m': '15m',
+            '30m': '30m',
+            '1h': '1H',
+            '4h': '4H',
+            '1d': '1D'
+        }.get(timeframe, timeframe)
+        
+        # CORRECCIÓN: Usar los parámetros correctos para la API de Bitget
+        params = {
+            'instId': simbolo,  # Cambiado de 'symbol' a 'instId'
+            'granularity': bitget_timeframe,
+            'limit': str(min(num_velas, 200))  # Limitar a máximo 200
+        }
+        
+        response = self.hacer_request("GET", "/api/v2/mix/market/candles", params)
+        
+        if not response or response.get("code") != "0" or not response.get("data"):
+            if response:
+                print(f"❌ Bitget API error /api/v2/mix/market/candles: {response}")
+            return None
+            
+        # Procesar datos de velas
+        candle_data = response["data"]
+        maximos = []
+        minimos = []
+        cierres = []
+        
+        for candle in candle_data:
+            _, open_price, high_price, low_price, close_price, _ = candle
+            maximos.append(float(high_price))
+            minimos.append(float(low_price))
+            cierres.append(float(close_price))
+            
+        tiempos = list(range(len(cierres)))
+        
+        return {
+            'maximos': maximos,
+            'minimos': minimos,
+            'cierres': cierres,
+            'tiempos': tiempos,
+            'precio_actual': cierres[-1] if cierres else 0,
+            'timeframe': timeframe,
+            'num_velas': num_velas
+        }
 
     def calcular_canal_regresion_config(self, datos_mercado, candle_period):
+        """Calcula canal de regresión"""
         if not datos_mercado or len(datos_mercado['maximos']) < candle_period:
             return None
         start_idx = -candle_period
@@ -719,30 +691,40 @@ class TradingBot:
             'pendiente_resistencia': pendiente_max,
             'pendiente_soporte': pendiente_min,
             'stoch_k': stoch_k,
-            'stoch_d': stoch_d
+            'stoch_d': stoch_d,
+            'timeframe': datos_mercado.get('timeframe', 'N/A'),
+            'num_velas': candle_period
         }
 
     def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
-        """Envía alerta de BREAKOUT detectado a Telegram SIN GRÁFICO"""
+        """
+        Envía alerta de BREAKOUT detectado a Telegram SIN gráfico
+        LÓGICA CORREGIDA:
+        - BREAKOUT_LONG → Ruptura de resistencia en canal BAJISTA (oportunidad de reversión alcista)
+        - BREAKOUT_SHORT → Ruptura de soporte en canal ALCISTA (oportunidad de reversión bajista)
+        """
         precio_cierre = datos_mercado['cierres'][-1]
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
         direccion_canal = info_canal['direccion']
+        # Determinar tipo de ruptura CORREGIDO SEGÚN TU ESTRATEGIA
         if tipo_breakout == "BREAKOUT_LONG":
+            # Para un LONG, nos interesa la ruptura del SOPORTE hacia arriba
             emoji_principal = "🚀"
             tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
             direccion_emoji = "⬇️"
             contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
             expectativa = "posible entrada en long si el precio reingresa al canal"
-        else:
+        else:  # BREAKOUT_SHORT
+            # Para un SHORT, nos interesa la ruptura de la RESISTENCIA hacia abajo
             emoji_principal = "📉"
             tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
             contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
-            expectativa = "posible entrada en short si el precio reingresa al canal"
-
+            expectativa = "posible entrada en sort si el precio reingresa al canal"
+        # Mensaje de alerta
         mensaje = f"""
 {emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
 ⚠️ <b>{tipo_texto}</b> {direccion_emoji}
@@ -750,8 +732,21 @@ class TradingBot:
 ⏳ <b>ESPERANDO REINGRESO...</b>
 👁️ Máximo 30 minutos para confirmación
 📍 {expectativa}
+📊 <b>Configuración:</b> {config_optima['timeframe']} - {config_optima['num_velas']} velas
+📏 <b>Ancho Canal:</b> {info_canal['ancho_canal_porcentual']:.1f}%
+💪 <b>Fuerza:</b> {info_canal['fuerza_texto']} ({info_canal['angulo_tendencia']:.1f}°)
         """
-        self._enviar_telegram_simple(mensaje)
+        token = self.config.get('telegram_token')
+        chat_ids = self.config.get('telegram_chat_ids', [])
+        if token and chat_ids:
+            try:
+                print(f"     📨 Enviando alerta de breakout por Telegram...")
+                self._enviar_telegram_simple(mensaje, token, chat_ids)
+                print(f"     ✅ Alerta de breakout enviada para {simbolo}")
+            except Exception as e:
+                print(f"     ❌ Error enviando alerta de breakout: {e}")
+        else:
+            print(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
 
     def detectar_breakout(self, simbolo, info_canal, datos_mercado):
         """Detecta si el precio ha ROTO el canal"""
@@ -771,19 +766,21 @@ class TradingBot:
             return None
         if abs(pearson) < 0.4 or r2 < 0.4:
             return None
+        # NUEVO: Verificar si ya hubo un breakout reciente (menos de 25 minutos)
         if simbolo in self.breakouts_detectados:
             ultimo_breakout = self.breakouts_detectados[simbolo]
             tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
             if tiempo_desde_ultimo < 115:
                 print(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
                 return None
+        margen_breakout =  precio_cierre
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
             if precio_cierre < soporte:
-                print(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
+                print(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
                 return "BREAKOUT_LONG"
         elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
             if precio_cierre > resistencia:
-                print(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
+                print(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
                 return "BREAKOUT_SHORT"
         return None
 
@@ -798,6 +795,7 @@ class TradingBot:
         if tiempo_desde_breakout > 120:
             print(f"     ⏰ {simbolo} - Timeout de reentry (>30 min), cancelando espera")
             del self.esperando_reentry[simbolo]
+            # NUEVO: Limpiar también de breakouts_detectados cuando expira el reentry
             if simbolo in self.breakouts_detectados:
                 del self.breakouts_detectados[simbolo]
             return None
@@ -812,6 +810,7 @@ class TradingBot:
                 distancia_soporte = abs(precio_actual - soporte)
                 if distancia_soporte <= tolerancia and stoch_k <= 30 and stoch_d <= 30:
                     print(f"     ✅ {simbolo} - REENTRY LONG confirmado! Entrada en soporte con Stoch oversold")
+                    # NUEVO: Limpiar breakouts_detectados cuando se confirma reentry
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
                     return "LONG"
@@ -820,6 +819,7 @@ class TradingBot:
                 distancia_resistencia = abs(precio_actual - resistencia)
                 if distancia_resistencia <= tolerancia and stoch_k >= 70 and stoch_d >= 70:
                     print(f"     ✅ {simbolo} - REENTRY SHORT confirmado! Entrada en resistencia con Stoch overbought")
+                    # NUEVO: Limpiar breakouts_detectados cuando se confirma reentry
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
                     return "SHORT"
@@ -835,7 +835,7 @@ class TradingBot:
         if tipo_operacion == "LONG":
             precio_entrada = precio_actual
             stop_loss = precio_entrada * (1 - sl_porcentaje)
-            take_profit = precio_entrada + ancho_canal
+            take_profit = precio_entrada + ancho_canal 
         else:
             precio_entrada = precio_actual
             stop_loss = resistencia * (1 + sl_porcentaje)
@@ -850,67 +850,96 @@ class TradingBot:
                 take_profit = precio_entrada - (riesgo * self.config['min_rr_ratio'])
         return precio_entrada, take_profit, stop_loss
 
-    def ajustar_precision_bitget(self, symbol, precio, size):
-        contract = self.api.get_contracts(symbol)
-        if not contract:
-            return precio, size
-        price_tick = float(contract.get("pricePlace", "0.001"))
-        lot_sz = float(contract.get("quantityPlace", "0.001"))
-        precio_adj = round(precio / price_tick) * price_tick
-        size_adj = round(size / lot_sz) * lot_sz
-        return precio_adj, size_adj
-
-    def ejecutar_orden_bitget(self, symbol, tipo_operacion, precio_entrada, tp, sl):
-        """Ejecuta órdenes en Bitget"""
-        contract = self.api.get_contracts(symbol)
-        if not contract:
-            print(f"❌ No se pudo obtener contrato para {symbol}")
+    def colocar_orden(self, simbolo, tipo_operacion, precio_entrada, take_profit, stop_loss):
+        """Coloca orden en Bitget con TP y SL"""
+        try:
+            # Obtener información del contrato para calcular tamaño y precisión
+            contract_info = self.obtener_info_contrato(simbolo)
+            if not contract_info:
+                print(f"❌ No se pudo obtener información del contrato para {simbolo}")
+                return False
+                
+            # Calcular tamaño de orden
+            margin = self.config.get('order_margin_usdt', 2)
+            leverage = contract_info.get("leverage", 10)
+            notional = margin * leverage
+            size_raw = notional / precio_entrada
+            lot_sz = contract_info.get("lotSz", 0.001)
+            size = round(size_raw / lot_sz) * lot_sz
+            
+            # Redondear precios
+            price_tick = contract_info.get("priceTick", 0.001)
+            tp_price = round(take_profit / price_tick) * price_tick
+            sl_price = round(stop_loss / price_tick) * price_tick
+            
+            # Determinar lado de la orden
+            side = "buy" if tipo_operacion == "LONG" else "sell"
+            
+            # Colocar orden de mercado
+            order_data = {
+                "symbol": simbolo,
+                "side": side,
+                "orderType": "market",
+                "size": str(size),
+                "marginMode": "isolated"
+            }
+            
+            response = self.hacer_request("POST", "/api/v2/mix/order/place-order", data=order_data)
+            if not response or response.get("code") != "0":
+                print(f"❌ Error colocando orden de entrada para {simbolo}: {response}")
+                return False
+                
+            order_id = response.get("data", {}).get("orderId")
+            print(f"✅ Orden de entrada colocada para {simbolo}: {order_id}")
+            
+            # Colocar órdenes de TP y SL
+            # Para TP
+            tp_side = "sell" if tipo_operacion == "LONG" else "buy"
+            tp_data = {
+                "symbol": simbolo,
+                "planType": "normal",
+                "orderType": "limit",
+                "side": tp_side,
+                "size": str(size),
+                "triggerPrice": str(tp_price),
+                "executePrice": str(tp_price),
+                "marginMode": "isolated"
+            }
+            
+            response = self.hacer_request("POST", "/api/v2/mix/order/place-plan-order", data=tp_data)
+            if not response or response.get("code") != "0":
+                print(f"❌ Error colocando TP para {simbolo}: {response}")
+                return False
+                
+            tp_order_id = response.get("data", {}).get("orderId")
+            print(f"✅ Orden TP colocada para {simbolo}: {tp_order_id}")
+            
+            # Para SL
+            sl_side = "sell" if tipo_operacion == "LONG" else "buy"
+            sl_data = {
+                "symbol": simbolo,
+                "planType": "normal",
+                "orderType": "limit",
+                "side": sl_side,
+                "size": str(size),
+                "triggerPrice": str(sl_price),
+                "executePrice": str(sl_price),
+                "marginMode": "isolated"
+            }
+            
+            response = self.hacer_request("POST", "/api/v2/mix/order/place-plan-order", data=sl_data)
+            if not response or response.get("code") != "0":
+                print(f"❌ Error colocando SL para {simbolo}: {response}")
+                return False
+                
+            sl_order_id = response.get("data", {}).get("orderId")
+            print(f"✅ Orden SL colocada para {simbolo}: {sl_order_id}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error en colocar_orden para {simbolo}: {e}")
             return False
-
-        base_coin = contract.get("baseCoin", "USDT")
-        quote_coin = contract.get("quoteCoin", "USDT")
-        leverage = 10
-        margin = 2.0
-        notional = margin * leverage
-        size_raw = notional / precio_entrada
-        precio_adj, size_adj = self.ajustar_precision_bitget(symbol, precio_entrada, size_raw)
-
-        side = "buy" if tipo_operacion == "LONG" else "sell"
-        result = self.api.place_order(symbol, side, size_adj, "market")
-        if not result:
-            print(f"❌ Error al abrir posición {tipo_operacion} en {symbol}")
-            return False
-
-        print(f"✅ Posición {tipo_operacion} abierta en {symbol} - Tamaño: {size_adj}")
-
-        # TP/SL
-        tp_adj, _ = self.ajustar_precision_bitget(symbol, tp, size_adj)
-        sl_adj, _ = self.ajustar_precision_bitget(symbol, sl, size_adj)
-
-        plan_result = self.api.place_plan_order(
-            symbol=symbol,
-            side="sell" if tipo_operacion == "LONG" else "buy",
-            size=size_adj,
-            plan_type="profit_loss",
-            trigger_price=tp_adj,
-            execute_price=tp_adj
-        )
-        if not plan_result:
-            print(f"⚠️ TP no establecido para {symbol}")
-
-        plan_result2 = self.api.place_plan_order(
-            symbol=symbol,
-            side="sell" if tipo_operacion == "LONG" else "buy",
-            size=size_adj,
-            plan_type="normal",
-            trigger_price=sl_adj,
-            execute_price=None
-        )
-        if not plan_result2:
-            print(f"⚠️ SL no establecido para {symbol}")
-
-        time.sleep(0.1)
-        return True
 
     def escanear_mercado(self):
         """Escanea el mercado con estrategia Breakout + Reentry"""
@@ -952,10 +981,10 @@ class TradingBot:
                 else:
                     posicion = "📍 DENTRO"
                 print(
-                    f"📊 {simbolo} - {config_optima['timeframe']} - {config_optima['num_velas']}v | "
-                    f"{info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) | "
-                    f"Ancho: {info_canal['ancho_canal_porcentual']:.1f}% - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch} | "
-                    f"Precio: {posicion}"
+    f"📊 {simbolo} - {config_optima['timeframe']} - {config_optima['num_velas']}v | "
+    f"{info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) | "
+    f"Ancho: {info_canal['ancho_canal_porcentual']:.1f}% - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch} | "
+    f"Precio: {posicion}"
                 )
                 if (info_canal['nivel_fuerza'] < 2 or 
                     abs(info_canal['coeficiente_pearson']) < 0.4 or 
@@ -970,12 +999,14 @@ class TradingBot:
                             'precio_breakout': precio_actual,
                             'config': config_optima
                         }
+                        # NUEVO: Registrar el breakout detectado para evitar repeticiones
                         self.breakouts_detectados[simbolo] = {
                             'tipo': tipo_breakout,
                             'timestamp': datetime.now(),
                             'precio_breakout': precio_actual
                         }
                         print(f"     🎯 {simbolo} - Breakout registrado, esperando reingreso...")
+                        # NUEVO: Enviar alerta de breakout a Telegram
                         self.enviar_alerta_breakout(simbolo, tipo_breakout, info_canal, datos_mercado, config_optima)
                         continue
                 tipo_operacion = self.detectar_reentry(simbolo, info_canal, datos_mercado)
@@ -993,14 +1024,19 @@ class TradingBot:
                         print(f"   ⏳ {simbolo} - Señal reciente, omitiendo...")
                         continue
                 breakout_info = self.esperando_reentry[simbolo]
-                if self.ejecutar_orden_bitget(simbolo, tipo_operacion, precio_entrada, tp, sl):
-                    self.generar_senal_operacion(
-                        simbolo, tipo_operacion, precio_entrada, tp, sl, 
-                        info_canal, datos_mercado, config_optima, breakout_info
-                    )
-                    senales_encontradas += 1
-                    self.breakout_history[simbolo] = datetime.now()
-                    del self.esperando_reentry[simbolo]
+                
+                # Colocar orden en Bitget
+                orden_exitosa = self.colocar_orden(simbolo, tipo_operacion, precio_entrada, tp, sl)
+                if not orden_exitosa:
+                    continue
+                    
+                self.generar_senal_operacion(
+                    simbolo, tipo_operacion, precio_entrada, tp, sl, 
+                    info_canal, datos_mercado, config_optima, breakout_info
+                )
+                senales_encontradas += 1
+                self.breakout_history[simbolo] = datetime.now()
+                del self.esperando_reentry[simbolo]
             except Exception as e:
                 print(f"⚠️ Error analizando {simbolo}: {e}")
                 continue
@@ -1009,6 +1045,7 @@ class TradingBot:
             for simbolo, info in self.esperando_reentry.items():
                 tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
                 print(f"   • {simbolo} - {info['tipo']} - Esperando {tiempo_espera:.1f} min")
+        # NUEVO: Mostrar breakouts detectados recientemente
         if self.breakouts_detectados:
             print(f"\n⏰ Breakouts detectados recientemente:")
             for simbolo, info in self.breakouts_detectados.items():
@@ -1021,8 +1058,8 @@ class TradingBot:
         return senales_encontradas
 
     def generar_senal_operacion(self, simbolo, tipo_operacion, precio_entrada, tp, sl,
-                                info_canal, datos_mercado, config_optima, breakout_info=None):
-        """Genera y envía señal de operación SIN GRÁFICO"""
+                            info_canal, datos_mercado, config_optima, breakout_info=None):
+        """Genera y envía señal de operación con info de breakout SIN gráfico"""
         if simbolo in self.senales_enviadas:
             return
         if precio_entrada is None or tp is None or sl is None:
@@ -1031,6 +1068,7 @@ class TradingBot:
         riesgo = abs(precio_entrada - sl)
         beneficio = abs(tp - precio_entrada)
         ratio_rr = beneficio / riesgo if riesgo > 0 else 0
+        # Calcular SL y TP en porcentaje
         sl_percent = abs((sl - precio_entrada) / precio_entrada) * 100
         tp_percent = abs((tp - precio_entrada) / precio_entrada) * 100
         stoch_estado = "📉 SOBREVENTA" if tipo_operacion == "LONG" else "📈 SOBRECOMPRA"
@@ -1069,7 +1107,14 @@ class TradingBot:
 ⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic
         """
-        self._enviar_telegram_simple(mensaje)
+        token = self.config.get('telegram_token')
+        chat_ids = self.config.get('telegram_chat_ids', [])
+        if token and chat_ids:
+            try:
+                self._enviar_telegram_simple(mensaje, token, chat_ids)
+                print(f"     ✅ Señal {tipo_operacion} para {simbolo} enviada")
+            except Exception as e:
+                print(f"     ❌ Error enviando señal: {e}")
         self.operaciones_activas[simbolo] = {
             'tipo': tipo_operacion,
             'precio_entrada': precio_entrada,
@@ -1090,22 +1135,6 @@ class TradingBot:
         }
         self.senales_enviadas.add(simbolo)
         self.total_operaciones += 1
-
-    def _enviar_telegram_simple(self, mensaje):
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        if not token or not chat_ids:
-            return False
-        resultados = []
-        for chat_id in chat_ids:
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {'chat_id': chat_id, 'text': mensaje, 'parse_mode': 'HTML'}
-            try:
-                r = requests.post(url, json=payload, timeout=10)
-                resultados.append(r.status_code == 200)
-            except Exception:
-                resultados.append(False)
-        return any(resultados)
 
     def inicializar_log(self):
         if not os.path.exists(self.archivo_log):
@@ -1149,6 +1178,7 @@ class TradingBot:
             ])
 
     def filtrar_operaciones_ultima_semana(self):
+        """Filtra operaciones de los últimos 7 días"""
         if not os.path.exists(self.archivo_log):
             return []
         try:
@@ -1176,11 +1206,13 @@ class TradingBot:
             return []
 
     def contar_breakouts_semana(self):
+        """Cuenta breakouts detectados en la última semana"""
         ops = self.filtrar_operaciones_ultima_semana()
         breakouts = sum(1 for op in ops if op.get('breakout_usado', False))
         return breakouts
 
     def generar_reporte_semanal(self):
+        """Genera reporte automático cada semana"""
         ops_ultima_semana = self.filtrar_operaciones_ultima_semana()
         if not ops_ultima_semana:
             return None
@@ -1195,412 +1227,221 @@ class TradingBot:
         perdidas = [abs(op['pnl_percent']) for op in ops_ultima_semana if op['pnl_percent'] < 0]
         avg_ganancia = sum(ganancias)/len(ganancias) if ganancias else 0
         avg_perdida = sum(perdidas)/len(perdidas) if perdidas else 0
-        racha_actual = 0
-        for op in reversed(ops_ultima_semana):
-            if op['resultado'] == 'TP':
-                racha_actual += 1
-            else:
-                break
-        emoji_resultado = "🟢" if pnl_total > 0 else "🔴" if pnl_total < 0 else "⚪"
-        mensaje = f"""
-━━━━━━━━━━━━━━━━━━━━
-📊 <b>REPORTE SEMANAL</b>
-━━━━━━━━━━━━━━━━━━━━
-📅 {datetime.now().strftime('%d/%m/%Y')} | Últimos 7 días
-<b>RENDIMIENTO GENERAL</b>
-{emoji_resultado} PnL Total: <b>{pnl_total:+.2f}%</b>
-📈 Win Rate: <b>{winrate:.1f}%</b>
-✅ Ganadas: {wins} | ❌ Perdidas: {losses}
-<b>ESTADÍSTICAS</b>
-📊 Operaciones: {total_ops}
-💰 Ganancia Promedio: +{avg_ganancia:.2f}%
-📉 Pérdida Promedio: -{avg_perdida:.2f}%
-🔥 Racha actual: {racha_actual} wins
-<b>DESTACADOS</b>
-🏆 Mejor: {mejor_op['symbol']} ({mejor_op['tipo']})
-   → {mejor_op['pnl_percent']:+.2f}%
-⚠️ Peor: {peor_op['symbol']} ({peor_op['tipo']})
-   → {peor_op['pnl_percent']:+.2f}%
-━━━━━━━━━━━━━━━━━━━━
-🤖 Bot automático 24/7
-⚡ Estrategia: Breakout + Reentry
-💎 Acceso Premium: @TuUsuario
-    """
-        return mensaje
-
-    def enviar_reporte_semanal(self):
-        mensaje = self.generar_reporte_semanal()
-        if not mensaje:
-            print("ℹ️ No hay datos suficientes para generar reporte")
-            return False
-        return self._enviar_telegram_simple(mensaje)
-
-    def verificar_envio_reporte_automatico(self):
-        ahora = datetime.now()
-        if ahora.weekday() == 0 and 9 <= ahora.hour < 10:
-            archivo_control = "ultimo_reporte.txt"
-            try:
-                if os.path.exists(archivo_control):
-                    with open(archivo_control, 'r') as f:
-                        ultima_fecha = f.read().strip()
-                        if ultima_fecha == ahora.strftime('%Y-%m-%d'):
-                            return False
-                if self.enviar_reporte_semanal():
-                    with open(archivo_control, 'w') as f:
-                        f.write(ahora.strftime('%Y-%m-%d'))
-                    return True
-            except Exception as e:
-                print(f"⚠️ Error en envío automático: {e}")
-        return False
-
-    def verificar_cierre_operaciones(self):
-        if not self.operaciones_activas:
-            return []
-        operaciones_cerradas = []
-        for simbolo, operacion in list(self.operaciones_activas.items()):
-            config_optima = self.config_optima_por_simbolo.get(simbolo)
-            if not config_optima:
-                continue
-            datos = self.obtener_datos_mercado_config(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-            if not datos:
-                continue
-            precio_actual = datos['precio_actual']
-            tp = operacion['take_profit']
-            sl = operacion['stop_loss']
-            tipo = operacion['tipo']
-            resultado = None
-            if tipo == "LONG":
-                if precio_actual >= tp:
-                    resultado = "TP"
-                elif precio_actual <= sl:
-                    resultado = "SL"
-            else:
-                if precio_actual <= tp:
-                    resultado = "TP"
-                elif precio_actual >= sl:
-                    resultado = "SL"
-            if resultado:
-                if tipo == "LONG":
-                    pnl_percent = ((precio_actual - operacion['precio_entrada']) / operacion['precio_entrada']) * 100
-                else:
-                    pnl_percent = ((operacion['precio_entrada'] - precio_actual) / operacion['precio_entrada']) * 100
-                tiempo_entrada = datetime.fromisoformat(operacion['timestamp_entrada'])
-                duracion_minutos = (datetime.now() - tiempo_entrada).total_seconds() / 60
-                datos_operacion = {
-                    'timestamp': datetime.now().isoformat(),
-                    'symbol': simbolo,
-                    'tipo': tipo,
-                    'precio_entrada': operacion['precio_entrada'],
-                    'take_profit': tp,
-                    'stop_loss': sl,
-                    'precio_salida': precio_actual,
-                    'resultado': resultado,
-                    'pnl_percent': pnl_percent,
-                    'duracion_minutos': duracion_minutos,
-                    'angulo_tendencia': operacion.get('angulo_tendencia', 0),
-                    'pearson': operacion.get('pearson', 0),
-                    'r2_score': operacion.get('r2_score', 0),
-                    'ancho_canal_relativo': operacion.get('ancho_canal_relativo', 0),
-                    'ancho_canal_porcentual': operacion.get('ancho_canal_porcentual', 0),
-                    'nivel_fuerza': operacion.get('nivel_fuerza', 1),
-                    'timeframe_utilizado': operacion.get('timeframe_utilizado', 'N/A'),
-                    'velas_utilizadas': operacion.get('velas_utilizadas', 0),
-                    'stoch_k': operacion.get('stoch_k', 0),
-                    'stoch_d': operacion.get('stoch_d', 0),
-                    'breakout_usado': operacion.get('breakout_usado', False)
-                }
-                mensaje_cierre = self.generar_mensaje_cierre(datos_operacion)
-                self._enviar_telegram_simple(mensaje_cierre)
-                self.registrar_operacion(datos_operacion)
-                operaciones_cerradas.append(simbolo)
-                del self.operaciones_activas[simbolo]
-                if simbolo in self.senales_enviadas:
-                    self.senales_enviadas.remove(simbolo)
-                self.operaciones_desde_optimizacion += 1
-                print(f"     📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
-        return operaciones_cerradas
-
-    def generar_mensaje_cierre(self, datos_operacion):
-        emoji = "🟢" if datos_operacion['resultado'] == "TP" else "🔴"
-        color_emoji = "✅" if datos_operacion['resultado'] == "TP" else "❌"
-        if datos_operacion['tipo'] == 'LONG':
-            pnl_absoluto = datos_operacion['precio_salida'] - datos_operacion['precio_entrada']
-        else:
-            pnl_absoluto = datos_operacion['precio_entrada'] - datos_operacion['precio_salida']
-        breakout_usado = "🚀 Sí" if datos_operacion.get('breakout_usado', False) else "❌ No"
-        mensaje = f"""
-{emoji} <b>OPERACIÓN CERRADA - {datos_operacion['symbol']}</b>
-{color_emoji} <b>RESULTADO: {datos_operacion['resultado']}</b>
-📊 Tipo: {datos_operacion['tipo']}
-💰 Entrada: {datos_operacion['precio_entrada']:.8f}
-🎯 Salida: {datos_operacion['precio_salida']:.8f}
-💵 PnL Absoluto: {pnl_absoluto:.8f}
-📈 PnL %: {datos_operacion['pnl_percent']:.2f}%
-⏰ Duración: {datos_operacion['duracion_minutos']:.1f} minutos
-🚀 Breakout+Reentry: {breakout_usado}
-📏 Ángulo: {datos_operacion['angulo_tendencia']:.1f}°
-📊 Pearson: {datos_operacion['pearson']:.3f}
-🎯 R²: {datos_operacion['r2_score']:.3f}
-📏 Ancho: {datos_operacion.get('ancho_canal_porcentual', 0):.1f}%
-⏱️ TF: {datos_operacion.get('timeframe_utilizado', 'N/A')}
-🕯️ Velas: {datos_operacion.get('velas_utilizadas', 0)}
-🕒 {datos_operacion['timestamp']}
+        breakouts = self.contar_breakouts_semana()
+        reporte = f"""
+📊 <b>REPORTE SEMANAL - BOT TRADING</b>
+📅 Período: {(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')} a {datetime.now().strftime('%Y-%m-%d')}
+📈 Total operaciones: {total_ops}
+✅ Operaciones ganadoras: {wins} ({winrate:.1f}%)
+❌ Operaciones perdedoras: {losses}
+💰 PnL total: {pnl_total:.2f}%
+🏆 Mejor operación: {mejor_op['symbol']} ({mejor_op['pnl_percent']:.2f}%)
+💔 Peor operación: {peor_op['symbol']} ({peor_op['pnl_percent']:.2f}%)
+📊 Ganancia promedio: {avg_ganancia:.2f}%
+📊 Pérdida promedio: {avg_perdida:.2f}%
+🚀 Breakouts utilizados: {breakouts}
         """
-        return mensaje
-
-    def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
-        if len(datos_mercado['cierres']) < period:
-            return 50, 50
-        cierres = datos_mercado['cierres']
-        maximos = datos_mercado['maximos']
-        minimos = datos_mercado['minimos']
-        k_values = []
-        for i in range(period-1, len(cierres)):
-            highest_high = max(maximos[i-period+1:i+1])
-            lowest_low = min(minimos[i-period+1:i+1])
-            if highest_high == lowest_low:
-                k = 50
-            else:
-                k = 100 * (cierres[i] - lowest_low) / (highest_high - lowest_low)
-            k_values.append(k)
-        if len(k_values) >= k_period:
-            k_smoothed = []
-            for i in range(k_period-1, len(k_values)):
-                k_avg = sum(k_values[i-k_period+1:i+1]) / k_period
-                k_smoothed.append(k_avg)
-            if len(k_smoothed) >= d_period:
-                d = sum(k_smoothed[-d_period:]) / d_period
-                k_final = k_smoothed[-1]
-                return k_final, d
-        return 50, 50
+        token = self.config.get('telegram_token')
+        chat_ids = self.config.get('telegram_chat_ids', [])
+        if token and chat_ids:
+            try:
+                self._enviar_telegram_simple(reporte, token, chat_ids)
+                print("✅ Reporte semanal enviado")
+            except Exception as e:
+                print(f"❌ Error enviando reporte: {e}")
+        return reporte
 
     def calcular_regresion_lineal(self, x, y):
-        if len(x) != len(y) or len(x) == 0:
+        """Calcula regresión lineal simple"""
+        if len(x) != len(y) or len(x) < 2:
             return None
-        x = np.array(x)
-        y = np.array(y)
         n = len(x)
-        sum_x = np.sum(x)
-        sum_y = np.sum(y)
-        sum_xy = np.sum(x * y)
-        sum_x2 = np.sum(x * x)
-        denom = (n * sum_x2 - sum_x * sum_x)
-        if denom == 0:
-            pendiente = 0
-        else:
-            pendiente = (n * sum_xy - sum_x * sum_y) / denom
-        intercepto = (sum_y - pendiente * sum_x) / n if n else 0
-        return pendiente, intercepto
+        sum_x = sum(x)
+        sum_y = sum(y)
+        sum_xy = sum(x[i] * y[i] for i in range(n))
+        sum_x2 = sum(x[i] ** 2 for i in range(n))
+        denominator = n * sum_x2 - sum_x ** 2
+        if denominator == 0:
+            return None
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        intercept = (sum_y - slope * sum_x) / n
+        return slope, intercept
 
     def calcular_pearson_y_angulo(self, x, y):
+        """Calcula coeficiente de Pearson y ángulo de tendencia"""
         if len(x) != len(y) or len(x) < 2:
             return 0, 0
-        x = np.array(x)
-        y = np.array(y)
         n = len(x)
-        sum_x = np.sum(x)
-        sum_y = np.sum(y)
-        sum_xy = np.sum(x * y)
-        sum_x2 = np.sum(x * x)
-        sum_y2 = np.sum(y * y)
-        numerator = n * sum_xy - sum_x * sum_y
-        denominator = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        sum_x = sum(x)
+        sum_y = sum(y)
+        sum_xy = sum(x[i] * y[i] for i in range(n))
+        sum_x2 = sum(x[i] ** 2 for i in range(n))
+        sum_y2 = sum(y[i] ** 2 for i in range(n))
+        denominator = math.sqrt((n * sum_x2 - sum_x ** 2) * (n * sum_y2 - sum_y ** 2))
         if denominator == 0:
             return 0, 0
-        pearson = numerator / denominator
-        denom_pend = (n * sum_x2 - sum_x * sum_x)
-        pendiente = (n * sum_xy - sum_x * sum_y) / denom_pend if denom_pend != 0 else 0
-        angulo_radianes = math.atan(pendiente * len(x) / (max(y) - min(y)) if (max(y) - min(y)) != 0 else 0)
-        angulo_grados = math.degrees(angulo_radianes)
-        return pearson, angulo_grados
+        pearson = (n * sum_xy - sum_x * sum_y) / denominator
+        # Calcular ángulo en grados
+        regression = self.calcular_regresion_lineal(x, y)
+        if regression:
+            slope, _ = regression
+            # Escalar pendiente para que sea más significativa
+            slope_scaled = slope * 1000
+            angulo_rad = math.atan(slope_scaled)
+            angulo_deg = math.degrees(angulo_rad)
+            return pearson, angulo_deg
+        return pearson, 0
 
-    def clasificar_fuerza_tendencia(self, angulo_grados):
-        angulo_abs = abs(angulo_grados)
-        if angulo_abs < 3:
-            return "💔 Muy Débil", 1
-        elif angulo_abs < 13:
-            return "❤️‍🩹 Débil", 2
-        elif angulo_abs < 27:
-            return "💛 Moderada", 3
-        elif angulo_abs < 45:
-            return "💚 Fuerte", 4
+    def calcular_r2(self, y, x, slope, intercept):
+        """Calcula R² (coeficiente de determinación)"""
+        if len(x) != len(y) or len(x) < 2:
+            return 0
+        n = len(y)
+        y_mean = sum(y) / n
+        ss_tot = sum((yi - y_mean) ** 2 for yi in y)
+        y_pred = [slope * xi + intercept for xi in x]
+        ss_res = sum((y[i] - y_pred[i]) ** 2 for i in range(n))
+        if ss_tot == 0:
+            return 0
+        r2 = 1 - (ss_res / ss_tot)
+        return r2
+
+    def clasificar_fuerza_tendencia(self, angulo):
+        """Clasifica la fuerza de la tendencia según el ángulo"""
+        abs_angulo = abs(angulo)
+        if abs_angulo < 5:
+            return "Débil", 1
+        elif abs_angulo < 10:
+            return "Moderada", 2
+        elif abs_angulo < 20:
+            return "Fuerte", 3
         else:
-            return "💙 Muy Fuerte", 5
+            return "Muy Fuerte", 4
 
-    def determinar_direccion_tendencia(self, angulo_grados, umbral_minimo=1):
-        if abs(angulo_grados) < umbral_minimo:
-            return "⚪ RANGO"
-        elif angulo_grados > 0:
+    def determinar_direccion_tendencia(self, angulo, min_angulo=5):
+        """Determina la dirección de la tendencia"""
+        if abs(angulo) < min_angulo:
+            return "➡️ LATERAL"
+        elif angulo > 0:
             return "🟢 ALCISTA"
         else:
             return "🔴 BAJISTA"
 
-    def calcular_r2(self, y_real, x, pendiente, intercepto):
-        if len(y_real) != len(x):
-            return 0
-        y_real = np.array(y_real)
-        y_pred = pendiente * np.array(x) + intercepto
-        ss_res = np.sum((y_real - y_pred) ** 2)
-        ss_tot = np.sum((y_real - np.mean(y_real)) ** 2)
-        if ss_tot == 0:
-            return 0
-        return 1 - (ss_res / ss_tot)
+    def calcular_stochastic(self, datos_mercado, k_period=14, d_period=3):
+        """Calcula indicador Stochastic"""
+        if not datos_mercado or len(datos_mercado['maximos']) < k_period:
+            return 50, 50
+        maximos = datos_mercado['maximos'][-k_period:]
+        minimos = datos_mercado['minimos'][-k_period:]
+        cierres = datos_mercado['cierres'][-k_period:]
+        highest_high = max(maximos)
+        lowest_low = min(minimos)
+        if highest_high == lowest_low:
+            k_percent = 50
+        else:
+            k_percent = 100 * (cierres[-1] - lowest_low) / (highest_high - lowest_low)
+        # Suavizar K
+        if len(datos_mercado['cierres']) >= k_period + d_period - 1:
+            k_values = []
+            for i in range(d_period):
+                idx = -(i + 1)
+                high = max(datos_mercado['maximos'][idx-k_period:idx])
+                low = min(datos_mercado['minimos'][idx-k_period:idx])
+                if high == low:
+                    k = 50
+                else:
+                    k = 100 * (datos_mercado['cierres'][idx] - low) / (high - low)
+                k_values.append(k)
+            k_smoothed = sum(k_values) / len(k_values)
+        else:
+            k_smoothed = k_percent
+        # Calcular D como media móvil de K
+        d_percent = k_smoothed  # Simplificado, en realidad sería media móvil de K
+        return k_smoothed, d_percent
 
-    def reoptimizar_periodicamente(self):
-        try:
-            horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 3600
-            if self.operaciones_desde_optimizacion >= 8 or horas_desde_opt >= self.config.get('reevaluacion_horas', 24):
-                print("🔄 Iniciando re-optimización automática...")
-                ia = OptimizadorIA(log_path=self.log_path, min_samples=self.config.get('min_samples_optimizacion', 30))
-                nuevos_parametros = ia.buscar_mejores_parametros()
-                if nuevos_parametros:
-                    self.actualizar_parametros(nuevos_parametros)
-                    self.ultima_optimizacion = datetime.now()
-                    self.operaciones_desde_optimizacion = 0
-                    print("✅ Parámetros actualizados en tiempo real")
-        except Exception as e:
-            print(f"⚠ Error en re-optimización automática: {e}")
-
-    def actualizar_parametros(self, nuevos_parametros):
-        self.config['trend_threshold_degrees'] = nuevos_parametros.get('trend_threshold_degrees', 
-                                                                        self.config.get('trend_threshold_degrees', 16))
-        self.config['min_trend_strength_degrees'] = nuevos_parametros.get('min_trend_strength_degrees', 
-                                                                           self.config.get('min_trend_strength_degrees', 16))
-        self.config['entry_margin'] = nuevos_parametros.get('entry_margin', 
-                                                             self.config.get('entry_margin', 0.001))
-
-    def ejecutar_analisis(self):
-        if random.random() < 0.1:
-            self.reoptimizar_periodicamente()
-            self.verificar_envio_reporte_automatico()    
-        cierres = self.verificar_cierre_operaciones()
-        if cierres:
-            print(f"     📊 Operaciones cerradas: {', '.join(cierres)}")
-        self.guardar_estado()
-        return self.escanear_mercado()
-
-    def mostrar_resumen_operaciones(self):
-        print(f"\n📊 RESUMEN OPERACIONES:")
-        print(f"   Activas: {len(self.operaciones_activas)}")
-        print(f"   Esperando reentry: {len(self.esperando_reentry)}")
-        print(f"   Total ejecutadas: {self.total_operaciones}")
-        if self.operaciones_activas:
-            for simbolo, op in self.operaciones_activas.items():
-                estado = "🟢 LONG" if op['tipo'] == 'LONG' else "🔴 SHORT"
-                ancho_canal = op.get('ancho_canal_porcentual', 0)
-                timeframe = op.get('timeframe_utilizado', 'N/A')
-                velas = op.get('velas_utilizadas', 0)
-                breakout = "🚀" if op.get('breakout_usado', False) else ""
-                print(f"   • {simbolo} {estado} {breakout} - {timeframe} - {velas}v - Ancho: {ancho_canal:.1f}%")
-
-    def iniciar(self):
-        print("\n" + "=" * 70)
-        print("🤖 BOT DE TRADING - ESTRATEGIA BREAKOUT + REENTRY (Bitget)")
-        print("🎯 PRIORIDAD: TIMEFRAMES CORTOS (1m > 3m > 5m > 15m > 30m)")
-        print("💾 PERSISTENCIA: ACTIVADA")
-        print("🔄 REEVALUACIÓN: CADA 2 HORAS")
-        print("=" * 70)
-        print(f"💱 Símbolos: {len(self.config.get('symbols', []))} monedas")
-        print(f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}")
-        print(f"🕯️ Velas: {self.config.get('velas_options', [])}")
-        print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
-        print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
-        print("=" * 70)
-        print("\n🚀 INICIANDO BOT...")
-        try:
-            while True:
-                nuevas_senales = self.ejecutar_analisis()
-                self.mostrar_resumen_operaciones()
-                minutos_espera = self.config.get('scan_interval_minutes', 1)
-                print(f"\n✅ Análisis completado. Señales nuevas: {nuevas_senales}")
-                print(f"⏳ Próximo análisis en {minutos_espera} minutos...")
-                print("-" * 60)
-                for minuto in range(minutos_espera):
-                    time.sleep(60)
-                    restantes = minutos_espera - (minuto + 1)
-                    if restantes > 0 and restantes % 5 == 0:
-                        print(f"   ⏰ {restantes} minutos restantes...")
-        except KeyboardInterrupt:
-            print("\n🛑 Bot detenido por el usuario")
-            print("💾 Guardando estado final...")
-            self.guardar_estado()
-            self.ws.stop()
-            print("👋 ¡Hasta pronto!")
-        except Exception as e:
-            print(f"\n❌ Error en el bot: {e}")
-            print("💾 Intentando guardar estado...")
+    def _enviar_telegram_simple(self, mensaje, token, chat_ids):
+        """Envía mensaje simple a Telegram"""
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        for chat_id in chat_ids:
+            payload = {
+                'chat_id': chat_id,
+                'text': mensaje,
+                'parse_mode': 'HTML'
+            }
             try:
-                self.guardar_estado()
-                self.ws.stop()
-            except:
-                pass
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code != 200:
+                    print(f"❌ Error enviando a Telegram: {response.text}")
+            except Exception as e:
+                print(f"❌ Error enviando a Telegram: {e}")
 
 # ---------------------------
-# CONFIGURACIÓN SIMPLE
-# ---------------------------
-def crear_config_desde_entorno():
-    """Configuración desde variables de entorno"""
-    directorio_actual = os.path.dirname(os.path.abspath(__file__))
-    telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '-1002272872445')
-    telegram_chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
-    return {
-        'min_channel_width_percent': 4.0,
-        'trend_threshold_degrees': 16.0,
-        'min_trend_strength_degrees': 16.0,
-        'entry_margin': 0.001,
-        'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 1,
-        'timeframes': ['1m', '3m', '5m', '15m', '30m'],
-        'velas_options': [80, 100, 120, 150, 200],
-        'symbols': [
-            'BTCUSDT','ETHUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','AVAXUSDT',
-            'DOGEUSDT','LTCUSDT','ATOMUSDT','XLMUSDT','ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT',
-            'BCHUSDT','EOSUSDT','TRXUSDT','XTZUSDT','SUSHIUSDT','COMPUSDT','YFIUSDT','ETCUSDT',
-            'SNXUSDT','RENUSDT','1INCHUSDT','NEOUSDT','ZILUSDT','HOTUSDT','ENJUSDT','ZECUSDT'
-        ],
-        'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
-        'telegram_chat_ids': telegram_chat_ids,
-        'auto_optimize': True,
-        'min_samples_optimizacion': 30,
-        'reevaluacion_horas': 24,
-        'log_path': os.path.join(directorio_actual, 'operaciones_log_v23.csv'),
-        'estado_file': os.path.join(directorio_actual, 'estado_bot_v23.json'),
-        'bitget_api_key': os.environ.get('BITGET_API_KEY'),
-        'bitget_secret_key': os.environ.get('BITGET_SECRET_KEY'),
-        'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE')
-    }
-
-# ---------------------------
-# FLASK APP Y RENDER
+# CONFIGURACIÓN DE FLASK
 # ---------------------------
 app = Flask(__name__)
-config = crear_config_desde_entorno()
-bot = TradingBot(config)
-
-def run_bot_loop():
-    """Ejecuta el bot en un hilo separado"""
-    while True:
-        try:
-            bot.ejecutar_analisis()
-            time.sleep(bot.config.get('scan_interval_minutes', 1) * 60)
-        except Exception as e:
-            print(f"Error en el hilo del bot: {e}", file=sys.stderr)
-            time.sleep(60)
-
-bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
-bot_thread.start()
+bot = None
 
 @app.route('/')
 def index():
-    return "Bot Breakout + Reentry (Bitget) está en línea.", 200
+    return "Bot de Trading Breakout + Reentry con API de Bitget"
 
-@app.route('/webhook', methods=['POST'])
-def telegram_webhook():
-    if request.is_json:
-        update = request.get_json()
-        print(f"Update recibido: {json.dumps(update)}", file=sys.stdout)
-        return jsonify({"status": "ok"}), 200
-    return jsonify({"error": "Request must be JSON"}), 400
+@app.route('/start', methods=['POST'])
+def start_bot():
+    global bot
+    if bot is None:
+        config = {
+            'symbols': os.environ.get('SYMBOLS', 'BTCUSDT,ETHUSDT').split(','),
+            'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
+            'telegram_chat_ids': os.environ.get('TELEGRAM_CHAT_IDS', '').split(','),
+            'timeframes': ['1m', '3m', '5m', '15m', '30m'],
+            'velas_options': [80, 100, 120, 150, 200],
+            'min_channel_width_percent': 4.0,
+            'min_trend_strength_degrees': 16,
+            'trend_threshold_degrees': 13,
+            'entry_margin': 0.001,
+            'min_rr_ratio': 1.2,
+            'order_margin_usdt': 2,
+            'auto_optimize': True,
+            'min_samples_optimizacion': 15,
+            'log_path': 'operaciones_log.csv',
+            'estado_file': 'estado_bot.json'
+        }
+        bot = TradingBot(config)
+        # Configurar cuenta de Bitget
+        bot.configurar_cuenta()
+        return jsonify({"status": "Bot iniciado correctamente"})
+    return jsonify({"status": "Bot ya está en ejecución"})
 
+@app.route('/scan', methods=['POST'])
+def scan_market():
+    global bot
+    if bot is None:
+        return jsonify({"error": "Bot no iniciado"}), 400
+    try:
+        signals = bot.escanear_mercado()
+        bot.guardar_estado()
+        return jsonify({"status": "Escaneo completado", "signals_found": signals})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/report', methods=['POST'])
+def generate_report():
+    global bot
+    if bot is None:
+        return jsonify({"error": "Bot no iniciado"}), 400
+    try:
+        report = bot.generar_reporte_semanal()
+        return jsonify({"status": "Reporte generado", "report": report})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ---------------------------
+# FUNCIÓN PRINCIPAL
+# ---------------------------
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Iniciar bot automáticamente al arrancar el servidor
+    with app.app_context():
+        start_bot()
+    # Ejecutar servidor Flask
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
