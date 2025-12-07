@@ -51,10 +51,7 @@ class BitgetClient:
         return base64.b64encode(mac.digest()).decode()
     def _get_headers(self, method, request_path, body=''):
         timestamp = str(int(time.time() * 1000))
-        if body:
-            body_str = json.dumps(body) if isinstance(body, dict) else body
-        else:
-            body_str = ''
+        body_str = json.dumps(body) if isinstance(body, dict) else body if body else ''
         sign = self._generate_signature(timestamp, method.upper(), request_path, body_str)
         return {
             'Content-Type': 'application/json',
