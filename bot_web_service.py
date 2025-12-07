@@ -18,6 +18,7 @@ import statistics
 import random
 import pandas as pd
 from io import BytesIO
+from flask import Flask, request, jsonify
 
 # ---------------------------
 # Configuración de Bitget API
@@ -1182,18 +1183,14 @@ class TradingBot:
     def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
         """
         Envía alerta de BREAKOUT detectado a Telegram SIN gráfico
-        LÓGICA CORREGIDA:
-        - BREAKOUT_LONG → Ruptura de resistencia en canal BAJISTA (oportunidad de reversión alcista)
-        - BREAKOUT_SHORT → Ruptura de soporte en canal ALCISTA (oportunidad de reversión bajista)
         """
         precio_cierre = datos_mercado['cierres'][-1]
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
         direccion_canal = info_canal['direccion']
         
-        # Determinar tipo de ruptura CORREGIDO SEGÚN TU ESTRATEGIA
+        # Determinar tipo de ruptura
         if tipo_breakout == "BREAKOUT_LONG":
-            # Para un LONG, nos interesa la ruptura del SOPORTE hacia arriba
             emoji_principal = "🚀"
             tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
@@ -1201,7 +1198,6 @@ class TradingBot:
             contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
             expectativa = "posible entrada en long si el precio reingresa al canal"
         else:  # BREAKOUT_SHORT
-            # Para un SHORT, nos interesa la ruptura de la RESISTENCIA hacia abajo
             emoji_principal = "📉"
             tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
@@ -1260,7 +1256,7 @@ class TradingBot:
         if abs(pearson) < 0.4 or r2 < 0.4:
             return None
         
-        # NUEVO: Verificar si ya hubo un breakout reciente (menos de 25 minutos)
+        # Verificar si ya hubo un breakout reciente (menos de 25 minutos)
         if simbolo in self.breakouts_detectados:
             ultimo_breakout = self.breakouts_detectados[simbolo]
             tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
@@ -1268,16 +1264,14 @@ class TradingBot:
                 print(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
                 return None
         
-        margen_breakout =  precio_cierre
-        
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
             if precio_cierre < soporte:
-                print(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
+                print(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
                 return "BREAKOUT_LONG"
         
         elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
             if precio_cierre > resistencia:
-                print(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
+                print(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
                 return "BREAKOUT_SHORT"
         
         return None
@@ -1295,7 +1289,7 @@ class TradingBot:
         if tiempo_desde_breakout > 120:
             print(f"     ⏰ {simbolo} - Timeout de reentry (>30 min), cancelando espera")
             del self.esperando_reentry[simbolo]
-            # NUEVO: Limpiar también de breakouts_detectados cuando expira el reentry
+            # Limpiar también de breakouts_detectados cuando expira el reentry
             if simbolo in self.breakouts_detectados:
                 del self.breakouts_detectados[simbolo]
             return None
@@ -1314,7 +1308,7 @@ class TradingBot:
                 
                 if distancia_soporte <= tolerancia and stoch_k <= 30 and stoch_d <= 30:
                     print(f"     ✅ {simbolo} - REENTRY LONG confirmado! Entrada en soporte con Stoch oversold")
-                    # NUEVO: Limpiar breakouts_detectados cuando se confirma reentry
+                    # Limpiar breakouts_detectados cuando se confirma reentry
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
                     return "LONG"
@@ -1325,7 +1319,7 @@ class TradingBot:
                 
                 if distancia_resistencia <= tolerancia and stoch_k >= 70 and stoch_d >= 70:
                     print(f"     ✅ {simbolo} - REENTRY SHORT confirmado! Entrada en resistencia con Stoch overbought")
-                    # NUEVO: Limpiar breakouts_detectados cuando se confirma reentry
+                    # Limpiar breakouts_detectados cuando se confirma reentry
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
                     return "SHORT"
@@ -1524,4 +1518,405 @@ class TradingBot:
     f"📊 {simbolo} - {config_optima['timeframe']} - {config_optima['num_velas']}v | "
     f"{info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) | "
     f"Ancho: {info_canal['ancho_canal_porcentual']:.1f}% - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch} | "
-    f"Precio: {pos
+    f"Precio: {posicion}"
+                )
+                
+                if (info_canal['nivel_fuerza'] < 2 or 
+                    abs(info_canal['coeficiente_pearson']) < 0.4 or 
+                    info_canal['r2_score'] < 0.4):
+                    continue
+                
+                if simbolo not in self.esperando_reentry:
+                    tipo_breakout = self.detectar_breakout(simbolo, info_canal, datos_mercado)
+                    
+                    if tipo_breakout:
+                        self.esperando_reentry[simbolo] = {
+                            'tipo': tipo_breakout,
+                            'timestamp': datetime.now(),
+                            'precio_breakout': precio_actual,
+                            'config': config_optima
+                        }
+                        # Registrar el breakout detectado para evitar repeticiones
+                        self.breakouts_detectados[simbolo] = {
+                            'tipo': tipo_breakout,
+                            'timestamp': datetime.now(),
+                            'precio_breakout': precio_actual
+                        }
+                        print(f"     🎯 {simbolo} - Breakout registrado, esperando reingreso...")
+                        
+                        # Enviar alerta de breakout a Telegram
+                        self.enviar_alerta_breakout(simbolo, tipo_breakout, info_canal, datos_mercado, config_optima)
+                        continue
+                
+                tipo_operacion = self.detectar_reentry(simbolo, info_canal, datos_mercado)
+                
+                if not tipo_operacion:
+                    continue
+                
+                precio_entrada, tp, sl = self.calcular_niveles_entrada(
+                    tipo_operacion, info_canal, datos_mercado['precio_actual']
+                )
+                
+                if not precio_entrada or not tp or not sl:
+                    continue
+                
+                if simbolo in self.breakout_history:
+                    ultimo_breakout = self.breakout_history[simbolo]
+                    tiempo_desde_ultimo = (datetime.now() - ultimo_breakout).total_seconds() / 3600
+                    if tiempo_desde_ultimo < 2:
+                        print(f"   ⏳ {simbolo} - Señal reciente, omitiendo...")
+                        continue
+                
+                breakout_info = self.esperando_reentry[simbolo]
+                
+                # Ejecutar orden
+                if self.ejecutar_orden(simbolo, tipo_operacion, precio_entrada, tp, sl):
+                    self.generar_senal_operacion(
+                        simbolo, tipo_operacion, precio_entrada, tp, sl, 
+                        info_canal, datos_mercado, config_optima, breakout_info
+                    )
+                    senales_encontradas += 1
+                    self.breakout_history[simbolo] = datetime.now()
+                    
+                    del self.esperando_reentry[simbolo]
+                
+            except Exception as e:
+                print(f"⚠️ Error analizando {simbolo}: {e}")
+                continue
+        
+        if self.esperando_reentry:
+            print(f"\n⏳ Esperando reingreso en {len(self.esperando_reentry)} símbolos:")
+            for simbolo, info in self.esperando_reentry.items():
+                tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
+                print(f"   • {simbolo} - {info['tipo']} - Esperando {tiempo_espera:.1f} min")
+        
+        # Mostrar breakouts detectados recientemente
+        if self.breakouts_detectados:
+            print(f"\n⏰ Breakouts detectados recientemente:")
+            for simbolo, info in self.breakouts_detectados.items():
+                tiempo_desde_deteccion = (datetime.now() - info['timestamp']).total_seconds() / 60
+                print(f"   • {simbolo} - {info['tipo']} - Hace {tiempo_desde_deteccion:.1f} min")
+        
+        if senales_encontradas > 0:
+            print(f"✅ Se encontraron {senales_encontradas} señales de trading")
+        else:
+            print("❌ No se encontraron señales en este ciclo")
+        
+        return senales_encontradas
+
+    def generar_senal_operacion(self, simbolo, tipo_operacion, precio_entrada, tp, sl,
+                            info_canal, datos_mercado, config_optima, breakout_info=None):
+        """Genera y envía señal de operación con info de breakout"""
+        if simbolo in self.senales_enviadas:
+            return
+
+        if precio_entrada is None or tp is None or sl is None:
+            print(f"    ❌ Niveles inválidos para {simbolo}, omitiendo señal")
+            return
+
+        riesgo = abs(precio_entrada - sl)
+        beneficio = abs(tp - precio_entrada)
+        ratio_rr = beneficio / riesgo if riesgo > 0 else 0
+
+        # Calcular SL y TP en porcentaje
+        sl_percent = abs((sl - precio_entrada) / precio_entrada) * 100
+        tp_percent = abs((tp - precio_entrada) / precio_entrada) * 100
+
+        stoch_estado = "📉 SOBREVENTA" if tipo_operacion == "LONG" else "📈 SOBRECOMPRA"
+
+        breakout_texto = ""
+        if breakout_info:
+            tiempo_breakout = (datetime.now() - breakout_info['timestamp']).total_seconds() / 60
+            breakout_texto = f"""
+🚀 <b>BREAKOUT + REENTRY DETECTADO:</b>
+⏰ Tiempo desde breakout: {tiempo_breakout:.1f} minutos
+💰 Precio breakout: {breakout_info['precio_breakout']:.8f}
+"""
+
+        mensaje = f"""
+🎯 <b>SEÑAL DE {tipo_operacion} - {simbolo}</b>
+{breakout_texto}
+⏱️ <b>Configuración óptima:</b>
+📊 Timeframe: {config_optima['timeframe']}
+🕯️ Velas: {config_optima['num_velas']}
+📏 Ancho Canal: {info_canal['ancho_canal_porcentual']:.1f}% ⭐
+
+💰 <b>Precio Actual:</b> {datos_mercado['precio_actual']:.8f}
+🎯 <b>Entrada:</b> {precio_entrada:.8f}
+🛑 <b>Stop Loss:</b> {sl:.8f}
+🎯 <b>Take Profit:</b> {tp:.8f}
+
+📊 <b>Ratio R/B:</b> {ratio_rr:.2f}:1
+🎯 <b>SL:</b> {sl_percent:.2f}%
+🎯 <b>TP:</b> {tp_percent:.2f}%
+💰 <b>Riesgo:</b> {riesgo:.8f}
+🎯 <b>Beneficio Objetivo:</b> {beneficio:.8f}
+
+📈 <b>Tendencia:</b> {info_canal['direccion']}
+💪 <b>Fuerza:</b> {info_canal['fuerza_texto']}
+📏 <b>Ángulo:</b> {info_canal['angulo_tendencia']:.1f}°
+📊 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
+🎯 <b>R² Score:</b> {info_canal['r2_score']:.3f}
+
+🎰 <b>Stochástico:</b> {stoch_estado}
+📊 <b>Stoch K:</b> {info_canal['stoch_k']:.1f}
+📈 <b>Stoch D:</b> {info_canal['stoch_d']:.1f}
+
+⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic
+        """
+        
+        token = self.config.get('telegram_token')
+        chat_ids = self.config.get('telegram_chat_ids', [])
+        if token and chat_ids:
+            try:
+                print(f"     📨 Enviando señal por Telegram...")
+                self._enviar_telegram_simple(mensaje, token, chat_ids)
+                print(f"     ✅ Señal {tipo_operacion} para {simbolo} enviada")
+            except Exception as e:
+                print(f"     ❌ Error enviando señal: {e}")
+        
+        self.operaciones_activas[simbolo] = {
+            'tipo': tipo_operacion,
+            'precio_entrada': precio_entrada,
+            'take_profit': tp,
+            'stop_loss': sl,
+            'timestamp_entrada': datetime.now().isoformat(),
+            'angulo_tendencia': info_canal['angulo_tendencia'],
+            'pearson': info_canal['coeficiente_pearson'],
+            'r2_score': info_canal['r2_score'],
+            'ancho_canal_relativo': info_canal['ancho_canal'] / precio_entrada,
+            'ancho_canal_porcentual': info_canal['ancho_canal_porcentual'],
+            'nivel_fuerza': info_canal['nivel_fuerza'],
+            'timeframe_utilizado': config_optima['timeframe'],
+            'velas_utilizadas': config_optima['num_velas'],
+            'stoch_k': info_canal['stoch_k'],
+            'stoch_d': info_canal['stoch_d'],
+            'breakout_usado': breakout_info is not None
+        }
+        
+        self.senales_enviadas.add(simbolo)
+        self.total_operaciones += 1
+
+    def inicializar_log(self):
+        if not os.path.exists(self.archivo_log):
+            with open(self.archivo_log, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp', 'symbol', 'tipo', 'precio_entrada',
+                    'take_profit', 'stop_loss', 'precio_salida',
+                    'resultado', 'pnl_percent', 'duracion_minutos',
+                    'angulo_tendencia', 'pearson', 'r2_score',
+                    'ancho_canal_relativo', 'ancho_canal_porcentual',
+                    'nivel_fuerza', 'timeframe_utilizado', 'velas_utilizadas',
+                    'stoch_k', 'stoch_d', 'breakout_usado'
+                ])
+
+    def registrar_operacion(self, datos_operacion):
+        with open(self.archivo_log, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datos_operacion['timestamp'],
+                datos_operacion['symbol'],
+                datos_operacion['tipo'],
+                datos_operacion['precio_entrada'],
+                datos_operacion['take_profit'],
+                datos_operacion['stop_loss'],
+                datos_operacion['precio_salida'],
+                datos_operacion['resultado'],
+                datos_operacion['pnl_percent'],
+                datos_operacion['duracion_minutos'],
+                datos_operacion['angulo_tendencia'],
+                datos_operacion['pearson'],
+                datos_operacion['r2_score'],
+                datos_operacion.get('ancho_canal_relativo', 0),
+                datos_operacion.get('ancho_canal_porcentual', 0),
+                datos_operacion.get('nivel_fuerza', 1),
+                datos_operacion.get('timeframe_utilizado', 'N/A'),
+                datos_operacion.get('velas_utilizadas', 0),
+                datos_operacion.get('stoch_k', 0),
+                datos_operacion.get('stoch_d', 0),
+                datos_operacion.get('breakout_usado', False)
+            ])
+            
+    def filtrar_operaciones_ultima_semana(self):
+        """Filtra operaciones de los últimos 7 días"""
+        if not os.path.exists(self.archivo_log):
+            return []
+        
+        try:
+            ops_recientes = []
+            fecha_limite = datetime.now() - timedelta(days=7)
+            
+            with open(self.archivo_log, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        timestamp = datetime.fromisoformat(row['timestamp'])
+                        if timestamp >= fecha_limite:
+                            ops_recientes.append({
+                                'timestamp': timestamp,
+                                'symbol': row['symbol'],
+                                'resultado': row['resultado'],
+                                'pnl_percent': float(row['pnl_percent']),
+                                'tipo': row['tipo'],
+                                'breakout_usado': row.get('breakout_usado', 'False') == 'True'
+                            })
+                    except Exception:
+                        continue
+                        
+            return ops_recientes
+        except Exception as e:
+            print(f"❌ Error filtrando operaciones: {e}")
+            return []
+
+    def _enviar_telegram_simple(self, mensaje, token, chat_ids):
+        """Envía un mensaje simple a Telegram"""
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        
+        for chat_id in chat_ids:
+            try:
+                data = {
+                    'chat_id': chat_id,
+                    'text': mensaje,
+                    'parse_mode': 'HTML'
+                }
+                response = requests.post(url, json=data, timeout=10)
+                if response.status_code != 200:
+                    print(f"❌ Error enviando a Telegram: {response.text}")
+            except Exception as e:
+                print(f"❌ Error enviando mensaje a Telegram: {e}")
+
+    def run(self):
+        """Bucle principal del bot"""
+        print("🚀 Bot de Trading Breakout + Reentry iniciado")
+        print("📡 Usando WebSocket para datos en tiempo real")
+        
+        while True:
+            try:
+                # Escanear mercado
+                self.escanear_mercado()
+                
+                # Guardar estado
+                self.guardar_estado()
+                
+                # Esperar antes del siguiente ciclo
+                time.sleep(self.config.get('scan_interval', 60))
+                
+            except KeyboardInterrupt:
+                print("\n👋 Bot detenido por el usuario")
+                break
+            except Exception as e:
+                print(f"❌ Error en el bucle principal: {e}")
+                time.sleep(10)
+        
+        # Limpiar recursos
+        self.bitget.close_websocket()
+
+# ---------------------------
+# Web Service para Render.com
+# ---------------------------
+app = Flask(__name__)
+bot_instance = None
+
+@app.route('/')
+def home():
+    return jsonify({
+        'status': 'running',
+        'message': 'Bitget Trading Bot - Breakout + Reentry Strategy',
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/health')
+def health_check():
+    return jsonify({'status': 'healthy'}), 200
+
+@app.route('/start', methods=['POST'])
+def start_bot():
+    global bot_instance
+    
+    if bot_instance and bot_instance.bitget:
+        return jsonify({'error': 'Bot already running'}), 400
+    
+    try:
+        # Configuración desde variables de entorno
+        config = {
+            'symbols': os.getenv('SYMBOLS', 'BTCUSDT,ETHUSDT').split(','),
+            'telegram_token': os.getenv('TELEGRAM_TOKEN'),
+            'telegram_chat_ids': os.getenv('TELEGRAM_CHAT_IDS', '').split(','),
+            'leverage': int(os.getenv('LEVERAGE', '10')),
+            'order_margin_usdt': float(os.getenv('ORDER_MARGIN_USDT', '2')),
+            'margin_mode': os.getenv('MARGIN_MODE', 'isolated'),
+            'position_mode': os.getenv('POSITION_MODE', 'one-way'),
+            'scan_interval': int(os.getenv('SCAN_INTERVAL', '60')),
+            'min_channel_width_percent': float(os.getenv('MIN_CHANNEL_WIDTH_PERCENT', '4.0')),
+            'min_rr_ratio': float(os.getenv('MIN_RR_RATIO', '1.2')),
+            'auto_optimize': os.getenv('AUTO_OPTIMIZE', 'true').lower() == 'true',
+            'min_samples_optimizacion': int(os.getenv('MIN_SAMPLES_OPTIMIZACION', '15')),
+            'timeframes': os.getenv('TIMEFRAMES', '1m,3m,5m,15m,30m').split(','),
+            'velas_options': [int(x) for x in os.getenv('VELAS_OPTIONS', '80,100,120,150,200').split(',')],
+            'trend_threshold_degrees': float(os.getenv('TREND_THRESHOLD_DEGREES', '13')),
+            'min_trend_strength_degrees': float(os.getenv('MIN_TREND_STRENGTH_DEGREES', '16')),
+            'entry_margin': float(os.getenv('ENTRY_MARGIN', '0.001')),
+            'log_path': os.getenv('LOG_PATH', 'operaciones_log.csv'),
+            'estado_file': os.getenv('ESTADO_FILE', 'estado_bot.json')
+        }
+        
+        # Iniciar bot en un hilo separado
+        bot_instance = TradingBot(config)
+        bot_thread = threading.Thread(target=bot_instance.run)
+        bot_thread.daemon = True
+        bot_thread.start()
+        
+        return jsonify({
+            'status': 'started',
+            'config': {
+                'symbols': config['symbols'],
+                'leverage': config['leverage'],
+                'margin': config['order_margin_usdt']
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/stop', methods=['POST'])
+def stop_bot():
+    global bot_instance
+    
+    if not bot_instance:
+        return jsonify({'error': 'Bot not running'}), 400
+    
+    try:
+        if bot_instance.bitget:
+            bot_instance.bitget.close_websocket()
+        bot_instance = None
+        return jsonify({'status': 'stopped'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/status')
+def status():
+    global bot_instance
+    
+    if not bot_instance:
+        return jsonify({'status': 'stopped'})
+    
+    try:
+        positions = bot_instance.bitget.get_positions()
+        waiting_reentry = len(bot_instance.esperando_reentry)
+        breakouts_detected = len(bot_instance.breakouts_detectados)
+        
+        return jsonify({
+            'status': 'running',
+            'positions': len(positions),
+            'waiting_reentry': waiting_reentry,
+            'breakouts_detected': breakouts_detected,
+            'total_operations': bot_instance.total_operaciones
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
