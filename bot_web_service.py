@@ -41,7 +41,14 @@ class BitgetClient:
         self.base_url = "https://api.bitget.com"
 
     def _generate_signature(self, timestamp, method, request_path, body=''):
-        body_str = json.dumps(body, separators=(',', ':')) if isinstance(body, dict) else str(body) if body else ''
+        # Normalizar el cuerpo: siempre usar JSON compacto sin espacios
+        if body:
+            if isinstance(body, dict):
+                body_str = json.dumps(body, separators=(',', ':'), sort_keys=True)
+            else:
+                body_str = str(body)
+        else:
+            body_str = ''
         message = timestamp + method.upper() + request_path + body_str
         mac = hmac.new(
             bytes(self.api_secret, encoding='utf8'),
@@ -52,7 +59,14 @@ class BitgetClient:
 
     def _get_headers(self, method, request_path, body=''):
         timestamp = str(int(time.time() * 1000))
-        body_str = json.dumps(body, separators=(',', ':')) if isinstance(body, dict) else str(body) if body else ''
+        # Usar el mismo body_str que en _generate_signature
+        if body:
+            if isinstance(body, dict):
+                body_str = json.dumps(body, separators=(',', ':'), sort_keys=True)
+            else:
+                body_str = str(body)
+        else:
+            body_str = ''
         sign = self._generate_signature(timestamp, method.upper(), request_path, body_str)
         return {
             'Content-Type': 'application/json',
@@ -1588,7 +1602,6 @@ def setup_telegram_webhook():
         logger.error(f"Error configurando webhook: {e}")
 
 if __name__ == '__main__':
-    # Bind al puerto que Render espera
     port = int(os.environ.get('PORT', 10000))
     setup_telegram_webhook()
     app.run(host='0.0.0.0', port=port, debug=False)
