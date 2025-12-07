@@ -1,5 +1,7 @@
-Flask==2.3.3
+Flask==2.3.0
 requests==2.31.0
-numpy==1.26.4
-python-telegram-bot==21.3
+pandas>=2.0.0
+matplotlib>=3.5.0
+mplfinance>=0.12.9b7
+numpy==1.26.0
 gunicorn==21.2.0
