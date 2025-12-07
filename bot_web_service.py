@@ -1,5 +1,5 @@
 # bot_web_service.py
-# Adaptación para Render del bot Breakout + Reentry + KVO
+# Adaptación para Render del bot Breakout + Reentry + KVO + Bitget
 import requests
 import time
 import json
@@ -21,13 +21,16 @@ from io import BytesIO
 from flask import Flask, request, jsonify
 import threading
 import logging
+import hmac
+import hashlib
+import base64
 
 # Configurar logging básico
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ---------------------------
-# Optimizador IA
+# Optimizador IA (sin cambios)
 # ---------------------------
 class OptimizadorIA:
     def __init__(self, log_path="operaciones_log.csv", min_samples=15):
@@ -100,7 +103,7 @@ class OptimizadorIA:
         print(f"🔎 Optimizador: probando {total} combinaciones...")
         for idx, (t, s, m) in enumerate(combos, start=1):
             score = self.evaluar_configuracion(t, s, m)
-            time.sleep(0.1)  # ✅ AÑADIDO: delay para evitar saturación local
+            time.sleep(0.1)
             if idx % 100 == 0 or idx == total:
                 print(f"   · probado {idx}/{total} combos (mejor score actual: {mejor_score:.4f})")
             if score > mejor_score:
@@ -123,6 +126,130 @@ class OptimizadorIA:
         else:
             print("⚠ No se encontró una configuración mejor")
         return mejores_param
+
+
+# ---------------------------
+# UTILIDADES BITGET
+# ---------------------------
+def firmar_bitget(timestamp, method, endpoint, body, secret):
+    message = timestamp + method + endpoint + body
+    return base64.b64encode(hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()).decode()
+
+def enviar_orden_bitget(simbolo, tipo, precio_entrada, tp, sl, api_key, api_secret, api_passphrase):
+    base_url = "https://api.bitget.com"
+    margin_coin = "USDT"
+    size_usd = 2.0  # ✅ 2 USDT de margen
+    leverage = 10   # ✅ 10x
+
+    # 1. Establecer apalancamiento (opcional si ya está configurado)
+    leverage_url = "/api/mix/v1/account/setLeverage"
+    leverage_data = {
+        "symbol": simbolo,
+        "marginCoin": margin_coin,
+        "leverage": str(leverage),
+        "holdSide": "long" if tipo == "LONG" else "short"
+    }
+    timestamp = str(int(time.time() * 1000))
+    body_str = json.dumps(leverage_data)
+    signature = firmar_bitget(timestamp, "POST", leverage_url, body_str, api_secret)
+    headers = {
+        "ACCESS-KEY": api_key,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": api_passphrase,
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(base_url + leverage_url, headers=headers, json=leverage_data, timeout=10)
+    time.sleep(0.1)  # ✅ Rate limit
+
+    # 2. Enviar orden de mercado
+    order_url = "/api/mix/v1/order/placeOrder"
+    qty_contracts = (size_usd * leverage) / precio_entrada
+    qty_str = f"{qty_contracts:.6f}"
+
+    order_data = {
+        "symbol": simbolo,
+        "marginCoin": margin_coin,
+        "size": qty_str,
+        "side": "open_long" if tipo == "LONG" else "open_short",
+        "orderType": "market",
+        "timeInForceValue": "normal",
+        "reduceOnly": False,
+        "marginMode": "isolated"  # ✅ Margen aislado
+    }
+
+    timestamp = str(int(time.time() * 1000))
+    body_str = json.dumps(order_data)
+    signature = firmar_bitget(timestamp, "POST", order_url, body_str, api_secret)
+    headers = {
+        "ACCESS-KEY": api_key,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": api_passphrase,
+        "Content-Type": "application/json"
+    }
+
+    resp = requests.post(base_url + order_url, headers=headers, json=order_data, timeout=10)
+    time.sleep(0.1)
+
+    if resp.status_code != 200 or resp.json().get("code") != "00000":
+        print(f"❌ Error creando orden: {resp.text}")
+        return False
+
+    # 3. Órdenes TP/SL
+    tpsl_url = "/api/mix/v1/order/placeTPSL"
+    qty_str = f"{qty_contracts:.6f}"
+
+    # TP
+    tp_data = {
+        "symbol": simbolo,
+        "marginCoin": margin_coin,
+        "planType": "profit_plan",
+        "holdSide": "long" if tipo == "LONG" else "short",
+        "triggerPrice": str(tp),
+        "executePrice": "",
+        "size": qty_str,
+        "triggerType": "fill_price"
+    }
+    timestamp = str(int(time.time() * 1000))
+    body_str = json.dumps(tp_data)
+    signature = firmar_bitget(timestamp, "POST", tpsl_url, body_str, api_secret)
+    headers = {
+        "ACCESS-KEY": api_key,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": api_passphrase,
+        "Content-Type": "application/json"
+    }
+    resp_tp = requests.post(base_url + tpsl_url, headers=headers, json=tp_data, timeout=10)
+    time.sleep(0.1)
+
+    # SL
+    sl_data = {
+        "symbol": simbolo,
+        "marginCoin": margin_coin,
+        "planType": "loss_plan",
+        "holdSide": "long" if tipo == "LONG" else "short",
+        "triggerPrice": str(sl),
+        "executePrice": "",
+        "size": qty_str,
+        "triggerType": "fill_price"
+    }
+    timestamp = str(int(time.time() * 1000))
+    body_str = json.dumps(sl_data)
+    signature = firmar_bitget(timestamp, "POST", tpsl_url, body_str, api_secret)
+    headers["ACCESS-SIGN"] = signature
+    headers["ACCESS-TIMESTAMP"] = timestamp
+    resp_sl = requests.post(base_url + tpsl_url, headers=headers, json=sl_data, timeout=10)
+    time.sleep(0.1)
+
+    if resp_tp.status_code == 200 and resp_sl.status_code == 200:
+        print(f"✅ Órdenes TP/SL activadas en Bitget para {simbolo}")
+        return True
+    else:
+        print(f"⚠️ Error TP/SL en Bitget: TP={resp_tp.text}, SL={resp_sl.text}")
+        return False
+
 
 # ---------------------------
 # BOT PRINCIPAL
@@ -161,7 +288,7 @@ class TradingBot:
         self.senales_enviadas = set()
         self.archivo_log = self.log_path
         self.inicializar_log()
-        self.indice_escaneo = 0  # ✅ AÑADIDO: índice para 5 símbolos/minuto
+        self.indice_escaneo = 0  # ✅ 5 símbolos/minuto
 
     def cargar_estado(self):
         try:
@@ -192,7 +319,7 @@ class TradingBot:
                 self.ultima_busqueda_config = estado.get('ultima_busqueda_config', {})
                 self.operaciones_activas = estado.get('operaciones_activas', {})
                 self.senales_enviadas = set(estado.get('senales_enviadas', []))
-                self.indice_escaneo = estado.get('indice_escaneo', 0)  # ✅ AÑADIDO
+                self.indice_escaneo = estado.get('indice_escaneo', 0)
                 print("✅ Estado anterior cargado correctamente")
         except Exception as e:
             print(f"⚠ Error cargando estado previo: {e}")
@@ -208,7 +335,7 @@ class TradingBot:
                 'ultima_busqueda_config': {k: v.isoformat() for k, v in self.ultima_busqueda_config.items()},
                 'operaciones_activas': self.operaciones_activas,
                 'senales_enviadas': list(self.senales_enviadas),
-                'indice_escaneo': self.indice_escaneo,  # ✅ AÑADIDO
+                'indice_escaneo': self.indice_escaneo,
                 'esperando_reentry': {
                     k: {
                         'tipo': v['tipo'],
@@ -231,10 +358,10 @@ class TradingBot:
         except Exception as e:
             print(f"⚠ Error guardando estado: {e}")
 
-    # === NUEVO: obtiene datos como DataFrame (incluye volumen para KVO) ===
+    # === Datos desde Binance (solo lectura) ===
     def obtener_datos_con_volumen(self, simbolo, timeframe, num_velas):
         url = "https://api.binance.com/api/v3/klines"
-        params = {'symbol': simbolo, 'interval': timeframe, 'limit': num_velas + 55}  # +55 para KVO
+        params = {'symbol': simbolo, 'interval': timeframe, 'limit': num_velas + 55}
         try:
             respuesta = requests.get(url, params=params, timeout=10)
             datos = respuesta.json()
@@ -260,7 +387,6 @@ class TradingBot:
             print(f"    ❌ Error obteniendo datos de {simbolo}: {e}")
             return None
 
-    # === NUEVO: cálculo del KVO ===
     def calcular_kvo(self, df):
         TrigLen = 13
         FastX = 34
@@ -282,7 +408,6 @@ class TradingBot:
         trigger = df_kvo['xTrigger'].iloc[-1]
         return kvo, trigger
 
-    # === NUEVO: Stochastic desde DataFrame ===
     def calcular_stochastic_df(self, df, period=14, k_period=3, d_period=3):
         if len(df) < period:
             return 50, 50
@@ -302,7 +427,6 @@ class TradingBot:
         stoch_d = np.convolve(stoch_k_smooth, np.ones(d_period)/d_period, mode='same')
         return stoch_k[-1], stoch_d[-1]
 
-    # === NUEVO: canal basado en DataFrame ===
     def calcular_canal_regresion_df(self, df, candle_period):
         if len(df) < candle_period:
             return None
@@ -432,7 +556,6 @@ class TradingBot:
             tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
             if tiempo_desde_ultimo < 115:
                 return None
-        # CORREGIDO: Breakout según tu lógica
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
             if precio_cierre < soporte:
                 return "BREAKOUT_LONG"
@@ -506,6 +629,24 @@ class TradingBot:
         if not all([precio_entrada, tp, sl]):
             print(f"    ❌ Niveles inválidos para {simbolo}")
             return
+
+        # ✅ AQUÍ SE ENVÍA LA ORDEN REAL A BITGET
+        bitget_success = enviar_orden_bitget(
+            simbolo=simbolo,
+            tipo=tipo_operacion,
+            precio_entrada=precio_entrada,
+            tp=tp,
+            sl=sl,
+            api_key=self.config.get('bitget_api_key'),
+            api_secret=self.config.get('bitget_api_secret'),
+            api_passphrase=self.config.get('bitget_api_passphrase')
+        )
+
+        if not bitget_success:
+            print(f"    ❌ Error enviando orden a Bitget para {simbolo}")
+            return
+
+        # Continúa con Telegram y log
         sl_percent = abs((sl - precio_entrada) / precio_entrada) * 100
         tp_percent = abs((tp - precio_entrada) / precio_entrada) * 100
         riesgo = abs(precio_entrada - sl)
@@ -523,6 +664,7 @@ class TradingBot:
 """
         mensaje = f"""
 🎯 <b>SEÑAL DE {tipo_operacion} - {simbolo}</b>
+✅ <b>ORDEN ENVIADA A BITGET (2 USDT @ 10x, isolated)</b>
 {breakout_texto}
 ⏱️ <b>Configuración óptima:</b>
 📊 Timeframe: {config_optima['timeframe']}
@@ -561,6 +703,7 @@ class TradingBot:
                 print(f"     ✅ Señal {tipo_operacion} para {simbolo} enviada")
             except Exception as e:
                 print(f"     ❌ Error enviando señal: {e}")
+
         self.operaciones_activas[simbolo] = {
             'tipo': tipo_operacion,
             'precio_entrada': precio_entrada,
@@ -636,12 +779,10 @@ class TradingBot:
                 apds.append(mpf.make_addplot(entry_line, color='#FFD700', width=2, panel=0))
                 apds.append(mpf.make_addplot(tp_line, color='#00FF00', width=2, panel=0))
                 apds.append(mpf.make_addplot(sl_line, color='#FF0000', width=2, panel=0))
-            # Stochastic panel
             apds.append(mpf.make_addplot(sub_df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
             apds.append(mpf.make_addplot(sub_df['Stoch_D'], color='#FF6347', width=1.5, panel=1))
             apds.append(mpf.make_addplot([80]*len(sub_df), color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot([20]*len(sub_df), color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            # KVO panel
             apds.append(mpf.make_addplot(sub_df['KVO'], color='purple', width=1.2, panel=2, ylabel='KVO'))
             apds.append(mpf.make_addplot([0]*len(sub_df), color='white', linestyle='--', width=1, panel=2))
             fig, axes = mpf.plot(sub_df, type='candle', style='nightclouds',
@@ -781,17 +922,15 @@ class TradingBot:
         if not todos_simbolos:
             print("❌ No hay símbolos configurados")
             return 0
-
         total = len(todos_simbolos)
         inicio = self.indice_escaneo % total
         simbolos_a_escanear = []
         for i in range(5):
             idx = (inicio + i) % total
             simbolos_a_escanear.append(todos_simbolos[idx])
-        
         self.indice_escaneo = (self.indice_escaneo + 5) % total
-
         print(f"\n🔍 Escaneando {len(simbolos_a_escanear)} de {total} símbolos (Estrategia: Breakout + Reentry + KVO)...")
+
         senales_encontradas = 0
         for simbolo in simbolos_a_escanear:
             try:
@@ -855,6 +994,7 @@ class TradingBot:
             except Exception as e:
                 print(f"⚠️ Error analizando {simbolo}: {e}")
                 continue
+
         if senales_encontradas > 0:
             print(f"✅ Se encontraron {senales_encontradas} señales de trading")
         else:
@@ -862,153 +1002,10 @@ class TradingBot:
         return senales_encontradas
 
     def verificar_cierre_operaciones(self):
-        if not self.operaciones_activas:
-            return []
-        operaciones_cerradas = []
-        for simbolo, operacion in list(self.operaciones_activas.items()):
-            config_optima = self.config_optima_por_simbolo.get(simbolo)
-            if not config_optima:
-                continue
-            df = self.obtener_datos_con_volumen(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-            if df is None:
-                continue
-            precio_actual = df['Close'].iloc[-1]
-            tp = operacion['take_profit']
-            sl = operacion['stop_loss']
-            tipo = operacion['tipo']
-            resultado = None
-            if tipo == "LONG":
-                if precio_actual >= tp:
-                    resultado = "TP"
-                elif precio_actual <= sl:
-                    resultado = "SL"
-            else:
-                if precio_actual <= tp:
-                    resultado = "TP"
-                elif precio_actual >= sl:
-                    resultado = "SL"
-            if resultado:
-                if tipo == "LONG":
-                    pnl_percent = ((precio_actual - operacion['precio_entrada']) / operacion['precio_entrada']) * 100
-                else:
-                    pnl_percent = ((operacion['precio_entrada'] - precio_actual) / operacion['precio_entrada']) * 100
-                tiempo_entrada = datetime.fromisoformat(operacion['timestamp_entrada'])
-                duracion_minutos = (datetime.now() - tiempo_entrada).total_seconds() / 60
-                datos_operacion = {
-                    'timestamp': datetime.now().isoformat(),
-                    'symbol': simbolo,
-                    'tipo': tipo,
-                    'precio_entrada': operacion['precio_entrada'],
-                    'take_profit': tp,
-                    'stop_loss': sl,
-                    'precio_salida': precio_actual,
-                    'resultado': resultado,
-                    'pnl_percent': pnl_percent,
-                    'duracion_minutos': duracion_minutos,
-                    'angulo_tendencia': operacion.get('angulo_tendencia', 0),
-                    'pearson': operacion.get('pearson', 0),
-                    'r2_score': operacion.get('r2_score', 0),
-                    'ancho_canal_relativo': operacion.get('ancho_canal_relativo', 0),
-                    'ancho_canal_porcentual': operacion.get('ancho_canal_porcentual', 0),
-                    'nivel_fuerza': operacion.get('nivel_fuerza', 1),
-                    'timeframe_utilizado': operacion.get('timeframe_utilizado', 'N/A'),
-                    'velas_utilizadas': operacion.get('velas_utilizadas', 0),
-                    'stoch_k': operacion.get('stoch_k', 0),
-                    'stoch_d': operacion.get('stoch_d', 0),
-                    'kvo': operacion.get('kvo', 0),
-                    'breakout_usado': operacion.get('breakout_usado', False)
-                }
-                mensaje_cierre = self.generar_mensaje_cierre(datos_operacion)
-                token = self.config.get('telegram_token')
-                chats = self.config.get('telegram_chat_ids', [])
-                if token and chats:
-                    try:
-                        self._enviar_telegram_simple(mensaje_cierre, token, chats)
-                    except:
-                        pass
-                self.registrar_operacion(datos_operacion)
-                operaciones_cerradas.append(simbolo)
-                del self.operaciones_activas[simbolo]
-                if simbolo in self.senales_enviadas:
-                    self.senales_enviadas.remove(simbolo)
-                self.operaciones_desde_optimizacion += 1
-                print(f"     📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
-        return operaciones_cerradas
-
-    def generar_mensaje_cierre(self, datos_operacion):
-        emoji = "🟢" if datos_operacion['resultado'] == "TP" else "🔴"
-        color_emoji = "✅" if datos_operacion['resultado'] == "TP" else "❌"
-        if datos_operacion['tipo'] == 'LONG':
-            pnl_absoluto = datos_operacion['precio_salida'] - datos_operacion['precio_entrada']
-        else:
-            pnl_absoluto = datos_operacion['precio_entrada'] - datos_operacion['precio_salida']
-        breakout_usado = "🚀 Sí" if datos_operacion.get('breakout_usado', False) else "❌ No"
-        mensaje = f"""
-{emoji} <b>OPERACIÓN CERRADA - {datos_operacion['symbol']}</b>
-{color_emoji} <b>RESULTADO: {datos_operacion['resultado']}</b>
-📊 Tipo: {datos_operacion['tipo']}
-💰 Entrada: {datos_operacion['precio_entrada']:.8f}
-🎯 Salida: {datos_operacion['precio_salida']:.8f}
-💵 PnL Absoluto: {pnl_absoluto:.8f}
-📈 PnL %: {datos_operacion['pnl_percent']:.2f}%
-⏰ Duración: {datos_operacion['duracion_minutos']:.1f} minutos
-🚀 Breakout+Reentry: {breakout_usado}
-📏 Ángulo: {datos_operacion['angulo_tendencia']:.1f}°
-📊 Pearson: {datos_operacion['pearson']:.3f}
-🎯 R²: {datos_operacion['r2_score']:.3f}
-📏 Ancho: {datos_operacion.get('ancho_canal_porcentual', 0):.1f}%
-📊 KVO: {datos_operacion.get('kvo', 0):.2f}
-⏱️ TF: {datos_operacion.get('timeframe_utilizado', 'N/A')}
-🕯️ Velas: {datos_operacion.get('velas_utilizadas', 0)}
-🕒 {datos_operacion['timestamp']}
-        """
-        return mensaje
-
-    def inicializar_log(self):
-        if not os.path.exists(self.archivo_log):
-            with open(self.archivo_log, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp', 'symbol', 'tipo', 'precio_entrada',
-                    'take_profit', 'stop_loss', 'precio_salida',
-                    'resultado', 'pnl_percent', 'duracion_minutos',
-                    'angulo_tendencia', 'pearson', 'r2_score',
-                    'ancho_canal_relativo', 'ancho_canal_porcentual',
-                    'nivel_fuerza', 'timeframe_utilizado', 'velas_utilizadas',
-                    'stoch_k', 'stoch_d', 'kvo', 'breakout_usado'
-                ])
-
-    def registrar_operacion(self, datos_operacion):
-        with open(self.archivo_log, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datos_operacion['timestamp'],
-                datos_operacion['symbol'],
-                datos_operacion['tipo'],
-                datos_operacion['precio_entrada'],
-                datos_operacion['take_profit'],
-                datos_operacion['stop_loss'],
-                datos_operacion['precio_salida'],
-                datos_operacion['resultado'],
-                datos_operacion['pnl_percent'],
-                datos_operacion['duracion_minutos'],
-                datos_operacion['angulo_tendencia'],
-                datos_operacion['pearson'],
-                datos_operacion['r2_score'],
-                datos_operacion.get('ancho_canal_relativo', 0),
-                datos_operacion.get('ancho_canal_porcentual', 0),
-                datos_operacion.get('nivel_fuerza', 1),
-                datos_operacion.get('timeframe_utilizado', 'N/A'),
-                datos_operacion.get('velas_utilizadas', 0),
-                datos_operacion.get('stoch_k', 0),
-                datos_operacion.get('stoch_d', 0),
-                datos_operacion.get('kvo', 0),
-                datos_operacion.get('breakout_usado', False)
-            ])
+        return []  # Bitget maneja TP/SL automáticamente
 
     def ejecutar_analisis(self):
-        cierres = self.verificar_cierre_operaciones()
-        self.guardar_estado()
+        self.guardar_estado()  # No hay verificación de cierre porque TP/SL son automáticos
         return self.escanear_mercado()
 
     def _enviar_telegram_simple(self, mensaje, token, chat_ids):
@@ -1100,6 +1097,24 @@ class TradingBot:
             return 0
         return 1 - (ss_res / ss_tot)
 
+    def inicializar_log(self):
+        if not os.path.exists(self.archivo_log):
+            with open(self.archivo_log, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp', 'symbol', 'tipo', 'precio_entrada',
+                    'take_profit', 'stop_loss', 'precio_salida',
+                    'resultado', 'pnl_percent', 'duracion_minutos',
+                    'angulo_tendencia', 'pearson', 'r2_score',
+                    'ancho_canal_relativo', 'ancho_canal_porcentual',
+                    'nivel_fuerza', 'timeframe_utilizado', 'velas_utilizadas',
+                    'stoch_k', 'stoch_d', 'kvo', 'breakout_usado'
+                ])
+
+    def registrar_operacion(self, datos_operacion):
+        pass  # TP/SL automáticos → no cerramos manualmente
+
+
 # ---------------------------
 # CONFIGURACIÓN
 # ---------------------------
@@ -1128,8 +1143,13 @@ def crear_config_desde_entorno():
         'min_samples_optimizacion': 30,
         'reevaluacion_horas': 24,
         'log_path': os.path.join(directorio_actual, 'operaciones_log_v24.csv'),
-        'estado_file': os.path.join(directorio_actual, 'estado_bot_v24.json')
+        'estado_file': os.path.join(directorio_actual, 'estado_bot_v24.json'),
+        # --- Bitget Credenciales ---
+        'bitget_api_key': os.environ.get('BITGET_API_KEY'),
+        'bitget_api_secret': os.environ.get('BITGET_API_SECRET'),
+        'bitget_api_passphrase': os.environ.get('BITGET_API_PASSPHRASE'),
     }
+
 
 # ---------------------------
 # FLASK APP
@@ -1152,7 +1172,7 @@ bot_thread.start()
 
 @app.route('/')
 def index():
-    return "Bot Breakout + Reentry + KVO está en línea.", 200
+    return "Bot Breakout + Reentry + KVO + Bitget está en línea.", 200
 
 @app.route('/webhook', methods=['POST'])
 def telegram_webhook():
