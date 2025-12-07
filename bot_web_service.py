@@ -393,7 +393,7 @@ class BitgetClient:
         def ping_loop(ws_ref):
             while ws_ref:
                 try:
-                    if ws_ref.sock and ws_ref.sock.connected:
+                    if hasattr(ws_ref, 'sock') and ws_ref.sock and ws_ref.sock.connected:
                         ws_ref.send(json.dumps({'op': 'ping'}))
                     time.sleep(30)
                 except Exception as e:
@@ -425,7 +425,10 @@ class BitgetClient:
                 "op": "subscribe",
                 "args": [params]
             }
-            ws_to_use.send(json.dumps(sub_msg))
+            try:
+                ws_to_use.send(json.dumps(sub_msg))
+            except Exception as e:
+                print(f"❌ Error suscribiendo a canal {channel}: {e}")
             
     def close_websocket(self):
         """Cierra las conexiones WebSocket"""
@@ -1244,212 +1247,4 @@ class TradingBot:
 
 ⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-⏳ <b>ESPERANDO REINGRESO...</b>
-👁️ Máximo 30 minutos para confirmación
-📍 {expectativa}
-      
-        """
-        
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        
-        if token and chat_ids:
-            try:
-                print(f"     📨 Enviando alerta de breakout por Telegram...")
-                self._enviar_telegram_simple(mensaje, token, chat_ids)
-                print(f"     ✅ Alerta de breakout enviada para {simbolo}")
-                    
-            except Exception as e:
-                print(f"     ❌ Error enviando alerta de breakout: {e}")
-        else:
-            print(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
-
-    def detectar_breakout(self, simbolo, info_canal, datos_mercado):
-        """Detecta si el precio ha ROTO el canal"""
-        if not info_canal:
-            return None
-        
-        if info_canal['ancho_canal_porcentual'] < self.config.get('min_channel_width_percent', 4.0):
-            return None
-        
-        precio_cierre = datos_mercado['cierres'][-1]
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        angulo = info_canal['angulo_tendencia']
-        direccion = info_canal['direccion']
-        nivel_fuerza = info_canal['nivel_fuerza']
-        r2 = info_canal['r2_score']
-        pearson = info_canal['coeficiente_pearson']
-        
-        if abs(angulo) < self.config.get('min_trend_strength_degrees', 16):
-            return None
-        
-        if abs(pearson) < 0.4 or r2 < 0.4:
-            return None
-        
-        # Verificar si ya hubo un breakout reciente (menos de 25 minutos)
-        if simbolo in self.breakouts_detectados:
-            ultimo_breakout = self.breakouts_detectados[simbolo]
-            tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
-            if tiempo_desde_ultimo < 115:
-                print(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
-                return None
-        
-        if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
-            if precio_cierre < soporte:
-                print(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
-                return "BREAKOUT_LONG"
-        
-        elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
-            if precio_cierre > resistencia:
-                print(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
-                return "BREAKOUT_SHORT"
-        
-        return None
-
-    def detectar_reentry(self, simbolo, info_canal, datos_mercado):
-        """Detecta si el precio ha REINGRESADO al canal"""
-        if simbolo not in self.esperando_reentry:
-            return None
-        
-        breakout_info = self.esperando_reentry[simbolo]
-        tipo_breakout = breakout_info['tipo']
-        timestamp_breakout = breakout_info['timestamp']
-        
-        tiempo_desde_breakout = (datetime.now() - timestamp_breakout).total_seconds() / 60
-        if tiempo_desde_breakout > 120:
-            print(f"     ⏰ {simbolo} - Timeout de reentry (>30 min), cancelando espera")
-            del self.esperando_reentry[simbolo]
-            # Limpiar también de breakouts_detectados cuando expira el reentry
-            if simbolo in self.breakouts_detectados:
-                del self.breakouts_detectados[simbolo]
-            return None
-        
-        precio_actual = datos_mercado['precio_actual']
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        stoch_k = info_canal['stoch_k']
-        stoch_d = info_canal['stoch_d']
-        
-        tolerancia = 0.001 * precio_actual
-        
-        if tipo_breakout == "BREAKOUT_LONG":
-            if soporte <= precio_actual <= resistencia:
-                distancia_soporte = abs(precio_actual - soporte)
-                
-                if distancia_soporte <= tolerancia and stoch_k <= 30 and stoch_d <= 30:
-                    print(f"     ✅ {simbolo} - REENTRY LONG confirmado! Entrada en soporte con Stoch oversold")
-                    # Limpiar breakouts_detectados cuando se confirma reentry
-                    if simbolo in self.breakouts_detectados:
-                        del self.breakouts_detectados[simbolo]
-                    return "LONG"
-        
-        elif tipo_breakout == "BREAKOUT_SHORT":
-            if soporte <= precio_actual <= resistencia:
-                distancia_resistencia = abs(precio_actual - resistencia)
-                
-                if distancia_resistencia <= tolerancia and stoch_k >= 70 and stoch_d >= 70:
-                    print(f"     ✅ {simbolo} - REENTRY SHORT confirmado! Entrada en resistencia con Stoch overbought")
-                    # Limpiar breakouts_detectados cuando se confirma reentry
-                    if simbolo in self.breakouts_detectados:
-                        del self.breakouts_detectados[simbolo]
-                    return "SHORT"
-        
-        return None
-
-    def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual):
-        if not info_canal:
-            return None, None, None
-        
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        ancho_canal = resistencia - soporte
-        
-        sl_porcentaje = 0.02
-
-        if tipo_operacion == "LONG":
-            precio_entrada = precio_actual
-            stop_loss = precio_entrada * (1 - sl_porcentaje)
-            take_profit = precio_entrada + ancho_canal 
-        else:
-            precio_entrada = precio_actual
-            stop_loss = resistencia * (1 + sl_porcentaje)
-            take_profit = precio_entrada - ancho_canal
-        
-        riesgo = abs(precio_entrada - stop_loss)
-        beneficio = abs(take_profit - precio_entrada)
-        ratio_rr = beneficio / riesgo if riesgo > 0 else 0
-        
-        if ratio_rr < self.config.get('min_rr_ratio', 1.2):
-            if tipo_operacion == "LONG":
-                take_profit = precio_entrada + (riesgo * self.config['min_rr_ratio'])
-            else:
-                take_profit = precio_entrada - (riesgo * self.config['min_rr_ratio'])
-        
-        return precio_entrada, take_profit, stop_loss
-
-    def ejecutar_orden(self, simbolo, tipo_operacion, precio_entrada, tp, sl):
-        """Ejecuta una orden en Bitget"""
-        try:
-            # Obtener información del contrato para calcular tamaño correcto
-            contract_info = None
-            if simbolo in self.ultimos_datos and 'contract_info' in self.ultimos_datos[simbolo]:
-                contract_info = self.ultimos_datos[simbolo]['contract_info']
-            else:
-                contract_info = self.bitget.get_contract_info(simbolo)
-                if not contract_info:
-                    print(f"❌ No se pudo obtener información del contrato para {simbolo}")
-                    return False
-                    
-                # Guardar información del contrato
-                if simbolo not in self.ultimos_datos:
-                    self.ultimos_datos[simbolo] = {}
-                self.ultimos_datos[simbolo]['contract_info'] = contract_info
-            
-            # Extraer parámetros del contrato
-            min_order_sz = float(contract_info.get('minOrderSz', 0.001))
-            max_order_sz = float(contract_info.get('maxOrderSz', 1000000))
-            price_tick = float(contract_info.get('priceTick', 0.0001))
-            lot_sz = float(contract_info.get('lotSz', 0.001))
-            
-            # Calcular tamaño de la orden basado en el margen y apalancamiento
-            margin = self.config.get('order_margin_usdt', 2)  # Margen en USDT
-            leverage = self.config.get('leverage', 10)
-            notional = margin * leverage
-            
-            # Calcular tamaño bruto
-            size_raw = notional / precio_entrada
-            
-            # Redondear según lot_sz
-            size = round(size_raw / lot_sz) * lot_sz
-            
-            # Verificar límites
-            if size < min_order_sz:
-                size = min_order_sz
-                print(f"⚠️ Tamaño ajustado al mínimo: {size}")
-            elif size > max_order_sz:
-                size = max_order_sz
-                print(f"⚠️ Tamaño ajustado al máximo: {size}")
-            
-            # Redondear precios según price_tick
-            entry_price = round(precio_entrada / price_tick) * price_tick
-            tp_price = round(tp / price_tick) * price_tick
-            sl_price = round(sl / price_tick) * price_tick
-            
-            # Determinar lado de la orden
-            side = "buy" if tipo_operacion == "LONG" else "sell"
-            
-            # Colocar orden de mercado
-            order_result = self.bitget.place_order(
-                symbol=simbolo,
-                side=side,
-                order_type="market",
-                size=size
-            )
-            
-            if not order_result:
-                print(f"❌ Error colocando orden de entrada para {simbolo}")
-                return False
-                
-            order_id = order_result.get('orderId')
-            print
+⏳ <b>ESPERANDO REINGRES
