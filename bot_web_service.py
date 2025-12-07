@@ -1,5 +1,5 @@
 # bot_web_service.py
-# Adaptación para Render del bot Breakout + Reentry + KVO + Bitget
+# Versión actualizada con gestión robusta de órdenes en Bitget
 import requests
 import time
 import json
@@ -24,6 +24,7 @@ import logging
 import hmac
 import hashlib
 import base64
+import uuid  # ✅ Añadido para clientOid
 
 # Configurar logging básico
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------
 # Optimizador IA (sin cambios)
 # ---------------------------
+
 class OptimizadorIA:
     def __init__(self, log_path="operaciones_log.csv", min_samples=15):
         self.log_path = log_path
@@ -127,10 +129,10 @@ class OptimizadorIA:
             print("⚠ No se encontró una configuración mejor")
         return mejores_param
 
-
 # ---------------------------
 # UTILIDADES BITGET
 # ---------------------------
+
 def firmar_bitget(timestamp, method, endpoint, body, secret):
     message = timestamp + method + endpoint + body
     return base64.b64encode(hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()).decode()
@@ -141,7 +143,34 @@ def enviar_orden_bitget(simbolo, tipo, precio_entrada, tp, sl, api_key, api_secr
     size_usd = 2.0  # ✅ 2 USDT de margen
     leverage = 10   # ✅ 10x
 
-    # 1. Establecer apalancamiento (opcional si ya está configurado)
+    # === Paso 0: Obtener contrato para redondeo preciso ===
+    contracts_url = "/api/mix/v1/market/contracts"
+    contracts_params = {
+        "productType": "USDT-FUTURES",
+        "symbol": simbolo
+    }
+    timestamp = str(int(time.time() * 1000))
+    signature = firmar_bitget(timestamp, "GET", contracts_url, "", api_secret)
+    headers = {
+        "ACCESS-KEY": api_key,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": api_passphrase,
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.get(base_url + contracts_url, headers=headers, params=contracts_params, timeout=10)
+        time.sleep(0.1)
+        if resp.status_code != 200 or resp.json().get("code") != "00000":
+            print(f"❌ Error obteniendo contrato {simbolo}: {resp.text}")
+            return False
+        contrato = resp.json()["data"][0]
+        min_trade_num = float(contrato["minTradeNum"])
+    except Exception as e:
+        print(f"❌ Excepción obteniendo contrato {simbolo}: {e}")
+        return False
+
+    # === Paso 1: Establecer apalancamiento ===
     leverage_url = "/api/mix/v1/account/setLeverage"
     leverage_data = {
         "symbol": simbolo,
@@ -160,13 +189,21 @@ def enviar_orden_bitget(simbolo, tipo, precio_entrada, tp, sl, api_key, api_secr
         "Content-Type": "application/json"
     }
     resp = requests.post(base_url + leverage_url, headers=headers, json=leverage_data, timeout=10)
-    time.sleep(0.1)  # ✅ Rate limit
+    time.sleep(0.1)
+    if resp.status_code != 200 or resp.json().get("code") != "00000":
+        print(f"⚠️ Advertencia: error al establecer apalancamiento ({resp.text})")
 
-    # 2. Enviar orden de mercado
+    # === Paso 2: Calcular y redondear size ===
+    qty_contracts_raw = (size_usd * leverage) / precio_entrada
+    qty_contracts = math.floor(qty_contracts_raw / min_trade_num) * min_trade_num
+    if qty_contracts < min_trade_num:
+        print(f"❌ Cantidad {qty_contracts} < mínimo {min_trade_num} para {simbolo}")
+        return False
+    qty_str = f"{qty_contracts:.10f}".rstrip('0').rstrip('.')
+
+    # === Paso 3: Enviar orden principal (mercado) ===
+    client_oid = str(uuid.uuid4())
     order_url = "/api/mix/v1/order/placeOrder"
-    qty_contracts = (size_usd * leverage) / precio_entrada
-    qty_str = f"{qty_contracts:.6f}"
-
     order_data = {
         "symbol": simbolo,
         "marginCoin": margin_coin,
@@ -175,9 +212,9 @@ def enviar_orden_bitget(simbolo, tipo, precio_entrada, tp, sl, api_key, api_secr
         "orderType": "market",
         "timeInForceValue": "normal",
         "reduceOnly": False,
-        "marginMode": "isolated"  # ✅ Margen aislado
+        "marginMode": "isolated",
+        "clientOid": client_oid
     }
-
     timestamp = str(int(time.time() * 1000))
     body_str = json.dumps(order_data)
     signature = firmar_bitget(timestamp, "POST", order_url, body_str, api_secret)
@@ -188,53 +225,45 @@ def enviar_orden_bitget(simbolo, tipo, precio_entrada, tp, sl, api_key, api_secr
         "ACCESS-PASSPHRASE": api_passphrase,
         "Content-Type": "application/json"
     }
-
     resp = requests.post(base_url + order_url, headers=headers, json=order_data, timeout=10)
     time.sleep(0.1)
-
     if resp.status_code != 200 or resp.json().get("code") != "00000":
-        print(f"❌ Error creando orden: {resp.text}")
+        print(f"❌ Error creando orden principal: {resp.text}")
         return False
 
-    # 3. Órdenes TP/SL
-    tpsl_url = "/api/mix/v1/order/placeTPSL"
-    qty_str = f"{qty_contracts:.6f}"
+    order_id = resp.json()["data"]["orderId"]
 
-    # TP
+    # === Paso 4: Órdenes TP/SL ===
+    tpsl_url = "/api/mix/v1/order/placeTPSL"
     tp_data = {
         "symbol": simbolo,
         "marginCoin": margin_coin,
         "planType": "profit_plan",
         "holdSide": "long" if tipo == "LONG" else "short",
-        "triggerPrice": str(tp),
+        "triggerPrice": f"{tp:.10f}".rstrip('0').rstrip('.'),
         "executePrice": "",
         "size": qty_str,
         "triggerType": "fill_price"
     }
-    timestamp = str(int(time.time() * 1000))
-    body_str = json.dumps(tp_data)
-    signature = firmar_bitget(timestamp, "POST", tpsl_url, body_str, api_secret)
-    headers = {
-        "ACCESS-KEY": api_key,
-        "ACCESS-SIGN": signature,
-        "ACCESS-TIMESTAMP": timestamp,
-        "ACCESS-PASSPHRASE": api_passphrase,
-        "Content-Type": "application/json"
-    }
-    resp_tp = requests.post(base_url + tpsl_url, headers=headers, json=tp_data, timeout=10)
-    time.sleep(0.1)
-
-    # SL
     sl_data = {
         "symbol": simbolo,
         "marginCoin": margin_coin,
         "planType": "loss_plan",
         "holdSide": "long" if tipo == "LONG" else "short",
-        "triggerPrice": str(sl),
+        "triggerPrice": f"{sl:.10f}".rstrip('0').rstrip('.'),
         "executePrice": "",
         "size": qty_str,
         "triggerType": "fill_price"
     }
+
+    timestamp = str(int(time.time() * 1000))
+    body_str = json.dumps(tp_data)
+    signature = firmar_bitget(timestamp, "POST", tpsl_url, body_str, api_secret)
+    headers["ACCESS-SIGN"] = signature
+    headers["ACCESS-TIMESTAMP"] = timestamp
+    resp_tp = requests.post(base_url + tpsl_url, headers=headers, json=tp_data, timeout=10)
+    time.sleep(0.1)
+
     timestamp = str(int(time.time() * 1000))
     body_str = json.dumps(sl_data)
     signature = firmar_bitget(timestamp, "POST", tpsl_url, body_str, api_secret)
@@ -248,12 +277,37 @@ def enviar_orden_bitget(simbolo, tipo, precio_entrada, tp, sl, api_key, api_secr
         return True
     else:
         print(f"⚠️ Error TP/SL en Bitget: TP={resp_tp.text}, SL={resp_sl.text}")
-        return False
 
+        # === Paso 5: Si TP/SL fallan, cerrar posición ===
+        print(f"🔒 Cerrando posición para evitar riesgo desnudo en {simbolo}...")
+        close_data = {
+            "symbol": simbolo,
+            "marginCoin": margin_coin,
+            "size": qty_str,
+            "side": "close_long" if tipo == "LONG" else "close_short",
+            "orderType": "market",
+            "timeInForceValue": "normal",
+            "reduceOnly": True,
+            "marginMode": "isolated",
+            "clientOid": str(uuid.uuid4())
+        }
+        timestamp = str(int(time.time() * 1000))
+        body_str = json.dumps(close_data)
+        signature = firmar_bitget(timestamp, "POST", order_url, body_str, api_secret)
+        headers["ACCESS-SIGN"] = signature
+        headers["ACCESS-TIMESTAMP"] = timestamp
+        resp_close = requests.post(base_url + order_url, headers=headers, json=close_data, timeout=10)
+        time.sleep(0.1)
+        if resp_close.status_code == 200 and resp_close.json().get("code") == "00000":
+            print(f"✅ Posición cerrada tras fallo en TP/SL")
+        else:
+            print(f"❌ Fallo al cerrar posición: {resp_close.text}")
+        return False
 
 # ---------------------------
 # BOT PRINCIPAL
 # ---------------------------
+
 class TradingBot:
     def __init__(self, config):
         self.config = config
@@ -495,6 +549,7 @@ class TradingBot:
                 return config_optima
             else:
                 print(f"   🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
+
         print(f"   🔍 Buscando configuración óptima para {simbolo}...")
         timeframes = self.config.get('timeframes', ['1m', '3m', '5m', '15m', '30m'])
         velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
@@ -528,6 +583,7 @@ class TradingBot:
                             }
                 except Exception as e:
                     continue
+
         if mejor_config:
             self.config_optima_por_simbolo[simbolo] = mejor_config
             self.ultima_busqueda_config[simbolo] = datetime.now()
@@ -556,6 +612,7 @@ class TradingBot:
             tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
             if tiempo_desde_ultimo < 115:
                 return None
+
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
             if precio_cierre < soporte:
                 return "BREAKOUT_LONG"
@@ -583,6 +640,7 @@ class TradingBot:
         stoch_d = info_canal['stoch_d']
         kvo = info_canal['kvo']
         tolerancia = 0.001 * precio_actual
+
         if tipo_breakout == "BREAKOUT_LONG":
             if soporte <= precio_actual <= resistencia:
                 if abs(precio_actual - soporte) <= tolerancia and stoch_k <= 30 and stoch_d <= 30 and kvo > 0:
@@ -630,7 +688,7 @@ class TradingBot:
             print(f"    ❌ Niveles inválidos para {simbolo}")
             return
 
-        # ✅ AQUÍ SE ENVÍA LA ORDEN REAL A BITGET
+        # ✅ AQUÍ SE ENVÍA LA ORDEN REAL A BITGET (versión mejorada)
         bitget_success = enviar_orden_bitget(
             simbolo=simbolo,
             tipo=tipo_operacion,
@@ -641,7 +699,6 @@ class TradingBot:
             api_secret=self.config.get('bitget_api_secret'),
             api_passphrase=self.config.get('bitget_api_passphrase')
         )
-
         if not bitget_success:
             print(f"    ❌ Error enviando orden a Bitget para {simbolo}")
             return
@@ -662,6 +719,7 @@ class TradingBot:
 ⏰ Tiempo desde breakout: {tiempo_breakout:.1f} minutos
 💰 Precio breakout: {breakout_info['precio_breakout']:.8f}
 """
+
         mensaje = f"""
 🎯 <b>SEÑAL DE {tipo_operacion} - {simbolo}</b>
 ✅ <b>ORDEN ENVIADA A BITGET (2 USDT @ 10x, isolated)</b>
@@ -948,6 +1006,7 @@ class TradingBot:
                 if not info_canal:
                     print(f"   ❌ {simbolo} - Error calculando canal")
                     continue
+
                 print(
                     f"📊 {simbolo} - {config_optima['timeframe']} - {config_optima['num_velas']}v | "
                     f"{info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) | "
@@ -955,10 +1014,12 @@ class TradingBot:
                     f"Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} | "
                     f"KVO: {info_canal['kvo']:.2f}"
                 )
+
                 if (info_canal['nivel_fuerza'] < 2 or 
                     abs(info_canal['coeficiente_pearson']) < 0.4 or 
                     info_canal['r2_score'] < 0.4):
                     continue
+
                 if simbolo not in self.esperando_reentry:
                     tipo_breakout = self.detectar_breakout(simbolo, info_canal, df)
                     if tipo_breakout:
@@ -976,6 +1037,7 @@ class TradingBot:
                         print(f"     🎯 {simbolo} - Breakout registrado, esperando reingreso...")
                         self.enviar_alerta_breakout(simbolo, tipo_breakout, info_canal, df, config_optima)
                         continue
+
                 tipo_operacion = self.detectar_reentry(simbolo, info_canal, df)
                 if tipo_operacion:
                     precio_entrada, tp, sl = self.calcular_niveles_entrada(tipo_operacion, info_canal, df['Close'].iloc[-1])
@@ -986,11 +1048,13 @@ class TradingBot:
                         tiempo_desde_ultimo = (datetime.now() - ultimo_breakout).total_seconds() / 3600
                         if tiempo_desde_ultimo < 2:
                             continue
+
                     breakout_info = self.esperando_reentry[simbolo]
                     self.generar_senal_operacion(simbolo, tipo_operacion, precio_entrada, tp, sl, info_canal, df, config_optima, breakout_info)
                     senales_encontradas += 1
                     self.breakout_history[simbolo] = datetime.now()
                     del self.esperando_reentry[simbolo]
+
             except Exception as e:
                 print(f"⚠️ Error analizando {simbolo}: {e}")
                 continue
@@ -1114,10 +1178,10 @@ class TradingBot:
     def registrar_operacion(self, datos_operacion):
         pass  # TP/SL automáticos → no cerramos manualmente
 
-
 # ---------------------------
 # CONFIGURACIÓN
 # ---------------------------
+
 def crear_config_desde_entorno():
     directorio_actual = os.path.dirname(os.path.abspath(__file__))
     telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '-1002272872445')
@@ -1150,10 +1214,10 @@ def crear_config_desde_entorno():
         'bitget_api_passphrase': os.environ.get('BITGET_API_PASSPHRASE'),
     }
 
-
 # ---------------------------
 # FLASK APP
 # ---------------------------
+
 app = Flask(__name__)
 config = crear_config_desde_entorno()
 bot = TradingBot(config)
