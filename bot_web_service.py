@@ -1,4 +1,3 @@
-```python
 # bot_breakout_reentry.py
 # VERSIÓN COMPLETA con estrategia Breakout + Reentry - Adaptada para Bitget y Render.com
 import requests
