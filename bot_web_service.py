@@ -33,7 +33,9 @@ class BitgetClient:
         self.ws_private_url = "wss://ws.bitget.com/v2/ws/private"
         self.time_offset = 0
         self.ws = None
+        self.ws_private = None
         self.ws_thread = None
+        self.ws_private_thread = None
         self.ws_callbacks = {}
         self.ws_subscriptions = {}
         self.symbol_data = {}
@@ -318,7 +320,7 @@ class BitgetClient:
             print(f"❌ Error WebSocket: {error}")
             
         def on_close(ws, close_status_code, close_msg):
-            print(f"🔌 WebSocket cerrado: {close_status_code} - {close_msg}")
+            print(f"🔌 WebSocket {'privado' if private else 'público'} cerrado: {close_status_code} - {close_msg}")
             
         def on_open(ws):
             print(f"✅ WebSocket {'privado' if private else 'público'} conectado")
@@ -347,14 +349,23 @@ class BitgetClient:
                 
             # Re-suscribir a canales anteriores
             for channel_id, params in self.ws_subscriptions.items():
-                sub_msg = {
-                    "op": "subscribe",
-                    "args": [params]
-                }
-                ws.send(json.dumps(sub_msg))
+                if private and params.get('instType') == '':
+                    # Solo canales privados
+                    sub_msg = {
+                        "op": "subscribe",
+                        "args": [params]
+                    }
+                    ws.send(json.dumps(sub_msg))
+                elif not private and params.get('instType') == 'MC':
+                    # Solo canales públicos
+                    sub_msg = {
+                        "op": "subscribe",
+                        "args": [params]
+                    }
+                    ws.send(json.dumps(sub_msg))
                 
         # Crear y configurar WebSocket
-        self.ws = websocket.WebSocketApp(
+        ws = websocket.WebSocketApp(
             url,
             on_open=on_open,
             on_message=on_message,
@@ -362,22 +373,34 @@ class BitgetClient:
             on_close=on_close
         )
         
+        # Guardar referencia al WebSocket
+        if private:
+            self.ws_private = ws
+        else:
+            self.ws = ws
+        
         # Iniciar en un hilo separado
-        self.ws_thread = threading.Thread(target=self.ws.run_forever)
-        self.ws_thread.daemon = True
-        self.ws_thread.start()
+        thread = threading.Thread(target=ws.run_forever)
+        thread.daemon = True
+        thread.start()
+        
+        if private:
+            self.ws_private_thread = thread
+        else:
+            self.ws_thread = thread
         
         # Enviar ping cada 30 segundos para mantener conexión
-        def ping_loop():
-            while self.ws:
+        def ping_loop(ws_ref):
+            while ws_ref:
                 try:
-                    self.ws.send(json.dumps({'op': 'ping'}))
+                    if ws_ref.sock and ws_ref.sock.connected:
+                        ws_ref.send(json.dumps({'op': 'ping'}))
                     time.sleep(30)
                 except Exception as e:
                     print(f"❌ Error enviando ping: {e}")
                     break
                     
-        ping_thread = threading.Thread(target=ping_loop)
+        ping_thread = threading.Thread(target=ping_loop, args=(ws,))
         ping_thread.daemon = True
         ping_thread.start()
         
@@ -395,20 +418,28 @@ class BitgetClient:
         if callback:
             self.ws_callbacks[channel_id] = callback
             
-        if self.ws:
+        # Enviar suscripción si el WebSocket correspondiente está conectado
+        ws_to_use = self.ws_private if inst_type == '' else self.ws
+        if ws_to_use:
             sub_msg = {
                 "op": "subscribe",
                 "args": [params]
             }
-            self.ws.send(json.dumps(sub_msg))
+            ws_to_use.send(json.dumps(sub_msg))
             
     def close_websocket(self):
-        """Cierra la conexión WebSocket"""
+        """Cierra las conexiones WebSocket"""
         if self.ws:
             self.ws.close()
             self.ws = None
             if self.ws_thread and self.ws_thread.is_alive():
                 self.ws_thread.join(timeout=5)
+                
+        if self.ws_private:
+            self.ws_private.close()
+            self.ws_private = None
+            if self.ws_private_thread and self.ws_private_thread.is_alive():
+                self.ws_private_thread.join(timeout=5)
 
 # ---------------------------
 # Optimizador IA
@@ -1682,241 +1713,4 @@ class TradingBot:
             'precio_entrada': precio_entrada,
             'take_profit': tp,
             'stop_loss': sl,
-            'timestamp_entrada': datetime.now().isoformat(),
-            'angulo_tendencia': info_canal['angulo_tendencia'],
-            'pearson': info_canal['coeficiente_pearson'],
-            'r2_score': info_canal['r2_score'],
-            'ancho_canal_relativo': info_canal['ancho_canal'] / precio_entrada,
-            'ancho_canal_porcentual': info_canal['ancho_canal_porcentual'],
-            'nivel_fuerza': info_canal['nivel_fuerza'],
-            'timeframe_utilizado': config_optima['timeframe'],
-            'velas_utilizadas': config_optima['num_velas'],
-            'stoch_k': info_canal['stoch_k'],
-            'stoch_d': info_canal['stoch_d'],
-            'breakout_usado': breakout_info is not None
-        }
-        
-        self.senales_enviadas.add(simbolo)
-        self.total_operaciones += 1
-
-    def inicializar_log(self):
-        if not os.path.exists(self.archivo_log):
-            with open(self.archivo_log, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp', 'symbol', 'tipo', 'precio_entrada',
-                    'take_profit', 'stop_loss', 'precio_salida',
-                    'resultado', 'pnl_percent', 'duracion_minutos',
-                    'angulo_tendencia', 'pearson', 'r2_score',
-                    'ancho_canal_relativo', 'ancho_canal_porcentual',
-                    'nivel_fuerza', 'timeframe_utilizado', 'velas_utilizadas',
-                    'stoch_k', 'stoch_d', 'breakout_usado'
-                ])
-
-    def registrar_operacion(self, datos_operacion):
-        with open(self.archivo_log, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datos_operacion['timestamp'],
-                datos_operacion['symbol'],
-                datos_operacion['tipo'],
-                datos_operacion['precio_entrada'],
-                datos_operacion['take_profit'],
-                datos_operacion['stop_loss'],
-                datos_operacion['precio_salida'],
-                datos_operacion['resultado'],
-                datos_operacion['pnl_percent'],
-                datos_operacion['duracion_minutos'],
-                datos_operacion['angulo_tendencia'],
-                datos_operacion['pearson'],
-                datos_operacion['r2_score'],
-                datos_operacion.get('ancho_canal_relativo', 0),
-                datos_operacion.get('ancho_canal_porcentual', 0),
-                datos_operacion.get('nivel_fuerza', 1),
-                datos_operacion.get('timeframe_utilizado', 'N/A'),
-                datos_operacion.get('velas_utilizadas', 0),
-                datos_operacion.get('stoch_k', 0),
-                datos_operacion.get('stoch_d', 0),
-                datos_operacion.get('breakout_usado', False)
-            ])
-            
-    def filtrar_operaciones_ultima_semana(self):
-        """Filtra operaciones de los últimos 7 días"""
-        if not os.path.exists(self.archivo_log):
-            return []
-        
-        try:
-            ops_recientes = []
-            fecha_limite = datetime.now() - timedelta(days=7)
-            
-            with open(self.archivo_log, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    try:
-                        timestamp = datetime.fromisoformat(row['timestamp'])
-                        if timestamp >= fecha_limite:
-                            ops_recientes.append({
-                                'timestamp': timestamp,
-                                'symbol': row['symbol'],
-                                'resultado': row['resultado'],
-                                'pnl_percent': float(row['pnl_percent']),
-                                'tipo': row['tipo'],
-                                'breakout_usado': row.get('breakout_usado', 'False') == 'True'
-                            })
-                    except Exception:
-                        continue
-                        
-            return ops_recientes
-        except Exception as e:
-            print(f"❌ Error filtrando operaciones: {e}")
-            return []
-
-    def _enviar_telegram_simple(self, mensaje, token, chat_ids):
-        """Envía un mensaje simple a Telegram"""
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        
-        for chat_id in chat_ids:
-            try:
-                data = {
-                    'chat_id': chat_id,
-                    'text': mensaje,
-                    'parse_mode': 'HTML'
-                }
-                response = requests.post(url, json=data, timeout=10)
-                if response.status_code != 200:
-                    print(f"❌ Error enviando a Telegram: {response.text}")
-            except Exception as e:
-                print(f"❌ Error enviando mensaje a Telegram: {e}")
-
-    def run(self):
-        """Bucle principal del bot"""
-        print("🚀 Bot de Trading Breakout + Reentry iniciado")
-        print("📡 Usando WebSocket para datos en tiempo real")
-        
-        while True:
-            try:
-                # Escanear mercado
-                self.escanear_mercado()
-                
-                # Guardar estado
-                self.guardar_estado()
-                
-                # Esperar antes del siguiente ciclo
-                time.sleep(self.config.get('scan_interval', 60))
-                
-            except KeyboardInterrupt:
-                print("\n👋 Bot detenido por el usuario")
-                break
-            except Exception as e:
-                print(f"❌ Error en el bucle principal: {e}")
-                time.sleep(10)
-        
-        # Limpiar recursos
-        self.bitget.close_websocket()
-
-# ---------------------------
-# Web Service para Render.com
-# ---------------------------
-app = Flask(__name__)
-bot_instance = None
-
-@app.route('/')
-def home():
-    return jsonify({
-        'status': 'running',
-        'message': 'Bitget Trading Bot - Breakout + Reentry Strategy',
-        'timestamp': datetime.now().isoformat()
-    })
-
-@app.route('/health')
-def health_check():
-    return jsonify({'status': 'healthy'}), 200
-
-@app.route('/start', methods=['POST'])
-def start_bot():
-    global bot_instance
-    
-    if bot_instance and bot_instance.bitget:
-        return jsonify({'error': 'Bot already running'}), 400
-    
-    try:
-        # Configuración desde variables de entorno
-        config = {
-            'symbols': os.getenv('SYMBOLS', 'BTCUSDT,ETHUSDT').split(','),
-            'telegram_token': os.getenv('TELEGRAM_TOKEN'),
-            'telegram_chat_ids': os.getenv('TELEGRAM_CHAT_IDS', '').split(','),
-            'leverage': int(os.getenv('LEVERAGE', '10')),
-            'order_margin_usdt': float(os.getenv('ORDER_MARGIN_USDT', '2')),
-            'margin_mode': os.getenv('MARGIN_MODE', 'isolated'),
-            'position_mode': os.getenv('POSITION_MODE', 'one-way'),
-            'scan_interval': int(os.getenv('SCAN_INTERVAL', '60')),
-            'min_channel_width_percent': float(os.getenv('MIN_CHANNEL_WIDTH_PERCENT', '4.0')),
-            'min_rr_ratio': float(os.getenv('MIN_RR_RATIO', '1.2')),
-            'auto_optimize': os.getenv('AUTO_OPTIMIZE', 'true').lower() == 'true',
-            'min_samples_optimizacion': int(os.getenv('MIN_SAMPLES_OPTIMIZACION', '15')),
-            'timeframes': os.getenv('TIMEFRAMES', '1m,3m,5m,15m,30m').split(','),
-            'velas_options': [int(x) for x in os.getenv('VELAS_OPTIONS', '80,100,120,150,200').split(',')],
-            'trend_threshold_degrees': float(os.getenv('TREND_THRESHOLD_DEGREES', '13')),
-            'min_trend_strength_degrees': float(os.getenv('MIN_TREND_STRENGTH_DEGREES', '16')),
-            'entry_margin': float(os.getenv('ENTRY_MARGIN', '0.001')),
-            'log_path': os.getenv('LOG_PATH', 'operaciones_log.csv'),
-            'estado_file': os.getenv('ESTADO_FILE', 'estado_bot.json')
-        }
-        
-        # Iniciar bot en un hilo separado
-        bot_instance = TradingBot(config)
-        bot_thread = threading.Thread(target=bot_instance.run)
-        bot_thread.daemon = True
-        bot_thread.start()
-        
-        return jsonify({
-            'status': 'started',
-            'config': {
-                'symbols': config['symbols'],
-                'leverage': config['leverage'],
-                'margin': config['order_margin_usdt']
-            }
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/stop', methods=['POST'])
-def stop_bot():
-    global bot_instance
-    
-    if not bot_instance:
-        return jsonify({'error': 'Bot not running'}), 400
-    
-    try:
-        if bot_instance.bitget:
-            bot_instance.bitget.close_websocket()
-        bot_instance = None
-        return jsonify({'status': 'stopped'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/status')
-def status():
-    global bot_instance
-    
-    if not bot_instance:
-        return jsonify({'status': 'stopped'})
-    
-    try:
-        positions = bot_instance.bitget.get_positions()
-        waiting_reentry = len(bot_instance.esperando_reentry)
-        breakouts_detected = len(bot_instance.breakouts_detectados)
-        
-        return jsonify({
-            'status': 'running',
-            'positions': len(positions),
-            'waiting_reentry': waiting_reentry,
-            'breakouts_detected': breakouts_detected,
-            'total_operations': bot_instance.total_operaciones
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+            'timestamp_entrada': datetime.now().iso
