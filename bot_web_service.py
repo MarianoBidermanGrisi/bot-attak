@@ -1975,8 +1975,8 @@ def crear_config_desde_entorno():
         'bitget_api_key': bitget_api_key,
         'bitget_api_secret': bitget_api_secret,
         'bitget_passphrase': bitget_passphrase,
-        'leverage': 20,
-        'capital_por_operacion': 5.0,
+        'leverage': 10,
+        'capital_por_operacion': 2.0,
         'min_channel_width_percent': 4.0,
         'trend_threshold_degrees': 16.0,
         'min_trend_strength_degrees': 16.0,
@@ -1986,10 +1986,10 @@ def crear_config_desde_entorno():
         'timeframes': ['5m', '15m', '30m', '1h'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
-            'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT',
-            'SOLUSDT', 'ADAUSDT', 'DOGEUSDT', 'DOTUSDT',
-            'ZECUSDT', 'LINKUSDT', 'AVAXUSDT', 'LTCUSDT',
-            'ATOMUSDT', 'ETCUSDT', 'FILUSDT', 'APTUSDT'
+            'XMRUSDT','AAVEUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','AVAXUSDT',
+            'DOGEUSDT','LTCUSDT','ATOMUSDT','XLMUSDT','ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT',
+            'BCHUSDT','NEOUSDT','TRXUSDT','XTZUSDT','SUSHIUSDT','COMPUSDT','PEPEUSDT','ETCUSDT',
+            'SNXUSDT','RENDERUSDT','1INCHUSDT','UNIUSDT','ZILUSDT','HOTUSDT','ENJUSDT','ZECUSDT'
         ],
         'telegram_token': os.environ.get('TELEGRAM_TOKEN', ''),
         'telegram_chat_ids': telegram_chat_ids,
