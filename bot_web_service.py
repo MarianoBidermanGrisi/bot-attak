@@ -1982,7 +1982,7 @@ def crear_config_desde_entorno():
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 3,
+        'scan_interval_minutes': 7,
         'timeframes': ['5m', '15m', '30m', '1h'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
@@ -1991,11 +1991,9 @@ def crear_config_desde_entorno():
             'BCHUSDT','NEOUSDT','TRXUSDT','XTZUSDT','SUSHIUSDT','COMPUSDT','PEPEUSDT','ETCUSDT',
             'SNXUSDT','RENDERUSDT','1INCHUSDT','UNIUSDT','ZILUSDT','HOTUSDT','ENJUSDT','HYPEUSDT',
             'BEATUSDT','PIPPINUSDT','ADAUSDT','ASTERUSDT','ENAUSDT','TAOUSDT','HEMIUSDT','LUNCUSDT',
-            'WLDUSDT','WIFUSDT','APTUSDT','HBARUSDT','CRVUSDT','BSUUSDT','LUNAUSDT','FETUSDT','PUMPUSDT',
-            'POWERUSDT','TIAUSDT','ARBUSDT','ONDOUSDT','1000BONKUSDT','FOLKSUSDT','BRETTUSDT','TRUMPUSDT',
-            'PARTIUSDT','INJUSDT','SPXUSDT','ZECUSDT','NOTUSDT','WLFIUSDT','SHIBUSDT','LDOUSDT',
-            'VIRTUALUSDT','TURBOUSDT','KASUSDT','EIGENUSDT','STRKUSDT','DYDXUSDT','ZKUSDT','SEIUSDT',
-            'TAKEUSDT','TONUSDT','MONUSDT','NMRUSDT'
+            'WLDUSDT','WIFUSDT','APTUSDT','HBARUSDT','CRVUSDT','LUNAUSDT','TIAUSDT','ARBUSDT','ONDOUSDT',
+            '1000BONKUSDT','FOLKSUSDT','BRETTUSDT','TRUMPUSDT','INJUSDT','ZECUSDT','NOTUSDT','SHIBUSDT',
+            'LDOUSDT','KASUSDT','STRKUSDT','DYDXUSDT','SEIUSDT','TONUSDT','NMRUSDT'
         ],
         'telegram_token': os.environ.get('TELEGRAM_TOKEN', ''),
         'telegram_chat_ids': telegram_chat_ids,
