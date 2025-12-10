@@ -617,9 +617,9 @@ class TradingBot:
         soporte = info_canal['soporte']
         direccion_canal = info_canal['direccion']
         
-        # Determinar tipo de ruptura CORREGIDO SEGÚN TU ESTRATEGIA
+        # ESTRATEGIA BREAKOUT + REENTRY DEL ARCHIVO ORIGINAL
         if tipo_breakout == "BREAKOUT_LONG":
-            # Para un LONG, nos interesa la ruptura del SOPORTE hacia arriba
+            # Ruptura de soporte en canal ALCISTA (oportunidad de reversión alcista)
             emoji_principal = "🚀"
             tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
@@ -627,13 +627,13 @@ class TradingBot:
             contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
             expectativa = "posible entrada en long si el precio reingresa al canal"
         else:  # BREAKOUT_SHORT
-            # Para un SHORT, nos interesa la ruptura de la RESISTENCIA hacia abajo
+            # Ruptura de resistencia en canal BAJISTA (oportunidad de reversión bajista)
             emoji_principal = "📉"
-            tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
+            tipo_texto = "RUPTURA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
-            contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
-            expectativa = "posible entrada en sort si el precio reingresa al canal"
+            contexto = f"Canal {direccion_canal} → Ruptura de RESISTENCIA"
+            expectativa = "posible entrada en short si el precio reingresa al canal"
         
         # Mensaje de alerta
         mensaje = f"""
@@ -1252,16 +1252,18 @@ class TradingBot:
                 logger.info(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
                 return None
         
-        margen_breakout = precio_cierre
+        # Validación de breakout con margen mínimo para evitar falsos positivos
+        ancho_canal = resistencia - soporte
+        margen_minimo = ancho_canal * 0.005  # 0.5% del ancho del canal
         
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
-            if precio_cierre < soporte:
-                logger.info(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
+            if precio_cierre < (soporte - margen_minimo):
+                logger.info(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f} (margen: {margen_minimo:.8f})")
                 return "BREAKOUT_LONG"
         
         elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
-            if precio_cierre > resistencia:
-                logger.info(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
+            if precio_cierre > (resistencia + margen_minimo):
+                logger.info(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f} (margen: {margen_minimo:.8f})")
                 return "BREAKOUT_SHORT"
         
         return None
