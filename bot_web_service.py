@@ -2213,14 +2213,18 @@ def crear_config_desde_entorno():
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 1,
+        'scan_interval_minutes': 6,
         'timeframes': ['5m', '15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
-            'BTCUSDT','ETHUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','AVAXUSDT',
+            'BTCUSDT','ETHUSDT','XMRUSDT','AAVEUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','AVAXUSDT',
             'DOGEUSDT','LTCUSDT','ATOMUSDT','XLMUSDT','ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT',
-            'BCHUSDT','EOSUSDT','TRXUSDT','XTZUSDT','SUSHIUSDT','COMPUSDT','YFIUSDT','ETCUSDT',
-            'SNXUSDT','RENUSDT','1INCHUSDT','NEOUSDT','ZILUSDT','HOTUSDT','ENJUSDT','ZECUSDT'
+            'BCHUSDT','NEOUSDT','TRXUSDT','XTZUSDT','SUSHIUSDT','COMPUSDT','PEPEUSDT','ETCUSDT',
+            'SNXUSDT','RENDERUSDT','1INCHUSDT','UNIUSDT','ZILUSDT','HOTUSDT','ENJUSDT','HYPEUSDT',
+            'BEATUSDT','PIPPINUSDT','ADAUSDT','ASTERUSDT','ENAUSDT','TAOUSDT','HEMIUSDT','LUNCUSDT',
+            'WLDUSDT','WIFUSDT','APTUSDT','HBARUSDT','CRVUSDT','LUNAUSDT','TIAUSDT','ARBUSDT','ONDOUSDT',
+            '1000BONKUSDT','FOLKSUSDT','BRETTUSDT','TRUMPUSDT','INJUSDT','ZECUSDT','NOTUSDT','SHIBUSDT',
+            'LDOUSDT','KASUSDT','STRKUSDT','DYDXUSDT','SEIUSDT','TONUSDT','NMRUSDT'
         ],
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
         'telegram_chat_ids': telegram_chat_ids,
@@ -2234,8 +2238,8 @@ def crear_config_desde_entorno():
         'bitget_api_secret': os.environ.get('BITGET_SECRET_KEY'),
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '50')),
-        'leverage_por_defecto': int(os.environ.get('LEVERAGE_POR_DEFECTO', '20'))
+        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '2')),
+        'leverage_por_defecto': int(os.environ.get('LEVERAGE_POR_DEFECTO', '10'))
     }
 
 # ---------------------------
