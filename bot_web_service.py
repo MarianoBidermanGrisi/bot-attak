@@ -1200,32 +1200,27 @@ class TradingBot:
     def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
         """
         Envía alerta de BREAKOUT detectado a Telegram con gráfico
-        LÓGICA CORREGIDA:
-        - BREAKOUT_LONG → Ruptura de resistencia en canal BAJISTA (oportunidad de reversión alcista)
-        - BREAKOUT_SHORT → Ruptura de soporte en canal ALCISTA (oportunidad de reversión bajista)
+        VERSIÓN MEJORADA con debugging robusto
         """
         precio_cierre = datos_mercado['cierres'][-1]
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
         direccion_canal = info_canal['direccion']
-        # Determinar tipo de ruptura CORREGIDO SEGÚN TU ESTRATEGIA
+        
+        # Determinar tipo de ruptura
         if tipo_breakout == "BREAKOUT_LONG":
-            # Para un LONG, nos interesa la ruptura del SOPORTE hacia arriba
             emoji_principal = "🚀"
             tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
             direccion_emoji = "⬇️"
-            contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
             expectativa = "posible entrada en long si el precio reingresa al canal"
         else:  # BREAKOUT_SHORT
-            # Para un SHORT, nos interesa la ruptura de la RESISTENCIA hacia abajo
             emoji_principal = "📉"
             tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
-            contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
             expectativa = "posible entrada en sort si el precio reingresa al canal"
-        # Mensaje de alerta
+        
         mensaje = f"""
 {emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
 ⚠️ <b>{tipo_texto}</b> {direccion_emoji}
@@ -1233,142 +1228,221 @@ class TradingBot:
 ⏳ <b>ESPERANDO REINGRESO...</b>
 👁️ Máximo 30 minutos para confirmación
 📍 {expectativa}
+{nivel_roto}
         """
+        
         token = self.config.get('telegram_token')
         chat_ids = self.config.get('telegram_chat_ids', [])
+        
         if token and chat_ids:
             try:
-                print(f"     📊 Generando gráfico de breakout para {simbolo}...")
+                print(f"     📊 Iniciando generación de gráfico para {simbolo}...")
+                
+                # Llamar función corregida
                 buf = self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
+                
                 if buf:
-                    print(f"     📨 Enviando alerta de breakout por Telegram...")
-                    self.enviar_grafico_telegram(buf, token, chat_ids)
-                    time.sleep(0.5)
-                    self._enviar_telegram_simple(mensaje, token, chat_ids)
-                    print(f"     ✅ Alerta de breakout enviada para {simbolo}")
+                    print(f"     📨 Enviando gráfico por Telegram...")
+                    exito_grafico = self.enviar_grafico_telegram(buf, token, chat_ids)
+                    if exito_grafico:
+                        print(f"     ✅ Gráfico enviado exitosamente")
+                    else:
+                        print(f"     ⚠️ Error enviando gráfico")
+                    time.sleep(1)
                 else:
-                    self._enviar_telegram_simple(mensaje, token, chat_ids)
-                    print(f"     ⚠️ Alerta enviada sin gráfico")
+                    print(f"     ⚠️ No se pudo generar gráfico")
+                
+                # Enviar mensaje de texto siempre
+                print(f"     📤 Enviando mensaje de texto...")
+                exito_mensaje = self._enviar_telegram_simple(mensaje, token, chat_ids)
+                if exito_mensaje:
+                    print(f"     ✅ Mensaje enviado exitosamente")
+                else:
+                    print(f"     ❌ Error enviando mensaje")
+                    
+                print(f"     ✅ Alerta de breakout procesada para {simbolo}")
+                
             except Exception as e:
-                print(f"     ❌ Error enviando alerta de breakout: {e}")
+                print(f"     ❌ Error completo enviando alerta de breakout: {e}")
+                import traceback
+                traceback.print_exc()
         else:
-            print(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
+            print(f"     📢 Breakout detectado en {simbolo} (sin Telegram configurado)")
 
     def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
         """
         Genera gráfico especial para el momento del BREAKOUT
-        Marca visualmente la ruptura del canal
+        CORREGIDO: Soluciona error 'apdata is list but NOT of float or int'
         """
         try:
-            import matplotlib.font_manager as fm
-            plt.rcParams['font.family'] = ['DejaVu Sans', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji']
+            # CONFIGURACIÓN MATPLOTLIB CORREGIDA PARA PRODUCCIÓN
+            plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
+            plt.rcParams['axes.unicode_minus'] = False
             
-            # Usar API de Bitget si está disponible
+            # Obtener datos con manejo robusto de errores
+            df = None
+            datos_exitosos = False
+            
+            # Intentar Bitget primero
             if self.bitget_client:
-                klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-                if klines:
-                    df_data = []
-                    for kline in klines:
-                        df_data.append({
-                            'Date': pd.to_datetime(int(kline[0]), unit='ms'),
-                            'Open': float(kline[1]),
-                            'High': float(kline[2]),
-                            'Low': float(kline[3]),
-                            'Close': float(kline[4]),
-                            'Volume': float(kline[5])
-                        })
-                    df = pd.DataFrame(df_data)
-                    df.set_index('Date', inplace=True)
-                else:
-                    # Fallback a Binance
+                try:
+                    print(f"     📊 Obteniendo datos de Bitget para {simbolo}...")
+                    klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
+                    if klines and len(klines) > 20:
+                        df_data = []
+                        for kline in klines:
+                            try:
+                                df_data.append({
+                                    'Date': pd.to_datetime(int(kline[0]), unit='ms'),
+                                    'Open': float(kline[1]),
+                                    'High': float(kline[2]),
+                                    'Low': float(kline[3]),
+                                    'Close': float(kline[4]),
+                                    'Volume': float(kline[5])
+                                })
+                            except (ValueError, IndexError):
+                                continue
+                        
+                        if len(df_data) >= 20:
+                            df = pd.DataFrame(df_data)
+                            df.set_index('Date', inplace=True)
+                            datos_exitosos = True
+                            print(f"     ✅ Datos de Bitget obtenidos: {len(df)} velas")
+                except Exception as e:
+                    print(f"     ⚠️ Error con Bitget: {e}")
+            
+            # Fallback a Binance si Bitget falló
+            if not datos_exitosos:
+                try:
+                    print(f"     📊 Obteniendo datos de Binance para {simbolo}...")
                     url = "https://api.binance.com/api/v3/klines"
                     params = {
                         'symbol': simbolo,
                         'interval': config_optima['timeframe'],
-                        'limit': config_optima['num_velas']
+                        'limit': min(config_optima['num_velas'], 100)
                     }
-                    respuesta = requests.get(url, params=params, timeout=10)
-                    klines = respuesta.json()
-                    df_data = []
-                    for kline in klines:
-                        df_data.append({
-                            'Date': pd.to_datetime(kline[0], unit='ms'),
-                            'Open': float(kline[1]),
-                            'High': float(kline[2]),
-                            'Low': float(kline[3]),
-                            'Close': float(kline[4]),
-                            'Volume': float(kline[5])
-                        })
-                    df = pd.DataFrame(df_data)
-                    df.set_index('Date', inplace=True)
-            else:
-                # Fallback a Binance
-                url = "https://api.binance.com/api/v3/klines"
-                params = {
-                    'symbol': simbolo,
-                    'interval': config_optima['timeframe'],
-                    'limit': config_optima['num_velas']
-                }
-                respuesta = requests.get(url, params=params, timeout=10)
-                klines = respuesta.json()
-                df_data = []
-                for kline in klines:
-                    df_data.append({
-                        'Date': pd.to_datetime(kline[0], unit='ms'),
-                        'Open': float(kline[1]),
-                        'High': float(kline[2]),
-                        'Low': float(kline[3]),
-                        'Close': float(kline[4]),
-                        'Volume': float(kline[5])
-                    })
-                df = pd.DataFrame(df_data)
-                df.set_index('Date', inplace=True)
+                    response = requests.get(url, params=params, timeout=15)
+                    if response.status_code == 200:
+                        klines = response.json()
+                        if len(klines) >= 20:
+                            df_data = []
+                            for kline in klines:
+                                try:
+                                    df_data.append({
+                                        'Date': pd.to_datetime(int(kline[0]), unit='ms'),
+                                        'Open': float(kline[1]),
+                                        'High': float(kline[2]),
+                                        'Low': float(kline[3]),
+                                        'Close': float(kline[4]),
+                                        'Volume': float(kline[5])
+                                    })
+                                except (ValueError, IndexError):
+                                    continue
+                            
+                            if len(df_data) >= 20:
+                                df = pd.DataFrame(df_data)
+                                df.set_index('Date', inplace=True)
+                                datos_exitosos = True
+                                print(f"     ✅ Datos de Binance obtenidos: {len(df)} velas")
+                except Exception as e:
+                    print(f"     ⚠️ Error con Binance: {e}")
             
-            tiempos_reg = list(range(len(df)))
+            if not datos_exitosos or df is None:
+                raise ValueError("No se pudieron obtener datos suficientes de ninguna API")
+            
+            # Calcular líneas de canal con validación
+            tiempos_reg = np.arange(len(df))
             resistencia_values = []
             soporte_values = []
-            for i, t in enumerate(tiempos_reg):
-                resist = info_canal['pendiente_resistencia'] * t + \
-                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
-                sop = info_canal['pendiente_soporte'] * t + \
-                     (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
-                resistencia_values.append(resist)
-                soporte_values.append(sop)
+            
+            try:
+                for i in tiempos_reg:
+                    resist = info_canal['pendiente_resistencia'] * i + \
+                            (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
+                    sop = info_canal['pendiente_soporte'] * i + \
+                         (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
+                    resistencia_values.append(resist)
+                    soporte_values.append(sop)
+            except KeyError as e:
+                raise ValueError(f"Info de canal incompleta: {e}")
+            
             df['Resistencia'] = resistencia_values
             df['Soporte'] = soporte_values
             
-            # Marcar el punto de breakout
-            precio_breakout = datos_mercado['precio_actual']
-            import numpy as np
-            breakout_x = [len(df) - 1]  # Índice del punto
-            breakout_y = [precio_breakout]  # Precio del breakout
+            # SOLUCIÓN AL ERROR: Usar numpy arrays y scatter plot
+            precio_breakout = datos_mercado.get('precio_actual') or df['Close'].iloc[-1]
             
-                    # ... código anterior ...
-
+            # Crear arrays numpy válidos
+            resistencia_array = np.array(resistencia_values)
+            soporte_array = np.array(soporte_values)
+            
+            print(f"     📈 Precio breakout: {precio_breakout:.8f}")
+            print(f"     📈 Resistencias calculadas: {len(resistencia_values)} puntos")
+            print(f"     📈 Soportes calculados: {len(soporte_values)} puntos")
+            
+            # Crear gráfico SIN marker problemático
             apds = [
-            mpf.make_addplot(df['Resistencia'], color='#FF4444', linestyle='--', width=2, panel=0),
-            mpf.make_addplot(df['Soporte'], color='#4444FF', linestyle='--', width=2, panel=0),
+                mpf.make_addplot(resistencia_array, color='#FF4444', linestyle='--', width=2, panel=0),
+                mpf.make_addplot(soporte_array, color='#4444FF', linestyle='--', width=2, panel=0)
             ]
-
-            # Crear la gráfica y obtener los ejes
-            fig, axes = mpf.plot(df, type='candle', style='nightclouds',
-                               title=f'{simbolo} | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
-                               ylabel='Precio',
-                               addplot=apds,
-                               volume=False,
-                               returnfig=True,
-                               figsize=(14, 8))
-
-           # Ahora sí puedes usar axes[0] para agregar el punto de breakout
-           axes[0].scatter(breakout_x[0], breakout_y[0], color='#FFD700', s=100, marker='o', zorder=5)
-
-           buf = BytesIO()
-           plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
-           buf.seek(0)
-           plt.close(fig)
-           return buf
+            
+            # Generar gráfico base
+            try:
+                fig, axes = mpf.plot(df, type='candle', style='charles',
+                                   title=f'{simbolo} | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
+                                   ylabel='Precio',
+                                   addplot=apds,
+                                   volume=False,
+                                   returnfig=True,
+                                   figsize=(12, 8))
+                
+                # Agregar marker manualmente con matplotlib
+                ax = axes[0]  # Panel principal
+                ax.scatter([len(df) - 1], [precio_breakout], color='#FFD700', s=100, marker='o', 
+                          zorder=5, label='Breakout Point')
+                
+                # Agregar anotación
+                ax.annotate(f'BREAKOUT\n{precio_breakout:.8f}', 
+                           xy=(len(df) - 1, precio_breakout),
+                           xytext=(10, 20), textcoords='offset points',
+                           bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.7),
+                           arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+                
+                ax.legend()
+                
+            except Exception as mpl_error:
+                print(f"     ⚠️ Error con mplfinance, usando versión básica: {mpl_error}")
+                # Versión mínima sin marcadores especiales
+                fig, axes = mpf.plot(df, type='candle',
+                                   title=f'{simbolo} | {tipo_breakout} | Breakout',
+                                   ylabel='Precio',
+                                   addplot=apds,
+                                   volume=False,
+                                   returnfig=True,
+                                   figsize=(12, 8))
+            
+            # Guardar gráfico
+            buf = BytesIO()
+            
+            try:
+                plt.tight_layout()
+                plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', 
+                           facecolor='white', edgecolor='none')
+                buf.seek(0)
+                print(f"     ✅ Gráfico generado exitosamente para {simbolo}")
+                return buf
+            except Exception as save_error:
+                print(f"     ❌ Error guardando gráfico: {save_error}")
+                raise
+            finally:
+                plt.close(fig)
+                plt.clf()
+                plt.close('all')
+            
         except Exception as e:
-            print(f"⚠️ Error generando gráfico de breakout: {e}")
+            print(f"     ❌ Error crítico generando gráfico: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def detectar_breakout(self, simbolo, info_canal, datos_mercado):
