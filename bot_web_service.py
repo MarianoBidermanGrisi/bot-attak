@@ -163,22 +163,34 @@ class BitgetClient:
         logger.info(f"Cliente Bitget inicializado con API Key: {api_key[:10]}...")
 
     def _generate_signature(self, timestamp, method, request_path, body=''):
-        """Generar firma HMAC-SHA256 para Bitget V2"""
+        """Generar firma HMAC-SHA256 para Bitget V2 - CORREGIDO"""
         try:
+            # Convertir body a string para la firma
             if isinstance(body, dict):
                 body_str = json.dumps(body, separators=(',', ':')) if body else ''
             else:
                 body_str = str(body) if body else ''
             
+            # Crear el mensaje para firmar según especificación de Bitget V2
             message = timestamp + method.upper() + request_path + body_str
             
+            # Generar firma HMAC-SHA256
             mac = hmac.new(
                 bytes(self.api_secret, 'utf-8'),
                 bytes(message, 'utf-8'),
                 digestmod=hashlib.sha256
             )
             
-            signature = base64.b64encode(mac.digest()).decode()
+            signature = base64.b64encode(mac.digest()).decode('utf-8')
+            
+            # Log para debugging
+            logger.debug(f"Generando firma:")
+            logger.debug(f"  Timestamp: {timestamp}")
+            logger.debug(f"  Method: {method.upper()}")
+            logger.debug(f"  Request path: {request_path}")
+            logger.debug(f"  Body: {body_str}")
+            logger.debug(f"  Signature: {signature[:20]}...")
+            
             return signature
             
         except Exception as e:
@@ -200,6 +212,7 @@ class BitgetClient:
                 'locale': 'en-US'
             }
             
+            logger.debug(f"Headers generados para {method} {request_path}")
             return headers
             
         except Exception as e:
@@ -1101,636 +1114,291 @@ class TradingBot:
                             abs(canal_info['coeficiente_pearson']) >= 0.4 and 
                             canal_info['r2_score'] >= 0.4):
                             ancho_actual = canal_info['ancho_canal_porcentual']
-                            puntaje_ancho = ancho_actual * 10
-                            puntaje_timeframe = prioridad_timeframe.get(timeframe, 50) * 100
-                            puntaje_total = puntaje_timeframe + puntaje_ancho
-                            if puntaje_total > mejor_puntaje:
-                                mejor_puntaje = puntaje_total
-                                mejor_config = {
-                                    'timeframe': timeframe,
-                                    'num_velas': num_velas,
-                                    'ancho_canal': ancho_actual,
-                                    'puntaje_total': puntaje_total
-                                }
+                            if ancho_actual >= self.config.get('min_channel_width_percent', 3.0):
+                                puntaje_ancho = ancho_actual * 10
+                                puntaje_timeframe = prioridad_timeframe.get(timeframe, 50) * 100
+                                puntaje_total = puntaje_timeframe + puntaje_ancho
+                                if puntaje_total > mejor_puntaje:
+                                    mejor_puntaje = puntaje_total
+                                    mejor_config = {
+                                        'timeframe': timeframe,
+                                        'num_velas': num_velas,
+                                        'ancho_canal': ancho_actual,
+                                        'puntaje_total': puntaje_total
+                                    }
                     except Exception:
                         continue
         if mejor_config:
             self.config_optima_por_simbolo[simbolo] = mejor_config
             self.ultima_busqueda_config[simbolo] = datetime.now()
-            print(f"   ✅ Config óptima: {mejor_config['timeframe']} - {mejor_config['num_velas']} velas - Ancho: {mejor_config['ancho_canal']:.1f}%")
+            print(f"   ✅ Configuración encontrada para {simbolo}: {mejor_config}")
+        else:
+            print(f"   ❌ No se encontró configuración válida para {simbolo}")
         return mejor_config
 
-    def obtener_datos_mercado_config(self, simbolo, timeframe, num_velas):
-        """Obtiene datos con configuración específica usando API de Bitget"""
-        # Usar API de Bitget en lugar de Binance
-        if self.bitget_client:
-            try:
-                candles = self.bitget_client.get_klines(simbolo, timeframe, num_velas + 14)
-                if not candles or len(candles) == 0:
-                    return None
-                
-                # Procesar datos de Bitget
-                maximos = []
-                minimos = []
-                cierres = []
-                tiempos = []
-                
-                for i, candle in enumerate(candles):
-                    # Formato Bitget: [timestamp, open, high, low, close, volume, ...]
-                    maximos.append(float(candle[2]))  # high
-                    minimos.append(float(candle[3]))  # low
-                    cierres.append(float(candle[4]))  # close
-                    tiempos.append(i)
-                
-                return {
-                    'maximos': maximos,
-                    'minimos': minimos,
-                    'cierres': cierres,
-                    'tiempos': tiempos,
-                    'precio_actual': cierres[-1] if cierres else 0,
-                    'timeframe': timeframe,
-                    'num_velas': num_velas
-                }
-            except Exception as e:
-                print(f"   ⚠️ Error obteniendo datos de Bitget para {simbolo}: {e}")
-                # Fallback a Binance si falla Bitget
-                pass
-        
-        # Fallback a Binance API (código original)
+    def obtener_datos_mercado_config(self, symbol, timeframe, num_velas):
+        """Obtener datos de mercado con configuración específica"""
         try:
+            # Usar Bitget si está disponible
+            if self.bitget_client:
+                klines = self.bitget_client.get_klines(symbol, timeframe, num_velas)
+                if klines:
+                    cierres = [float(k[4]) for k in klines]
+                    maximos = [float(k[2]) for k in klines]
+                    minimos = [float(k[3]) for k in klines]
+                    volumenes = [float(k[5]) for k in klines]
+                    
+                    precio_actual = cierres[-1] if cierres else 0
+                    
+                    return {
+                        'cierres': cierres,
+                        'maximos': maximos,
+                        'minimos': minimos,
+                        'volumenes': volumenes,
+                        'precio_actual': precio_actual,
+                        'timeframe': timeframe,
+                        'num_velas': num_velas
+                    }
+            
+            # Fallback a Binance
             url = "https://api.binance.com/api/v3/klines"
-            params = {'symbol': simbolo, 'interval': timeframe, 'limit': num_velas + 14}
+            params = {
+                'symbol': symbol,
+                'interval': timeframe,
+                'limit': num_velas
+            }
             respuesta = requests.get(url, params=params, timeout=10)
-            datos = respuesta.json()
-            if not isinstance(datos, list) or len(datos) == 0:
-                return None
-            maximos = [float(vela[2]) for vela in datos]
-            minimos = [float(vela[3]) for vela in datos]
-            cierres = [float(vela[4]) for vela in datos]
-            tiempos = list(range(len(datos)))
+            klines = respuesta.json()
+            
+            cierres = [float(k[4]) for k in klines]
+            maximos = [float(k[2]) for k in klines]
+            minimos = [float(k[3]) for k in klines]
+            volumenes = [float(k[5]) for k in klines]
+            
+            precio_actual = cierres[-1] if cierres else 0
+            
             return {
+                'cierres': cierres,
                 'maximos': maximos,
                 'minimos': minimos,
-                'cierres': cierres,
-                'tiempos': tiempos,
-                'precio_actual': cierres[-1] if cierres else 0,
+                'volumenes': volumenes,
+                'precio_actual': precio_actual,
                 'timeframe': timeframe,
                 'num_velas': num_velas
             }
-        except Exception:
-            return None
-
-    def calcular_canal_regresion_config(self, datos_mercado, candle_period):
-        """Calcula canal de regresión"""
-        if not datos_mercado or len(datos_mercado['maximos']) < candle_period:
-            return None
-        start_idx = -candle_period
-        tiempos = datos_mercado['tiempos'][start_idx:]
-        maximos = datos_mercado['maximos'][start_idx:]
-        minimos = datos_mercado['minimos'][start_idx:]
-        cierres = datos_mercado['cierres'][start_idx:]
-        tiempos_reg = list(range(len(tiempos)))
-        reg_max = self.calcular_regresion_lineal(tiempos_reg, maximos)
-        reg_min = self.calcular_regresion_lineal(tiempos_reg, minimos)
-        reg_close = self.calcular_regresion_lineal(tiempos_reg, cierres)
-        if not all([reg_max, reg_min, reg_close]):
-            return None
-        pendiente_max, intercepto_max = reg_max
-        pendiente_min, intercepto_min = reg_min
-        pendiente_cierre, intercepto_cierre = reg_close
-        tiempo_actual = tiempos_reg[-1]
-        resistencia_media = pendiente_max * tiempo_actual + intercepto_max
-        soporte_media = pendiente_min * tiempo_actual + intercepto_min
-        diferencias_max = [maximos[i] - (pendiente_max * tiempos_reg[i] + intercepto_max) for i in range(len(tiempos_reg))]
-        diferencias_min = [minimos[i] - (pendiente_min * tiempos_reg[i] + intercepto_min) for i in range(len(tiempos_reg))]
-        desviacion_max = np.std(diferencias_max) if diferencias_max else 0
-        desviacion_min = np.std(diferencias_min) if diferencias_min else 0
-        resistencia_superior = resistencia_media + desviacion_max
-        soporte_inferior = soporte_media - desviacion_min
-        precio_actual = datos_mercado['precio_actual']
-        pearson, angulo_tendencia = self.calcular_pearson_y_angulo(tiempos_reg, cierres)
-        fuerza_texto, nivel_fuerza = self.clasificar_fuerza_tendencia(angulo_tendencia)
-        direccion = self.determinar_direccion_tendencia(angulo_tendencia, 1)
-        stoch_k, stoch_d = self.calcular_stochastic(datos_mercado)
-        precio_medio = (resistencia_superior + soporte_inferior) / 2
-        ancho_canal_absoluto = resistencia_superior - soporte_inferior
-        ancho_canal_porcentual = (ancho_canal_absoluto / precio_medio) * 100
-        return {
-            'resistencia': resistencia_superior,
-            'soporte': soporte_inferior,
-            'resistencia_media': resistencia_media,
-            'soporte_media': soporte_media,
-            'linea_tendencia': pendiente_cierre * tiempo_actual + intercepto_cierre,
-            'pendiente_tendencia': pendiente_cierre,
-            'precio_actual': precio_actual,
-            'ancho_canal': ancho_canal_absoluto,
-            'ancho_canal_porcentual': ancho_canal_porcentual,
-            'angulo_tendencia': angulo_tendencia,
-            'coeficiente_pearson': pearson,
-            'fuerza_texto': fuerza_texto,
-            'nivel_fuerza': nivel_fuerza,
-            'direccion': direccion,
-            'r2_score': self.calcular_r2(cierres, tiempos_reg, pendiente_cierre, intercepto_cierre),
-            'pendiente_resistencia': pendiente_max,
-            'pendiente_soporte': pendiente_min,
-            'stoch_k': stoch_k,
-            'stoch_d': stoch_d,
-            'timeframe': datos_mercado.get('timeframe', 'N/A'),
-            'num_velas': candle_period
-        }
-
-    def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
-        """
-        Envía alerta de BREAKOUT detectado a Telegram con gráfico
-        VERSIÓN MEJORADA con debugging robusto
-        """
-        precio_cierre = datos_mercado['cierres'][-1]
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        direccion_canal = info_canal['direccion']
-        
-        # Calcular Stochastic para incluir en el mensaje
-        try:
-            # Obtener los últimos valores de Stochastic
-            if len(datos_mercado['cierres']) >= 14:
-                # Calcular Stochastic básico
-                period = 14
-                stoch_k_values = []
-                for i in range(len(datos_mercado['cierres'])):
-                    if i < period - 1:
-                        stoch_k_values.append(50)
-                    else:
-                        highest_high = max(datos_mercado['maximos'][i-period+1:i+1])
-                        lowest_low = min(datos_mercado['minimos'][i-period+1:i+1])
-                        if highest_high == lowest_low:
-                            k = 50
-                        else:
-                            k = 100 * (datos_mercado['cierres'][i] - lowest_low) / (highest_high - lowest_low)
-                        stoch_k_values.append(k)
-                
-                stoch_actual = stoch_k_values[-1] if stoch_k_values else 50
-                
-                if stoch_actual <= 30:
-                    estado_stoch = "[SOBREVENTA] (buen momento para LONG)"
-                elif stoch_actual >= 70:
-                    estado_stoch = "[SOBRECOMPRA] (buen momento para SHORT)"
-                else:
-                    estado_stoch = "[NEUTRO]"
-            else:
-                stoch_actual = 50
-                estado_stoch = "➖ NEUTRO (datos insuficientes)"
-        except Exception:
-            stoch_actual = 50
-            estado_stoch = "➖ NEUTRO (error cálculo)"
-        
-        # Determinar tipo de ruptura CORREGIDO
-        if tipo_breakout == "BREAKOUT_LONG":
-            emoji_principal = "[DOWN]"  # BAJISTA - Sin emojis para evitar problemas de fuente
-            tipo_texto = "RUPTURA de SOPORTE"
-            nivel_roto = f"Soporte: {soporte:.8f}"
-            direccion_emoji = "↓"
-            expectativa = "posible entrada en SHORT si el precio reingresa al canal"  # CORREGIDO: SHORT no LONG
-        else:  # BREAKOUT_SHORT
-            emoji_principal = "[UP]"  # ALCISTA - Sin emojis para evitar problemas de fuente
-            tipo_texto = "RUPTURA de RESISTENCIA"
-            nivel_roto = f"Resistencia: {resistencia:.8f}"
-            direccion_emoji = "↑"
-            expectativa = "posible entrada en LONG si el precio reingresa al canal"  # CORREGIDO: LONG no SHORT
-        
-        mensaje = f"""
-{emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
-⚠️ <b>{tipo_texto}</b> {direccion_emoji}
-⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-⏳ <b>ESPERANDO REINGRESO...</b>
-👁️ Máximo 30 minutos para confirmación
-📍 {expectativa}
-{nivel_roto}
-📊 <b>Stochastic:</b> {stoch_actual:.1f} - {estado_stoch}
-        """
-        
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        
-        if token and chat_ids:
-            try:
-                print(f"     📊 Iniciando generación de gráfico para {simbolo}...")
-                
-                # Llamar función corregida
-                buf = self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
-                
-                if buf:
-                    print(f"     📨 Enviando gráfico por Telegram...")
-                    exito_grafico = self.enviar_grafico_telegram(buf, token, chat_ids)
-                    if exito_grafico:
-                        print(f"     ✅ Gráfico enviado exitosamente")
-                    else:
-                        print(f"     ⚠️ Error enviando gráfico")
-                    time.sleep(1)
-                else:
-                    print(f"     ⚠️ No se pudo generar gráfico")
-                
-                # Enviar mensaje de texto siempre
-                print(f"     📤 Enviando mensaje de texto...")
-                exito_mensaje = self._enviar_telegram_simple(mensaje, token, chat_ids)
-                if exito_mensaje:
-                    print(f"     ✅ Mensaje enviado exitosamente")
-                else:
-                    print(f"     ❌ Error enviando mensaje")
-                    
-                print(f"     ✅ Alerta de breakout procesada para {simbolo}")
-                
-            except Exception as e:
-                print(f"     ❌ Error completo enviando alerta de breakout: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print(f"     📢 Breakout detectado en {simbolo} (sin Telegram configurado)")
-
-    def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
-        """
-        Genera gráfico especial para el momento del BREAKOUT
-        CORREGIDO: Soluciona error 'apdata is list but NOT of float or int'
-        """
-        try:
-            # CONFIGURACIÓN MATPLOTLIB CORREGIDA PARA PRODUCCIÓN
-            plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
-            plt.rcParams['axes.unicode_minus'] = False
-            
-            # Obtener datos con manejo robusto de errores
-            df = None
-            datos_exitosos = False
-            
-            # Intentar Bitget primero
-            if self.bitget_client:
-                try:
-                    print(f"     📊 Obteniendo datos de Bitget para {simbolo}...")
-                    klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-                    if klines and len(klines) > 20:
-                        df_data = []
-                        for kline in klines:
-                            try:
-                                df_data.append({
-                                    'Date': pd.to_datetime(int(kline[0]), unit='ms'),
-                                    'Open': float(kline[1]),
-                                    'High': float(kline[2]),
-                                    'Low': float(kline[3]),
-                                    'Close': float(kline[4]),
-                                    'Volume': float(kline[5])
-                                })
-                            except (ValueError, IndexError):
-                                continue
-                        
-                        if len(df_data) >= 20:
-                            df = pd.DataFrame(df_data)
-                            df.set_index('Date', inplace=True)
-                            datos_exitosos = True
-                            print(f"     ✅ Datos de Bitget obtenidos: {len(df)} velas")
-                except Exception as e:
-                    print(f"     ⚠️ Error con Bitget: {e}")
-            
-            # Fallback a Binance si Bitget falló
-            if not datos_exitosos:
-                try:
-                    print(f"     📊 Obteniendo datos de Binance para {simbolo}...")
-                    url = "https://api.binance.com/api/v3/klines"
-                    params = {
-                        'symbol': simbolo,
-                        'interval': config_optima['timeframe'],
-                        'limit': min(config_optima['num_velas'], 100)
-                    }
-                    response = requests.get(url, params=params, timeout=15)
-                    if response.status_code == 200:
-                        klines = response.json()
-                        if len(klines) >= 20:
-                            df_data = []
-                            for kline in klines:
-                                try:
-                                    df_data.append({
-                                        'Date': pd.to_datetime(int(kline[0]), unit='ms'),
-                                        'Open': float(kline[1]),
-                                        'High': float(kline[2]),
-                                        'Low': float(kline[3]),
-                                        'Close': float(kline[4]),
-                                        'Volume': float(kline[5])
-                                    })
-                                except (ValueError, IndexError):
-                                    continue
-                            
-                            if len(df_data) >= 20:
-                                df = pd.DataFrame(df_data)
-                                df.set_index('Date', inplace=True)
-                                datos_exitosos = True
-                                print(f"     ✅ Datos de Binance obtenidos: {len(df)} velas")
-                except Exception as e:
-                    print(f"     ⚠️ Error con Binance: {e}")
-            
-            if not datos_exitosos or df is None:
-                raise ValueError("No se pudieron obtener datos suficientes de ninguna API")
-            
-            # Calcular líneas de canal con validación
-            tiempos_reg = np.arange(len(df))
-            resistencia_values = []
-            soporte_values = []
-            
-            try:
-                for i in tiempos_reg:
-                    resist = info_canal['pendiente_resistencia'] * i + \
-                            (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
-                    sop = info_canal['pendiente_soporte'] * i + \
-                         (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
-                    resistencia_values.append(resist)
-                    soporte_values.append(sop)
-            except KeyError as e:
-                raise ValueError(f"Info de canal incompleta: {e}")
-            
-            df['Resistencia'] = resistencia_values
-            df['Soporte'] = soporte_values
-            
-            # CALCULAR STOCHASTIC (FALTABA EN LA VERSIÓN MODIFICADA)
-            period = 14
-            k_period = 3
-            d_period = 3
-            stoch_k_values = []
-            for i in range(len(df)):
-                if i < period - 1:
-                    stoch_k_values.append(50)
-                else:
-                    highest_high = df['High'].iloc[i-period+1:i+1].max()
-                    lowest_low = df['Low'].iloc[i-period+1:i+1].min()
-                    if highest_high == lowest_low:
-                        k = 50
-                    else:
-                        k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
-                    stoch_k_values.append(k)
-            k_smoothed = []
-            for i in range(len(stoch_k_values)):
-                if i < k_period - 1:
-                    k_smoothed.append(stoch_k_values[i])
-                else:
-                    k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
-                    k_smoothed.append(k_avg)
-            stoch_d_values = []
-            for i in range(len(k_smoothed)):
-                if i < d_period - 1:
-                    stoch_d_values.append(k_smoothed[i])
-                else:
-                    d = sum(k_smoothed[i-d_period+1:i+1]) / d_period
-                    stoch_d_values.append(d)
-            df['Stoch_K'] = k_smoothed
-            df['Stoch_D'] = stoch_d_values
-            
-            # SOLUCIÓN AL ERROR: Usar numpy arrays y scatter plot
-            precio_breakout = datos_mercado.get('precio_actual') or df['Close'].iloc[-1]
-            
-            # Crear arrays numpy válidos
-            resistencia_array = np.array(resistencia_values)
-            soporte_array = np.array(soporte_values)
-            
-            print(f"     [PRICE] Precio breakout: {precio_breakout:.8f}")
-            print(f"     [RESIST] Resistencias calculadas: {len(resistencia_values)} puntos")
-            print(f"     [SUPPORT] Soportes calculados: {len(soporte_values)} puntos")
-            print(f"     📊 Stochastic calculado: {len(df)} puntos")
-            
-            # Crear gráfico CON STOCHASTIC
-            apds = [
-                mpf.make_addplot(resistencia_array, color='#FF4444', linestyle='--', width=2, panel=0),
-                mpf.make_addplot(soporte_array, color='#4444FF', linestyle='--', width=2, panel=0),
-                # AGREGAR STOCHASTIC AL PANEL 1
-                mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'),
-                mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1)
-            ]
-            
-            # Agregar líneas de sobrecompra/sobreventa para Stochastic
-            overbought = [80] * len(df)
-            oversold = [20] * len(df)
-            apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            
-            # Generar gráfico base CON STOCHASTIC
-            try:
-                # Usar texto en lugar de emojis para evitar problemas de fuente
-                if tipo_breakout == "BREAKOUT_LONG":
-                    direccion_grafico = "DOWN"  # BAJISTA
-                else:
-                    direccion_grafico = "UP"  # ALCISTA
-                
-                fig, axes = mpf.plot(df, type='candle', style='charles',
-                                   title=f'{simbolo} [{direccion_grafico}] | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
-                                   ylabel='Precio',
-                                   addplot=apds,
-                                   volume=False,
-                                   returnfig=True,
-                                   figsize=(14, 10),  # Aumentado para incluir panel de Stochastic
-                                   panel_ratios=(3, 1))  # Panel principal:Panel Stochastic = 3:1
-                
-                # Configurar el panel del Stochastic
-                if len(axes) > 1:
-                    axes[1].set_ylim([0, 100])  # Rango típico del Stochastic
-                    axes[1].grid(True, alpha=0.3)
-                    axes[1].set_ylabel('Stochastic', fontsize=10)
-                
-                # Agregar marker manualmente con matplotlib
-                ax = axes[0]  # Panel principal de precios
-                ax.scatter([len(df) - 1], [precio_breakout], color='#FFD700', s=100, marker='o', 
-                          zorder=5, label='Breakout Point')
-                
-                # Agregar anotación
-                ax.annotate(f'BREAKOUT\n{precio_breakout:.8f}', 
-                           xy=(len(df) - 1, precio_breakout),
-                           xytext=(10, 20), textcoords='offset points',
-                           bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.7),
-                           arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
-                
-                ax.legend()
-                
-            except Exception as mpl_error:
-                print(f"     ⚠️ Error con mplfinance, usando versión básica: {mpl_error}")
-                # Versión mínima sin marcadores especiales
-                if tipo_breakout == "BREAKOUT_LONG":
-                    direccion_grafico = "DOWN"  # BAJISTA
-                else:
-                    direccion_grafico = "UP"  # ALCISTA
-                    
-                fig, axes = mpf.plot(df, type='candle',
-                                   title=f'{simbolo} [{direccion_grafico}] | {tipo_breakout} | Breakout',
-                                   ylabel='Precio',
-                                   addplot=apds,
-                                   volume=False,
-                                   returnfig=True,
-                                   figsize=(14, 10),
-                                   panel_ratios=(3, 1))
-                # Configurar panel del Stochastic en versión básica
-                if len(axes) > 1:
-                    axes[1].set_ylim([0, 100])
-                    axes[1].grid(True, alpha=0.3)
-            
-            # Guardar gráfico
-            buf = BytesIO()
-            
-            try:
-                # plt.tight_layout() removido para evitar warnings con mplfinance
-                plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', 
-                           facecolor='white', edgecolor='none')
-                buf.seek(0)
-                print(f"     ✅ Gráfico generado exitosamente para {simbolo}")
-                return buf
-            except Exception as save_error:
-                print(f"     ❌ Error guardando gráfico: {save_error}")
-                raise
-            finally:
-                plt.close(fig)
-                plt.clf()
-                plt.close('all')
-            
         except Exception as e:
-            print(f"     ❌ Error crítico generando gráfico: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"⚠️ Error obteniendo datos para {symbol} ({timeframe}, {num_velas}): {e}")
+            return None
+
+    def calcular_canal_regresion_config(self, datos_mercado, num_velas):
+        """Calcular canal de regresión con configuración específica"""
+        try:
+            cierres = datos_mercado['cierres']
+            if len(cierres) < num_velas:
+                return None
+            
+            cierres_recientes = cierres[-num_velas:]
+            maximos_recientes = datos_mercado['maximos'][-num_velas:]
+            minimos_recientes = datos_mercado['minimos'][-num_velas:]
+            
+            # Regresión lineal en cierres
+            x = list(range(len(cierres_recientes)))
+            pendiente, intercepto = self.calcular_regresion_lineal(x, cierres_recientes)
+            if pendiente is None:
+                return None
+            
+            # Pearson y ángulo
+            coeficiente_pearson, angulo_tendencia = self.calcular_pearson_y_angulo(x, cierres_recientes)
+            fuerza_texto, nivel_fuerza = self.clasificar_fuerza_tendencia(angulo_tendencia)
+            direccion = self.determinar_direccion_tendencia(angulo_tendencia)
+            
+            # R² score
+            r2_score = self.calcular_r2(cierres_recientes, x, pendiente, intercepto)
+            
+            # Calcular resistencias y soportes
+            pendientes_datos = []
+            resistencias_calculadas = []
+            soportes_calculados = []
+            
+            for i in range(3, len(cierres_recientes)):
+                pendiente_temp, intercepto_temp = self.calcular_regresion_lineal(x[:i+1], cierres_recientes[:i+1])
+                if pendiente_temp is not None:
+                    pendientes_datos.append(pendiente_temp)
+            
+            if pendientes_datos:
+                pendiente_resistencia = np.mean([p for p in pendientes_datos if p > 0]) if any(p > 0 for p in pendientes_datos) else 0
+                pendiente_soporte = np.mean([p for p in pendientes_datos if p < 0]) if any(p < 0 for p in pendientes_datos) else 0
+            else:
+                pendiente_resistencia = pendiente * 0.8
+                pendiente_soporte = pendiente * 0.8
+            
+            # Calcular resistencia y soporte
+            resistencia = max(cierres_recientes) * 1.002
+            soporte = min(cierres_recientes) * 0.998
+            
+            # Calcular ancho del canal
+            ancho_canal = resistencia - soporte
+            ancho_canal_porcentual = (ancho_canal / datos_mercado['precio_actual']) * 100
+            
+            # Stochastic
+            stoch_k, stoch_d = self.calcular_stochastic(datos_mercado)
+            
+            return {
+                'resistencia': resistencia,
+                'soporte': soporte,
+                'pendiente_resistencia': pendiente_resistencia,
+                'pendiente_soporte': pendiente_soporte,
+                'coeficiente_pearson': coeficiente_pearson,
+                'angulo_tendencia': angulo_tendencia,
+                'fuerza_texto': fuerza_texto,
+                'nivel_fuerza': nivel_fuerza,
+                'direccion': direccion,
+                'r2_score': r2_score,
+                'ancho_canal': ancho_canal,
+                'ancho_canal_porcentual': ancho_canal_porcentual,
+                'stoch_k': stoch_k,
+                'stoch_d': stoch_d,
+                'pendiente': pendiente,
+                'intercepto': intercepto
+            }
+        except Exception as e:
+            print(f"⚠️ Error calculando canal para {datos_mercado.get('timeframe', 'N/A')}: {e}")
             return None
 
     def detectar_breakout(self, simbolo, info_canal, datos_mercado):
-        """
-        Detecta breakout basado en el precio saliendo del canal
-        """
-        precio_actual = datos_mercado['precio_actual']
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        direccion = info_canal['direccion']
-        
-        # Verificar si el precio salió del canal
-        if precio_actual > resistencia:
-            # Precio rompió hacia arriba la resistencia
-            # Si el canal es bajista, esto es una oportunidad de reversal LONG
-            if direccion == "🔴 BAJISTA":
+        """Detectar breakout en el símbolo"""
+        try:
+            precio_actual = datos_mercado['precio_actual']
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            
+            # Verificar breakout
+            if precio_actual > resistencia:
+                # Breakout alcista
                 return "BREAKOUT_LONG"
-        elif precio_actual < soporte:
-            # Precio rompió hacia abajo el soporte
-            # Si el canal es alcista, esto es una oportunidad de reversal SHORT
-            if direccion == "🟢 ALCISTA":
+            elif precio_actual < soporte:
+                # Breakout bajista
                 return "BREAKOUT_SHORT"
-        
-        return None
+            return None
+        except Exception as e:
+            print(f"⚠️ Error detectando breakout: {e}")
+            return None
 
     def detectar_reentry(self, simbolo, info_canal, datos_mercado):
-        """
-        Detecta reentry: precio regresa al canal después del breakout
-        """
-        if simbolo not in self.esperando_reentry:
+        """Detectar reentry después de breakout"""
+        try:
+            precio_actual = datos_mercado['precio_actual']
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            
+            # Verificar si hay breakout previo registrado
+            if simbolo not in self.esperando_reentry:
+                return None
+            
+            breakout_info = self.esperando_reentry[simbolo]
+            tipo_breakout = breakout_info['tipo']
+            
+            # Verificar condiciones de reentry
+            tiempo_espera = (datetime.now() - breakout_info['timestamp']).total_seconds() / 60
+            if tiempo_espera > 60:  # Más de 1 hora
+                del self.esperando_reentry[simbolo]
+                return None
+            
+            # Verificar reentry basado en el tipo de breakout
+            if tipo_breakout == "BREAKOUT_LONG":
+                # Después de ruptura alcista, buscar reentry bajista ( SHORT )
+                if precio_actual <= resistencia and info_canal['stoch_k'] >= 70:
+                    return "SHORT"
+            elif tipo_breakout == "BREAKOUT_SHORT":
+                # Después de ruptura bajista, buscar reentry alcista ( LONG )
+                if precio_actual >= soporte and info_canal['stoch_k'] <= 30:
+                    return "LONG"
+            
             return None
-        
-        breakout_info = self.esperando_reentry[simbolo]
-        tiempo_breakout = breakout_info['timestamp']
-        tipo_breakout = breakout_info['tipo']
-        precio_breakout = breakout_info['precio_breakout']
-        
-        # Verificar si pasaron menos de 30 minutos desde el breakout
-        tiempo_transcurrido = (datetime.now() - tiempo_breakout).total_seconds() / 60
-        if tiempo_transcurrido > 30:
-            # Se cumplió el tiempo máximo, eliminar de la lista
-            del self.esperando_reentry[simbolo]
+        except Exception as e:
+            print(f"⚠️ Error detectando reentry: {e}")
             return None
-        
-        precio_actual = datos_mercado['precio_actual']
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        
-        # Verificar reentry según el tipo de breakout CORREGIDO
-        if tipo_breakout == "BREAKOUT_LONG":
-            # BREAKOUT_LONG = precio rompió soporte hacia ABAJO
-            # Si el precio reingresa al canal (sube de vuelta) = señal BAJISTA (SHORT)
-            if soporte <= precio_actual <= resistencia:
-                # Validar Stochastic para confirmar SHORT
-                try:
-                    if len(datos_mercado['cierres']) >= 14:
-                        period = 14
-                        stoch_k_values = []
-                        for i in range(len(datos_mercado['cierres'])):
-                            if i < period - 1:
-                                stoch_k_values.append(50)
-                            else:
-                                highest_high = max(datos_mercado['maximos'][i-period+1:i+1])
-                                lowest_low = min(datos_mercado['minimos'][i-period+1:i+1])
-                                if highest_high == lowest_low:
-                                    k = 50
-                                else:
-                                    k = 100 * (datos_mercado['cierres'][i] - lowest_low) / (highest_high - lowest_low)
-                                stoch_k_values.append(k)
-                        
-                        stoch_actual = stoch_k_values[-1] if stoch_k_values else 50
-                        
-                        # Para SHORT, Stochastic debe estar en SOBRECOMPRA o al menos neutral
-                        if stoch_actual >= 70 or 30 < stoch_actual < 70:
-                            print(f"     ✅ {simbolo} - Reentry SHORT confirmado con Stochastic: {stoch_actual:.1f}")
-                            return "SHORT"
-                        else:
-                            print(f"     ⚠️ {simbolo} - Stochastic no favorable para SHORT: {stoch_actual:.1f} (en sobreventa)")
-                            return None
-                    else:
-                        return "SHORT"  # Sin datos de Stochastic, proceder
-                except:
-                    return "SHORT"  # Error en cálculo, proceder de todas formas
-                    
-        elif tipo_breakout == "BREAKOUT_SHORT":
-            # BREAKOUT_SHORT = precio rompió resistencia hacia ARRIBA
-            # Si el precio reingresa al canal (baja de vuelta) = señal ALCISTA (LONG)
-            if soporte <= precio_actual <= resistencia:
-                # Validar Stochastic para confirmar LONG
-                try:
-                    if len(datos_mercado['cierres']) >= 14:
-                        period = 14
-                        stoch_k_values = []
-                        for i in range(len(datos_mercado['cierres'])):
-                            if i < period - 1:
-                                stoch_k_values.append(50)
-                            else:
-                                highest_high = max(datos_mercado['maximos'][i-period+1:i+1])
-                                lowest_low = min(datos_mercado['minimos'][i-period+1:i+1])
-                                if highest_high == lowest_low:
-                                    k = 50
-                                else:
-                                    k = 100 * (datos_mercado['cierres'][i] - lowest_low) / (highest_high - lowest_low)
-                                stoch_k_values.append(k)
-                        
-                        stoch_actual = stoch_k_values[-1] if stoch_k_values else 50
-                        
-                        # Para LONG, Stochastic debe estar en SOBREVENTA o al menos neutral
-                        if stoch_actual <= 30 or 30 < stoch_actual < 70:
-                            print(f"     ✅ {simbolo} - Reentry LONG confirmado con Stochastic: {stoch_actual:.1f}")
-                            return "LONG"
-                        else:
-                            print(f"     ⚠️ {simbolo} - Stochastic no favorable para LONG: {stoch_actual:.1f} (en sobrecompra)")
-                            return None
-                    else:
-                        return "LONG"  # Sin datos de Stochastic, proceder
-                except:
-                    return "LONG"  # Error en cálculo, proceder de todas formas
-        
-        return None
 
     def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual):
-        if not info_canal:
-            return None, None, None
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        ancho_canal = resistencia - soporte
-        sl_porcentaje = 0.02
-        if tipo_operacion == "LONG":
-            precio_entrada = precio_actual
-            stop_loss = precio_entrada * (1 - sl_porcentaje)
-            take_profit = precio_entrada + ancho_canal 
-        else:
-            precio_entrada = precio_actual
-            stop_loss = resistencia * (1 + sl_porcentaje)
-            take_profit = precio_entrada - ancho_canal
-        riesgo = abs(precio_entrada - stop_loss)
-        beneficio = abs(take_profit - precio_entrada)
-        ratio_rr = beneficio / riesgo if riesgo > 0 else 0
-        if ratio_rr < self.config.get('min_rr_ratio', 1.2):
+        """Calcular niveles de entrada, TP y SL"""
+        try:
+            entrada = None
             if tipo_operacion == "LONG":
-                take_profit = precio_entrada + (riesgo * self.config['min_rr_ratio'])
+                entrada = info_canal['soporte'] + (info_canal['ancho_canal'] * self.config.get('entry_margin', 0.001))
             else:
-                take_profit = precio_entrada - (riesgo * self.config['min_rr_ratio'])
-        return precio_entrada, take_profit, stop_loss
+                entrada = info_canal['resistencia'] - (info_canal['ancho_canal'] * self.config.get('entry_margin', 0.001))
+            
+            # Calcular riesgo
+            if tipo_operacion == "LONG":
+                riesgo = entrada - info_canal['soporte']
+            else:
+                riesgo = info_canal['resistencia'] - entrada
+            
+            # Calcular TP y SL
+            if tipo_operacion == "LONG":
+                stop_loss = entrada - riesgo
+                take_profit = entrada + (riesgo * self.config.get('min_rr_ratio', 1.2))
+            else:
+                stop_loss = entrada + riesgo
+                take_profit = entrada - (riesgo * self.config.get('min_rr_ratio', 1.2))
+            
+            # Verificar ratio riesgo/beneficio
+            if tipo_operacion == "LONG":
+                beneficio = take_profit - entrada
+            else:
+                beneficio = entrada - take_profit
+            
+            ratio_rr = beneficio / riesgo if riesgo > 0 else 0
+            if ratio_rr < self.config.get('min_rr_ratio', 1.2):
+                if tipo_operacion == "LONG":
+                    take_profit = entrada + (riesgo * self.config['min_rr_ratio'])
+                else:
+                    take_profit = entrada - (riesgo * self.config['min_rr_ratio'])
+            return entrada, take_profit, stop_loss
+        except Exception as e:
+            print(f"⚠️ Error calculando niveles: {e}")
+            return None, None, None
+
+    def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
+        """Enviar alerta cuando se detecta un breakout"""
+        try:
+            precio_actual = datos_mercado['precio_actual']
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            
+            if tipo_breakout == "BREAKOUT_LONG":
+                direccion_emoji = "🟢"
+                direccion_texto = "ALCISTA"
+                nivel_ruptura = resistencia
+            else:
+                direccion_emoji = "🔴"
+                direccion_texto = "BAJISTA"
+                nivel_ruptura = soporte
+            
+            mensaje = f"""
+{direccion_emoji} <b>BREAKOUT DETECTADO - {simbolo}</b>
+
+💥 <b>Tipo:</b> {direccion_texto}
+💰 <b>Precio:</b> {precio_actual:.8f}
+📊 <b>Nivel de ruptura:</b> {nivel_ruptura:.8f}
+⏱️ <b>Configuración:</b> {config_optima['timeframe']} - {config_optima['num_velas']} velas
+📏 <b>Ancho canal:</b> {info_canal['ancho_canal_porcentual']:.1f}%
+💪 <b>Fuerza:</b> {info_canal['fuerza_texto']}
+🎯 <b>Ángulo:</b> {info_canal['angulo_tendencia']:.1f}°
+📈 <b>Tendencia:</b> {info_canal['direccion']}
+🎰 <b>Stochastic:</b> {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f}
+
+⏳ <b>Esperando reingreso para confirmación...</b>
+⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            """
+            
+            token = self.config.get('telegram_token')
+            chats = self.config.get('telegram_chat_ids', [])
+            if token and chats:
+                self._enviar_telegram_simple(mensaje, token, chats)
+                print(f"     📢 Alerta de breakout enviada para {simbolo}")
+        except Exception as e:
+            print(f"⚠️ Error enviando alerta breakout: {e}")
 
     def escanear_mercado(self):
         """
