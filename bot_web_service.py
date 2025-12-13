@@ -407,15 +407,53 @@ class BitgetClient:
             logger.error(f"Error colocando plan order: {e}")
             return None
 
+    def set_margin_mode(self, symbol, margin_mode='isolated'):
+        """Configurar modo de margen (isolated o crossed)"""
+        try:
+            request_path = '/api/v2/mix/account/set-margin-mode'
+            body = {
+                'symbol': symbol,
+                'productType': 'USDT-FUTURES',
+                'marginCoin': 'USDT',
+                'marginMode': margin_mode
+            }
+            
+            headers = self._get_headers('POST', request_path, body)
+            
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                json=body,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    logger.info(f"✓ Modo margen {margin_mode} configurado para {symbol}")
+                    return True
+                # Si ya está en ese modo, también es éxito
+                if data.get('code') == '40756':
+                    logger.info(f"✓ Margen {margin_mode} ya estaba configurado para {symbol}")
+                    return True
+            logger.warning(f"Error configurando margin mode: {response.text}")
+            return True  # Continuar aunque falle
+        except Exception as e:
+            logger.error(f"Error en set_margin_mode: {e}")
+            return True  # Continuar aunque falle
+
     def set_leverage(self, symbol, leverage, hold_side='long', margin_type='isolated'):
         """Configurar apalancamiento con margen aislado"""
         try:
+            # Primero configurar el modo de margen
+            self.set_margin_mode(symbol, margin_type)
+            time.sleep(0.3)
+            
             request_path = '/api/v2/mix/account/set-leverage'
             body = {
                 'symbol': symbol,
                 'productType': 'USDT-FUTURES',
                 'marginCoin': 'USDT',
-                'marginType': margin_type,  # Configurar margen aislado
                 'leverage': str(leverage),
                 'holdSide': hold_side
             }
@@ -433,6 +471,10 @@ class BitgetClient:
                 data = response.json()
                 if data.get('code') == '00000':
                     logger.info(f"✓ Apalancamiento {leverage}x configurado para {symbol}")
+                    return True
+                # Si el leverage ya está configurado, también es éxito
+                if data.get('code') == '40761':
+                    logger.info(f"✓ Apalancamiento {leverage}x ya estaba configurado para {symbol}")
                     return True
             logger.warning(f"Error configurando leverage: {response.text}")
             return False
