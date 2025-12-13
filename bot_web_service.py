@@ -1692,19 +1692,75 @@ class TradingBot:
         """
         token = self.config.get('telegram_token')
         chat_ids = self.config.get('telegram_chat_ids', [])
+        
         if token and chat_ids:
             try:
+                logger.info(f"📊 Generando gráfico para {simbolo}...")
                 print(f"     📊 Generando gráfico para {simbolo}...")
+                
                 buf = self.generar_grafico_profesional(simbolo, info_canal, datos_mercado, 
                                                       precio_entrada, tp, sl, tipo_operacion)
+                
                 if buf:
+                    logger.info(f"📤 Enviando gráfico a {len(chat_ids)} chat(s)...")
                     print(f"     📨 Enviando gráfico por Telegram...")
-                    self.enviar_grafico_telegram(buf, token, chat_ids)
+                    
+                    # Verificar tamaño del buffer
+                    buf_size = len(buf.getvalue())
+                    logger.info(f"📊 Tamaño del gráfico: {buf_size} bytes")
+                    
+                    # Enviar gráfico con retry en caso de fallo
+                    exito_grafico = False
+                    max_reintentos = 2
+                    
+                    for intento in range(max_reintentos):
+                        try:
+                            exito_grafico = self.enviar_grafico_telegram(buf, token, chat_ids)
+                            if exito_grafico:
+                                logger.info(f"✅ Gráfico enviado exitosamente (intento {intento + 1})")
+                                break
+                            else:
+                                logger.warning(f"⚠️ Fallo enviando gráfico (intento {intento + 1})")
+                                if intento < max_reintentos - 1:
+                                    time.sleep(2)  # Esperar antes del siguiente intento
+                        except Exception as e:
+                            logger.error(f"❌ Error en intento {intento + 1}: {e}")
+                            if intento < max_reintentos - 1:
+                                time.sleep(2)
+                    
+                    if not exito_grafico:
+                        logger.warning("⚠️ No se pudo enviar el gráfico después de varios intentos")
+                        print(f"     ⚠️ No se pudo enviar el gráfico")
+                    
                     time.sleep(1)
-                self._enviar_telegram_simple(mensaje, token, chat_ids)
-                print(f"     ✅ Señal {tipo_operacion} para {simbolo} enviada")
+                else:
+                    logger.warning("⚠️ No se pudo generar el gráfico")
+                    print(f"     ⚠️ No se pudo generar el gráfico")
+                
+                # Enviar mensaje de texto siempre (incluso si falla el gráfico)
+                logger.info(f"📱 Enviando mensaje de señal...")
+                exito_mensaje = self._enviar_telegram_simple(mensaje, token, chat_ids)
+                
+                if exito_mensaje:
+                    print(f"     ✅ Señal {tipo_operacion} para {simbolo} enviada")
+                    logger.info(f"✅ Señal enviada exitosamente")
+                else:
+                    print(f"     ⚠️ Señal enviada sin gráfico")
+                    logger.warning(f"⚠️ Mensaje enviado sin confirmación")
+                    
             except Exception as e:
+                error_msg = f"Error enviando señal completa: {e}"
+                logger.error(error_msg)
                 print(f"     ❌ Error enviando señal: {e}")
+                
+                # Intentar al menos enviar el mensaje sin gráfico
+                try:
+                    logger.info("🔄 Intentando enviar solo el mensaje...")
+                    self._enviar_telegram_simple(mensaje, token, chat_ids)
+                    print(f"     ✅ Mensaje enviado sin gráfico")
+                except Exception as e2:
+                    logger.error(f"❌ Error enviando solo mensaje: {e2}")
+                    print(f"     ❌ Error enviando mensaje: {e2}")
         
         # NUEVO: Ejecutar operación automáticamente si está habilitado
         operacion_ejecutada_exitosa = False
@@ -2264,58 +2320,192 @@ class TradingBot:
             oversold = [20] * len(df)
             apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            fig, axes = mpf.plot(df, type='candle', style='nightclouds',
-                               title=f'{simbolo} | {tipo_operacion} | {config_optima["timeframe"]} | Bitget V2 + Breakout+Reentry',
+            # Configurar matplotlib para mejor rendimiento
+            plt.style.use('default')  # Usar estilo más simple
+            plt.rcParams['figure.facecolor'] = 'white'
+            plt.rcParams['axes.facecolor'] = 'white'
+            
+            # Crear figura con tamaño optimizado para Telegram (más pequeño)
+            fig, axes = mpf.plot(df, type='candle', style='classic',
+                               title=f'{simbolo} | {tipo_operacion} | {config_optima["timeframe"]}',
                                ylabel='Precio',
                                addplot=apds,
                                volume=False,
                                returnfig=True,
-                               figsize=(14, 10),
-                               panel_ratios=(3, 1))
-            axes[2].set_ylim([0, 100])
-            axes[2].grid(True, alpha=0.3)
+                               figsize=(10, 6),  # Reducido de (14, 10) a (10, 6)
+                               panel_ratios=(2, 1))  # Mejor proporción
+                               
+            # Configurar axes del stochastic
+            if len(axes) > 1:
+                axes[1].set_ylim([0, 100])
+                axes[1].grid(True, alpha=0.3)
+                axes[1].set_ylabel('Stochastic')
+            
+            # Mejorar título y etiquetas
+            if len(axes) > 0:
+                axes[0].set_title(f'{simbolo} - {tipo_operacion}', fontsize=12, fontweight='bold')
+                axes[0].grid(True, alpha=0.3)
+            
+            # Guardar con configuración optimizada para Telegram
             buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+            plt.savefig(
+                buf, 
+                format='png', 
+                dpi=80,  # Reducido de 100 a 80 para archivos más pequeños
+                bbox_inches='tight', 
+                facecolor='white',
+                edgecolor='none',
+                optimize=True,  # Optimizar el archivo PNG
+                quality=85  # Balance entre calidad y tamaño
+            )
             buf.seek(0)
             plt.close(fig)
+            
+            # Verificar tamaño del archivo
+            size = len(buf.getvalue())
+            logger.info(f"📊 Gráfico generado: {size} bytes")
+            
+            # Si el archivo es muy grande, intentar una versión más simple
+            if size > 800000:  # 800KB límite para Telegram
+                logger.info(f"📊 Gráfico muy grande ({size} bytes), generando versión simplificada...")
+                return self._generar_grafico_simple(simbolo, tipo_operacion, df, apds)
+            
             return buf
+            
         except Exception as e:
             logger.warning(f"Error generando gráfico para {simbolo}: {e}")
-            # Intentar con estilo básico si falla el principal
+            # Intentar con gráfico simple si falla el complejo
             try:
-                fig, axes = mpf.plot(df, type='candle', style='classic',
-                                   title=f'{simbolo} | {tipo_operacion}',
-                                   ylabel='Precio',
-                                   addplot=apds[:2],  # Solo resistencia y soporte
-                                   volume=False,
-                                   returnfig=True,
-                                   figsize=(12, 8))
-                axes[1].set_ylim([0, 100])
-                buf = BytesIO()
-                plt.savefig(buf, format='png', dpi=80, bbox_inches='tight')
-                buf.seek(0)
-                plt.close(fig)
-                return buf
+                return self._generar_grafico_simple(simbolo, tipo_operacion, df, apds[:2])
             except Exception as e2:
                 logger.error(f"Error crítico generando gráfico: {e2}")
                 return None
+    
+    def _generar_grafico_simple(self, simbolo, tipo_operacion, df, apds):
+        """Generar gráfico simple como fallback"""
+        try:
+            plt.style.use('default')
+            fig, ax = plt.subplots(figsize=(8, 5))
+            
+            # Gráfico de velas simple
+            mpf.plot(df, type='candle', style='classic', ax=ax, addplot=apds[:2])
+            
+            # Título simple
+            ax.set_title(f'{simbolo} - {tipo_operacion}', fontsize=10)
+            ax.grid(True, alpha=0.3)
+            
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=60, bbox_inches='tight', facecolor='white')
+            buf.seek(0)
+            plt.close(fig)
+            
+            logger.info(f"📊 Gráfico simple generado: {len(buf.getvalue())} bytes")
+            return buf
+            
+        except Exception as e:
+            logger.error(f"Error generando gráfico simple: {e}")
+            return None
 
     def enviar_grafico_telegram(self, buf, token, chat_ids):
+        """Enviar gráfico a Telegram con manejo robusto de errores"""
         if not buf or not token or not chat_ids:
+            logger.warning("❌ Faltan parámetros para enviar gráfico: buf, token o chat_ids")
             return False
-        buf.seek(0)
+        
         exito = False
+        errores = []
+        
+        # Verificar que el buffer tenga contenido
+        current_pos = buf.tell()
+        buf.seek(0, 2)  # Ir al final
+        size = buf.tell()
+        buf.seek(current_pos)  # Volver a la posición original
+        
+        if size == 0:
+            logger.warning("❌ Buffer de gráfico está vacío")
+            return False
+        
+        logger.info(f"📊 Enviando gráfico de {size} bytes a {len(chat_ids)} chat(s)")
+        
         for chat_id in chat_ids:
-            url = f"https://api.telegram.org/bot{token}/sendPhoto"
             try:
+                # Preparar datos para envío
                 buf.seek(0)
-                files = {'photo': ('grafico.png', buf.read(), 'image/png')}
-                data = {'chat_id': chat_id}
-                r = requests.post(url, files=files, data=data, timeout=120)
-                if r.status_code == 200:
-                    exito = True
+                image_data = buf.read()
+                
+                # Verificar que tenemos datos válidos
+                if not image_data or len(image_data) == 0:
+                    error_msg = f"Buffer vacío para chat {chat_id}"
+                    errores.append(error_msg)
+                    logger.warning(f"❌ {error_msg}")
+                    continue
+                
+                # Preparar archivos para multipart
+                files = {
+                    'photo': (
+                        f'grafico_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png',
+                        image_data,
+                        'image/png'
+                    )
+                }
+                data = {
+                    'chat_id': str(chat_id),  # Asegurar que sea string
+                    'caption': f'📊 Gráfico de Trading - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+                }
+                
+                # Headers para la petición
+                headers = {
+                    'User-Agent': 'Bitget-Trading-Bot/1.0'
+                }
+                
+                url = f"https://api.telegram.org/bot{token}/sendPhoto"
+                
+                # Enviar con timeout razonable
+                response = requests.post(
+                    url,
+                    files=files,
+                    data=data,
+                    headers=headers,
+                    timeout=60  # Reducido de 120 a 60 segundos
+                )
+                
+                if response.status_code == 200:
+                    response_data = response.json()
+                    if response_data.get('ok'):
+                        exito = True
+                        logger.info(f"✅ Gráfico enviado exitosamente a chat {chat_id}")
+                    else:
+                        error_msg = f"Telegram API error: {response_data.get('description', 'Unknown error')}"
+                        errores.append(error_msg)
+                        logger.warning(f"❌ {error_msg}")
+                else:
+                    error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                    errores.append(error_msg)
+                    logger.warning(f"❌ Error HTTP enviando gráfico: {error_msg}")
+                    
+            except requests.exceptions.Timeout:
+                error_msg = f"Timeout enviando gráfico a chat {chat_id}"
+                errores.append(error_msg)
+                logger.warning(f"❌ {error_msg}")
+                
+            except requests.exceptions.ConnectionError:
+                error_msg = f"Error de conexión enviando gráfico a chat {chat_id}"
+                errores.append(error_msg)
+                logger.warning(f"❌ {error_msg}")
+                
             except Exception as e:
-                print(f"     ❌ Error enviando gráfico: {e}")
+                error_msg = f"Error inesperado enviando gráfico a chat {chat_id}: {str(e)}"
+                errores.append(error_msg)
+                logger.warning(f"❌ {error_msg}")
+        
+        # Log final
+        if exito:
+            logger.info("✅ Al menos un gráfico fue enviado exitosamente")
+        else:
+            logger.error(f"❌ Falló el envío de gráficos. Errores: {len(errores)}")
+            for error in errores:
+                logger.error(f"   - {error}")
+        
         return exito
 
     def _enviar_telegram_simple(self, mensaje, token, chat_ids):
