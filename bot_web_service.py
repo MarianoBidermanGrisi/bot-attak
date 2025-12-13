@@ -1343,13 +1343,14 @@ class TradingBot:
             breakout_x = [len(df) - 1]  # Índice del punto
             breakout_y = [precio_breakout]  # Precio del breakout
             
+                    # ... código anterior ...
+
             apds = [
-                mpf.make_addplot(df['Resistencia'], color='#FF4444', linestyle='--', width=2, panel=0),
-                mpf.make_addplot(df['Soporte'], color='#4444FF', linestyle='--', width=2, panel=0),
-                ax = axes[0]  # Panel principal  
-                ax.scatter(breakout_x[0], breakout_y[0], color='#FFD700', s=100, marker='o', zorder=5)
+            mpf.make_addplot(df['Resistencia'], color='#FF4444', linestyle='--', width=2, panel=0),
+            mpf.make_addplot(df['Soporte'], color='#4444FF', linestyle='--', width=2, panel=0),
             ]
-            
+
+            # Crear la gráfica y obtener los ejes
             fig, axes = mpf.plot(df, type='candle', style='nightclouds',
                                title=f'{simbolo} | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
                                ylabel='Precio',
@@ -1357,12 +1358,15 @@ class TradingBot:
                                volume=False,
                                returnfig=True,
                                figsize=(14, 8))
-            
-            buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
-            buf.seek(0)
-            plt.close(fig)
-            return buf
+
+           # Ahora sí puedes usar axes[0] para agregar el punto de breakout
+           axes[0].scatter(breakout_x[0], breakout_y[0], color='#FFD700', s=100, marker='o', zorder=5)
+
+           buf = BytesIO()
+           plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+           buf.seek(0)
+           plt.close(fig)
+           return buf
         except Exception as e:
             print(f"⚠️ Error generando gráfico de breakout: {e}")
             return None
