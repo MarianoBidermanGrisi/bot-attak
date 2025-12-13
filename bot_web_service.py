@@ -1339,13 +1339,15 @@ class TradingBot:
             
             # Marcar el punto de breakout
             precio_breakout = datos_mercado['precio_actual']
-            breakout_marker = [None] * len(df)
-            breakout_marker[-1] = precio_breakout
+            import numpy as np
+            breakout_x = [len(df) - 1]  # Índice del punto
+            breakout_y = [precio_breakout]  # Precio del breakout
             
             apds = [
                 mpf.make_addplot(df['Resistencia'], color='#FF4444', linestyle='--', width=2, panel=0),
                 mpf.make_addplot(df['Soporte'], color='#4444FF', linestyle='--', width=2, panel=0),
-                mpf.make_addplot(breakout_marker, color='#FFD700', marker='o', markersize=10, panel=0)
+                ax = axes[0]  # Panel principal  
+                ax.scatter(breakout_x[0], breakout_y[0], color='#FFD700', s=100, marker='o', zorder=5)
             ]
             
             fig, axes = mpf.plot(df, type='candle', style='nightclouds',
