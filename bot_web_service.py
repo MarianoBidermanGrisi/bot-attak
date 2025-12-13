@@ -1207,6 +1207,40 @@ class TradingBot:
         soporte = info_canal['soporte']
         direccion_canal = info_canal['direccion']
         
+        # Calcular Stochastic para incluir en el mensaje
+        try:
+            # Obtener los últimos valores de Stochastic
+            if len(datos_mercado['cierres']) >= 14:
+                # Calcular Stochastic básico
+                period = 14
+                stoch_k_values = []
+                for i in range(len(datos_mercado['cierres'])):
+                    if i < period - 1:
+                        stoch_k_values.append(50)
+                    else:
+                        highest_high = max(datos_mercado['maximos'][i-period+1:i+1])
+                        lowest_low = min(datos_mercado['minimos'][i-period+1:i+1])
+                        if highest_high == lowest_low:
+                            k = 50
+                        else:
+                            k = 100 * (datos_mercado['cierres'][i] - lowest_low) / (highest_high - lowest_low)
+                        stoch_k_values.append(k)
+                
+                stoch_actual = stoch_k_values[-1] if stoch_k_values else 50
+                
+                if stoch_actual <= 30:
+                    estado_stoch = "📉 SOBREVENTA (buen momento para LONG)"
+                elif stoch_actual >= 70:
+                    estado_stoch = "📈 SOBRECOMPRA (buen momento para SHORT)"
+                else:
+                    estado_stoch = "➖ NEUTRO"
+            else:
+                stoch_actual = 50
+                estado_stoch = "➖ NEUTRO (datos insuficientes)"
+        except Exception:
+            stoch_actual = 50
+            estado_stoch = "➖ NEUTRO (error cálculo)"
+        
         # Determinar tipo de ruptura
         if tipo_breakout == "BREAKOUT_LONG":
             emoji_principal = "🚀"
@@ -1219,7 +1253,7 @@ class TradingBot:
             tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
-            expectativa = "posible entrada en sort si el precio reingresa al canal"
+            expectativa = "posible entrada en short si el precio reingresa al canal"
         
         mensaje = f"""
 {emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
@@ -1229,6 +1263,7 @@ class TradingBot:
 👁️ Máximo 30 minutos para confirmación
 📍 {expectativa}
 {nivel_roto}
+📊 <b>Stochastic:</b> {stoch_actual:.1f} - {estado_stoch}
         """
         
         token = self.config.get('telegram_token')
@@ -1369,6 +1404,39 @@ class TradingBot:
             df['Resistencia'] = resistencia_values
             df['Soporte'] = soporte_values
             
+            # CALCULAR STOCHASTIC (FALTABA EN LA VERSIÓN MODIFICADA)
+            period = 14
+            k_period = 3
+            d_period = 3
+            stoch_k_values = []
+            for i in range(len(df)):
+                if i < period - 1:
+                    stoch_k_values.append(50)
+                else:
+                    highest_high = df['High'].iloc[i-period+1:i+1].max()
+                    lowest_low = df['Low'].iloc[i-period+1:i+1].min()
+                    if highest_high == lowest_low:
+                        k = 50
+                    else:
+                        k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
+                    stoch_k_values.append(k)
+            k_smoothed = []
+            for i in range(len(stoch_k_values)):
+                if i < k_period - 1:
+                    k_smoothed.append(stoch_k_values[i])
+                else:
+                    k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
+                    k_smoothed.append(k_avg)
+            stoch_d_values = []
+            for i in range(len(k_smoothed)):
+                if i < d_period - 1:
+                    stoch_d_values.append(k_smoothed[i])
+                else:
+                    d = sum(k_smoothed[i-d_period+1:i+1]) / d_period
+                    stoch_d_values.append(d)
+            df['Stoch_K'] = k_smoothed
+            df['Stoch_D'] = stoch_d_values
+            
             # SOLUCIÓN AL ERROR: Usar numpy arrays y scatter plot
             precio_breakout = datos_mercado.get('precio_actual') or df['Close'].iloc[-1]
             
@@ -1379,14 +1447,24 @@ class TradingBot:
             print(f"     📈 Precio breakout: {precio_breakout:.8f}")
             print(f"     📈 Resistencias calculadas: {len(resistencia_values)} puntos")
             print(f"     📈 Soportes calculados: {len(soporte_values)} puntos")
+            print(f"     📊 Stochastic calculado: {len(df)} puntos")
             
-            # Crear gráfico SIN marker problemático
+            # Crear gráfico CON STOCHASTIC
             apds = [
                 mpf.make_addplot(resistencia_array, color='#FF4444', linestyle='--', width=2, panel=0),
-                mpf.make_addplot(soporte_array, color='#4444FF', linestyle='--', width=2, panel=0)
+                mpf.make_addplot(soporte_array, color='#4444FF', linestyle='--', width=2, panel=0),
+                # AGREGAR STOCHASTIC AL PANEL 1
+                mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'),
+                mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1)
             ]
             
-            # Generar gráfico base
+            # Agregar líneas de sobrecompra/sobreventa para Stochastic
+            overbought = [80] * len(df)
+            oversold = [20] * len(df)
+            apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
+            apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
+            
+            # Generar gráfico base CON STOCHASTIC
             try:
                 fig, axes = mpf.plot(df, type='candle', style='charles',
                                    title=f'{simbolo} | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
@@ -1394,10 +1472,17 @@ class TradingBot:
                                    addplot=apds,
                                    volume=False,
                                    returnfig=True,
-                                   figsize=(12, 8))
+                                   figsize=(14, 10),  # Aumentado para incluir panel de Stochastic
+                                   panel_ratios=(3, 1))  # Panel principal:Panel Stochastic = 3:1
+                
+                # Configurar el panel del Stochastic
+                if len(axes) > 1:
+                    axes[1].set_ylim([0, 100])  # Rango típico del Stochastic
+                    axes[1].grid(True, alpha=0.3)
+                    axes[1].set_ylabel('Stochastic', fontsize=10)
                 
                 # Agregar marker manualmente con matplotlib
-                ax = axes[0]  # Panel principal
+                ax = axes[0]  # Panel principal de precios
                 ax.scatter([len(df) - 1], [precio_breakout], color='#FFD700', s=100, marker='o', 
                           zorder=5, label='Breakout Point')
                 
@@ -1419,7 +1504,12 @@ class TradingBot:
                                    addplot=apds,
                                    volume=False,
                                    returnfig=True,
-                                   figsize=(12, 8))
+                                   figsize=(14, 10),
+                                   panel_ratios=(3, 1))
+                # Configurar panel del Stochastic en versión básica
+                if len(axes) > 1:
+                    axes[1].set_ylim([0, 100])
+                    axes[1].grid(True, alpha=0.3)
             
             # Guardar gráfico
             buf = BytesIO()
