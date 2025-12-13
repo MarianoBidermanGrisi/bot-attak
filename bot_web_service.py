@@ -1,5 +1,5 @@
 # bot_web_service.py
-# Adaptación para Render del bot Breakout + Reentry - VERSIÓN CORREGIDA
+# Adaptación para Render del bot Breakout + Reentry - VERSIÓN CORREGIDA COMPLETA
 import requests
 import time
 import json
@@ -15,20 +15,21 @@ import csv
 import itertools
 import statistics
 import random
-import matplotlib
-# CORRECCIÓN 1: Configuración más robusta de matplotlib para producción
-matplotlib.use('Agg')  # Backend sin GUI para entornos de producción
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-import pandas as pd
-from io import BytesIO
-from flask import Flask, request, jsonify
-import threading
 import logging
+from io import BytesIO
 
 # Configurar logging básico
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# CORRECCIÓN 1: Configuración robusta de matplotlib para producción
+import matplotlib
+matplotlib.use('Agg')  # Backend sin GUI para entornos de producción
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import pandas as pd
+from flask import Flask, request, jsonify
+import threading
 
 # CORRECCIÓN 2: Configuración global de matplotlib para mejor compatibilidad
 def setup_matplotlib_config():
@@ -38,7 +39,7 @@ def setup_matplotlib_config():
         plt.switch_backend('Agg')
         
         # Configurar fuentes para mejor compatibilidad
-        plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Liberation Sans']
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Liberation Sans', 'Noto Sans CJK SC']
         plt.rcParams['axes.unicode_minus'] = False
         
         # Configurar estilo por defecto para mejor rendimiento
@@ -51,6 +52,7 @@ def setup_matplotlib_config():
         plt.rcParams['savefig.facecolor'] = 'white'
         plt.rcParams['savefig.edgecolor'] = 'none'
         plt.rcParams['savefig.optimize'] = True
+        plt.rcParams['savefig.pad_inches'] = 0.1
         
         logger.info("✅ Matplotlib configurado para producción")
         return True
@@ -60,31 +62,6 @@ def setup_matplotlib_config():
 
 # Aplicar configuración inicial
 setup_matplotlib_config()
-
-# ---------------------------
-# [INICIO DEL CÓDIGO DEL BOT NUEVO]
-# Copiado íntegro de Pasted_Text_1763228298547.txt y corregido para Render
-# ---------------------------
-
-# bot_breakout_reentry.py
-# VERSIÓN COMPLETA con estrategia Breakout + Reentry
-import requests
-import time
-import json
-import os
-from datetime import datetime, timedelta
-import numpy as np
-import math
-import csv
-import itertools
-import statistics
-import random
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-import pandas as pd
-from io import BytesIO
 
 # ---------------------------
 # OPTIMIZADOR IA
@@ -1131,18 +1108,21 @@ class TradingBot:
                                 else:
                                     pnl_percent = ((precio_entrada - precio_salida) / precio_entrada) * 100
                                 
-                                # Registrar operación
+                                # Registrar operación cerrada
+                                tiempo_entrada = datetime.fromisoformat(operacion['timestamp_entrada'])
+                                duracion_minutos = (datetime.now() - tiempo_entrada).total_seconds() / 60
+                                
                                 datos_operacion = {
                                     'timestamp': datetime.now().isoformat(),
                                     'symbol': simbolo,
                                     'tipo': tipo,
                                     'precio_entrada': precio_entrada,
-                                    'take_profit': operacion['take_profit'],
-                                    'stop_loss': operacion['stop_loss'],
+                                    'take_profit': operacion.get('take_profit', 0),
+                                    'stop_loss': operacion.get('stop_loss', 0),
                                     'precio_salida': precio_salida,
                                     'resultado': resultado,
                                     'pnl_percent': pnl_percent,
-                                    'duracion_minutos': (datetime.now() - datetime.fromisoformat(operacion['timestamp_entrada'])).total_seconds() / 60,
+                                    'duracion_minutos': duracion_minutos,
                                     'angulo_tendencia': operacion.get('angulo_tendencia', 0),
                                     'pearson': operacion.get('pearson', 0),
                                     'r2_score': operacion.get('r2_score', 0),
@@ -1157,7 +1137,7 @@ class TradingBot:
                                     'operacion_ejecutada': operacion.get('operacion_ejecutada', False)
                                 }
                                 
-                                # Enviar notificación de cierre
+                                # Enviar mensaje de cierre
                                 mensaje_cierre = self.generar_mensaje_cierre(datos_operacion)
                                 token = self.config.get('telegram_token')
                                 chats = self.config.get('telegram_chat_ids', [])
@@ -1167,408 +1147,325 @@ class TradingBot:
                                     except Exception:
                                         pass
                                 
-                                # Registrar en log
+                                # Registrar operación
                                 self.registrar_operacion(datos_operacion)
                                 operaciones_cerradas.append(simbolo)
-                        
-                        # Limpiar del estado interno
-                        del self.operaciones_activas[simbolo]
-                        if simbolo in self.senales_enviadas:
-                            self.senales_enviadas.remove(simbolo)
-                        
-                        self.operaciones_desde_optimizacion += 1
-                        print(f"     📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
+                                
+                                # Remover de operaciones activas
+                                del self.operaciones_activas[simbolo]
+                                if simbolo in self.senales_enviadas:
+                                    self.senales_enviadas.remove(simbolo)
+                                
+                                self.operaciones_desde_optimizacion += 1
+                                print(f"     📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
                 
                 except Exception as e:
-                    logger.error(f"Error verificando operación {simbolo}: {e}")
+                    logger.warning(f"⚠️ Error verificando {simbolo}: {e}")
                     continue
                     
         except Exception as e:
-            logger.error(f"Error verificando operaciones reales: {e}")
+            logger.error(f"❌ Error verificando operaciones reales: {e}")
         
         return operaciones_cerradas
 
     def obtener_datos_mercado_config(self, symbol, timeframe, num_velas):
-        """Obtener datos de mercado usando la configuración óptima"""
+        """Obtener datos de mercado usando la mejor fuente disponible"""
         try:
-            # Intentar con Bitget primero si está disponible
+            # Intentar primero con Bitget si está disponible
             if self.bitget_client:
                 klines = self.bitget_client.get_klines(symbol, timeframe, num_velas)
                 if klines:
-                    cierres = [float(k[4]) for k in klines]
-                    maximos = [float(k[2]) for k in klines]
-                    minimos = [float(k[3]) for k in klines]
-                    return {
-                        'cierres': cierres,
-                        'maximos': maximos,
-                        'minimos': minimos,
-                        'precio_actual': cierres[-1] if cierres else 0
-                    }
+                    return self.procesar_klines_bitget(klines)
             
             # Fallback a Binance
+            return self.obtener_datos_binance(symbol, timeframe, num_velas)
+            
+        except Exception as e:
+            logger.warning(f"Error obteniendo datos para {symbol}: {e}")
+            return None
+
+    def procesar_klines_bitget(self, klines):
+        """Procesar klines de Bitget al formato estándar"""
+        try:
+            cierres = []
+            maximos = []
+            minimos = []
+            volumenes = []
+            timestamps = []
+            
+            # Bitget devuelve: [timestamp, open, high, low, close, volume, ...]
+            for kline in klines:
+                timestamps.append(int(kline[0]))
+                cierres.append(float(kline[4]))
+                maximos.append(float(kline[2]))
+                minimos.append(float(kline[3]))
+                volumenes.append(float(kline[5]))
+            
+            return {
+                'cierres': cierres,
+                'maximos': maximos,
+                'minimos': minimos,
+                'volumenes': volumenes,
+                'timestamps': timestamps,
+                'precio_actual': cierres[-1] if cierres else 0,
+                'precio_anterior': cierres[-2] if len(cierres) > 1 else 0
+            }
+        except Exception as e:
+            logger.error(f"Error procesando klines de Bitget: {e}")
+            return None
+
+    def obtener_datos_binance(self, symbol, timeframe, num_velas):
+        """Obtener datos de Binance como fallback"""
+        try:
             url = "https://api.binance.com/api/v3/klines"
             params = {
                 'symbol': symbol,
                 'interval': timeframe,
                 'limit': num_velas
             }
+            
             response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
             klines = response.json()
             
-            cierres = [float(k[4]) for k in klines]
-            maximos = [float(k[2]) for k in klines]
-            minimos = [float(k[3]) for k in klines]
+            cierres = []
+            maximos = []
+            minimos = []
+            volumenes = []
+            timestamps = []
+            
+            for kline in klines:
+                timestamps.append(int(kline[0]))
+                cierres.append(float(kline[4]))
+                maximos.append(float(kline[2]))
+                minimos.append(float(kline[3]))
+                volumenes.append(float(kline[5]))
+            
             return {
                 'cierres': cierres,
                 'maximos': maximos,
                 'minimos': minimos,
-                'precio_actual': cierres[-1] if cierres else 0
+                'volumenes': volumenes,
+                'timestamps': timestamps,
+                'precio_actual': cierres[-1] if cierres else 0,
+                'precio_anterior': cierres[-2] if len(cierres) > 1 else 0
             }
-            
         except Exception as e:
-            logger.error(f"Error obteniendo datos de {symbol}: {e}")
+            logger.error(f"Error obteniendo datos de Binance: {e}")
             return None
 
-    def calcular_canal_precios(self, cierres, maximos, minimos, num_velas_recientes):
-        """Calcular canal de precios y análisis técnico"""
-        if len(cierres) < num_velas_recientes:
+    def obtener_datos_mercado(self, symbol, timeframe, num_velas):
+        """Obtener datos de mercado optimizado"""
+        return self.obtener_datos_mercado_config(symbol, timeframe, num_velas)
+
+    def calcular_analisis_tecnico(self, symbol, timeframe, num_velas):
+        """Análisis técnico completo optimizado"""
+        datos = self.obtener_datos_mercado(symbol, timeframe, num_velas)
+        if not datos or len(datos['cierres']) < 30:
             return None
         
-        # Usar las velas más recientes
-        cierres_recientes = cierres[-num_velas_recientes:]
-        maximos_recientes = maximos[-num_velas_recientes:]
-        minimos_recientes = minimos[-num_velas_recientes:]
+        cierres = datos['cierres']
+        maximos = datos['maximos']
+        minimos = datos['minimos']
         
-        # Regresión lineal para resistencia y soporte
-        x = list(range(len(cierres_recientes)))
-        pendiente_res, intercepto_res = self.calcular_regresion_lineal(x, maximos_recientes)
-        pendiente_sop, intercepto_sop = self.calcular_regresion_lineal(x, minimos_recientes)
+        # Calcular regresión lineal para el canal
+        tiempos = list(range(len(cierres)))
+        pendiente_canal, intercepto_canal = self.calcular_regresion_lineal(tiempos, cierres)
         
-        if pendiente_res is None or pendiente_sop is None:
-            return None
+        # Calcular resistencia y soporte
+        resistencia, soporte, resistencia_std, soporte_std = self.calcular_resistencia_soporte(cierres)
         
-        # Calcular valores actuales del canal
-        precio_actual = cierres_recientes[-1]
-        resistencia = pendiente_res * len(x) + intercepto_res
-        soporte = pendiente_sop * len(x) + intercepto_sop
+        # Calcular métricas de tendencia
+        pearson, angulo_grados = self.calcular_pearson_y_angulo(tiempos, cierres)
         
-        # Calcular métricas técnicas
-        pearson, angulo_tendencia = self.calcular_pearson_y_angulo(x, cierres_recientes)
-        r2_score = self.calcular_r2(cierres_recientes, x, pendiente_res, intercepto_res)
+        # Calcular R²
+        r2_score = self.calcular_r2(cierres, tiempos, pendiente_canal, intercepto_canal)
         
         # Calcular stochastic
-        stoch_k, stoch_d = self.calcular_stochastic({
-            'cierres': cierres_recientes,
-            'maximos': maximos_recientes,
-            'minimos': minimos_recientes
-        })
+        stoch_k, stoch_d = self.calcular_stochastic(datos)
+        
+        # Clasificar fuerza
+        fuerza_texto, nivel_fuerza = self.clasificar_fuerza_tendencia(angulo_grados)
         
         # Calcular ancho del canal
         ancho_canal = resistencia - soporte
-        ancho_canal_porcentual = (ancho_canal / precio_actual) * 100
-        
-        # Determinar fuerza de la tendencia
-        fuerza_tendencia, nivel_fuerza = self.clasificar_fuerza_tendencia(angulo_tendencia)
+        ancho_canal_porcentual = (ancho_canal / cierres[-1]) * 100
         
         return {
+            'pendiente_canal': pendiente_canal,
+            'intercepto_canal': intercepto_canal,
             'resistencia': resistencia,
             'soporte': soporte,
-            'pendiente_resistencia': pendiente_res,
-            'pendiente_soporte': pendiente_sop,
+            'resistencia_std': resistencia_std,
+            'soporte_std': soporte_std,
+            'coeficiente_pearson': pearson,
+            'angulo_tendencia': angulo_grados,
+            'r2_score': r2_score,
             'ancho_canal': ancho_canal,
             'ancho_canal_porcentual': ancho_canal_porcentual,
-            'angulo_tendencia': angulo_tendencia,
-            'coeficiente_pearson': pearson,
-            'r2_score': r2_score,
             'nivel_fuerza': nivel_fuerza,
-            'fuerza_tendencia': fuerza_tendencia,
+            'fuerza_texto': fuerza_texto,
             'stoch_k': stoch_k,
             'stoch_d': stoch_d,
-            'precio_actual': precio_actual
+            'datos_mercado': datos
         }
 
-    def buscar_breakout(self, simbolo, config_optima):
-        """Detectar breakout según estrategia mejorada"""
-        datos = self.obtener_datos_mercado_config(
-            simbolo, 
-            config_optima['timeframe'], 
-            config_optima['num_velas']
-        )
+    def calcular_resistencia_soporte(self, cierres):
+        """Calcular resistencia y soporte con regresión lineal"""
+        n = len(cierres)
+        if n < 20:
+            return cierres[-1] * 1.02, cierres[-1] * 0.98, 0.01, 0.01
         
-        if not datos:
-            return None, None
+        # Usar las últimas 20 velas para calcular soporte/resistencia
+        ventana = min(20, n // 2)
+        cierres_recientes = cierres[-ventana:]
+        tiempos = list(range(len(cierres_recientes)))
         
-        info_canal = self.calcular_canal_precios(
-            datos['cierres'], 
-            datos['maximos'], 
-            datos['minimos'], 
-            config_optima['num_velas']
-        )
+        pendiente_res, intercepto_res = self.calcular_regresion_lineal(tiempos, cierres_recientes)
         
-        if not info_canal:
-            return None, None
+        # Línea de resistencia (tope)
+        resistencia = pendiente_res * (len(tiempos) - 1) + intercepto_res
         
-        precio_actual = datos['precio_actual']
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        ancho_canal_porcentual = info_canal['ancho_canal_porcentual']
+        # Línea de soporte (base) - usar mínimos locales
+        minimos_locales = []
+        for i in range(1, len(cierres_recientes) - 1):
+            if cierres_recientes[i] <= cierres_recientes[i-1] and cierres_recientes[i] <= cierres_recientes[i+1]:
+                minimos_locales.append(cierres_recientes[i])
         
-        # Verificar si hay un breakout válido
-        entrada_margin = self.config.get('entry_margin', 0.001)
+        if minimos_locales:
+            soporte = statistics.median(minimos_locales)
+        else:
+            soporte = resistencia * 0.95
         
-        # CORRECCIÓN 3: Mejoras en la detección de breakouts
-        if precio_actual > resistencia * (1 + entrada_margin):
-            # Breakout alcista
-            if (abs(info_canal['angulo_tendencia']) >= self.config.get('trend_threshold_degrees', 16) and
-                abs(info_canal['angulo_tendencia']) >= self.config.get('min_trend_strength_degrees', 16) and
-                abs(info_canal['coeficiente_pearson']) >= 0.4 and
-                info_canal['r2_score'] >= 0.4 and
-                ancho_canal_porcentual >= self.config.get('min_channel_width_percent', 4)):
-                
-                # Verificar condiciones de Stochastic para entrada
-                if info_canal['stoch_k'] > 20 and info_canal['stoch_d'] > 20:
-                    return 'LONG', info_canal
+        # Calcular desviaciones estándar
+        resistencias = [resistencia] * len(cierres_recientes)
+        resistencias_reales = cierres_recientes
+        resistencia_std = statistics.stdev([abs(r - s) for r, s in zip(resistencias, resistencias_reales)]) if len(resistencias_reales) > 1 else 0.01
         
-        elif precio_actual < soporte * (1 - entrada_margin):
-            # Breakout bajista
-            if (abs(info_canal['angulo_tendencia']) >= self.config.get('trend_threshold_degrees', 16) and
-                abs(info_canal['angulo_tendencia']) >= self.config.get('min_trend_strength_degrees', 16) and
-                abs(info_canal['coeficiente_pearson']) >= 0.4 and
-                info_canal['r2_score'] >= 0.4 and
-                ancho_canal_porcentual >= self.config.get('min_channel_width_percent', 4)):
-                
-                # Verificar condiciones de Stochastic para entrada
-                if info_canal['stoch_k'] < 80 and info_canal['stoch_d'] < 80:
-                    return 'SHORT', info_canal
+        soportes = [soporte] * len(cierres_recientes)
+        soporte_std = statistics.stdev([abs(s - r) for s, r in zip(soportes, cierres_recientes)]) if len(cierres_recientes) > 1 else 0.01
         
-        return None, None
+        return resistencia, soporte, resistencia_std, soporte_std
 
-    def detectar_reentry(self, simbolo, tipo_breakout, precio_breakout, config_optima):
-        """Detectar oportunidades de reentry después de un breakout"""
-        datos = self.obtener_datos_mercado_config(
-            simbolo, 
-            config_optima['timeframe'], 
-            config_optima['num_velas']
-        )
-        
-        if not datos:
-            return None
-        
-        precio_actual = datos['precio_actual']
-        
-        # Verificar si el precio regresó al nivel del breakout
-        if tipo_breakout == 'LONG':
-            # Para breakout alcista, buscar reentry cerca del nivel de breakout
-            if precio_actual <= precio_breakout * 1.002:  # 0.2% de tolerancia
-                # Verificar condiciones técnicas
-                info_canal = self.calcular_canal_precios(
-                    datos['cierres'], 
-                    datos['maximos'], 
-                    datos['minimos'], 
-                    config_optima['num_velas']
-                )
+    def detectar_breakout(self, info_canal, datos_mercado):
+        """Detectar breakout mejorado"""
+        try:
+            precio_actual = datos_mercado['precio_actual']
+            precio_anterior = datos_mercado['precio_anterior']
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            
+            # Calcular desviaciones estándar
+            resistencias = [resistencia] * len(datos_mercado['cierres'])
+            resistencias_reales = datos_mercado['cierres']
+            resistencia_std = statistics.stdev([abs(r - s) for r, s in zip(resistencias, resistencias_reales)]) if len(resistencias_reales) > 1 else 0.01
+            
+            # Detectar breakout alcista
+            if precio_actual > resistencia + (resistencia_std * 0.5) and precio_anterior <= resistencia:
+                # Confirmar con volumen si está disponible
+                volumen_ok = True
+                if len(datos_mercado['volumenes']) >= 2:
+                    volumen_actual = datos_mercado['volumenes'][-1]
+                    volumen_promedio = statistics.mean(datos_mercado['volumenes'][-10:]) if len(datos_mercado['volumenes']) >= 10 else volumen_actual
+                    volumen_ok = volumen_actual > volumen_promedio * 1.1
                 
-                if info_canal and info_canal['stoch_k'] > 30 and info_canal['stoch_d'] > 30:
+                if volumen_ok:
                     return 'LONG'
-        
-        elif tipo_breakout == 'SHORT':
-            # Para breakout bajista, buscar reentry cerca del nivel de breakout
-            if precio_actual >= precio_breakout * 0.998:  # 0.2% de tolerancia
-                # Verificar condiciones técnicas
-                info_canal = self.calcular_canal_precios(
-                    datos['cierres'], 
-                    datos['maximos'], 
-                    datos['minimos'], 
-                    config_optima['num_velas']
-                )
+            
+            # Detectar breakout bajista
+            if precio_actual < soporte - (resistencia_std * 0.5) and precio_anterior >= soporte:
+                # Confirmar con volumen
+                volumen_ok = True
+                if len(datos_mercado['volumenes']) >= 2:
+                    volumen_actual = datos_mercado['volumenes'][-1]
+                    volumen_promedio = statistics.mean(datos_mercado['volumenes'][-10:]) if len(datos_mercado['volumenes']) >= 10 else volumen_actual
+                    volumen_ok = volumen_actual > volumen_promedio * 1.1
                 
-                if info_canal and info_canal['stoch_k'] < 70 and info_canal['stoch_d'] < 70:
+                if volumen_ok:
                     return 'SHORT'
-        
-        return None
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error detectando breakout: {e}")
+            return None
 
     def escanear_mercado(self):
-        """Escanear el mercado en busca de oportunidades de trading"""
+        """Escanear mercado mejorado con optimizaciones"""
         nuevas_senales = 0
-        symbols = self.config.get('symbols', [])
-        timeframes = self.config.get('timeframes', [])
-        velas_options = self.config.get('velas_options', [])
         
-        for symbol in symbols:
-            if symbol in self.operaciones_activas:
-                continue  # Ya hay una operación activa para este símbolo
-            
-            # Verificar si ya se envió una señal recientemente para este símbolo
-            if symbol in self.senales_enviadas:
-                continue
-            
-            # NUEVO: Verificar oportunidades de reentry
-            if symbol in self.esperando_reentry:
-                info_reentry = self.esperando_reentry[symbol]
-                config_optima = self.config_optima_por_simbolo.get(symbol)
-                
-                if config_optima:
-                    tipo_reentry = self.detectar_reentry(
-                        symbol, 
-                        info_reentry['tipo'], 
-                        info_reentry['precio_breakout'], 
-                        config_optima
-                    )
-                    
-                    if tipo_reentry:
-                        logger.info(f"🔄 REENTRY DETECTADO para {symbol}")
-                        del self.esperando_reentry[symbol]
-                        self.procesar_senal_reentry(symbol, tipo_reentry, info_reentry['config'])
-                        nuevas_senales += 1
-                        continue
-                    else:
-                        # Verificar si ya pasó mucho tiempo desde el breakout
-                        tiempo_transcurrido = (datetime.now() - info_reentry['timestamp']).total_seconds() / 3600
-                        if tiempo_transcurrido > 4:  # 4 horas máximo esperando reentry
-                            logger.info(f"⏰ Tiempo límite de reentry alcanzado para {symbol}")
-                            del self.esperando_reentry[symbol]
-            
-            # Obtener la mejor configuración para este símbolo
-            config_optima = self.obtener_config_optima(symbol, timeframes, velas_options)
-            if not config_optima:
-                continue
-            
-            # Detectar breakouts
-            tipo_operacion, info_canal = self.buscar_breakout(symbol, config_optima)
-            
-            if tipo_operacion:
-                # Verificar si ya se envió una señal similar recientemente
-                senal_key = f"{symbol}_{tipo_operacion}_{config_optima['timeframe']}"
-                if senal_key in self.senales_enviadas:
+        for symbol in self.config.get('symbols', []):
+            try:
+                # Verificar si ya tenemos una operación activa
+                if symbol in self.operaciones_activas or symbol in self.senales_enviadas:
                     continue
                 
-                logger.info(f"🚀 BREAKOUT DETECTADO para {symbol}: {tipo_operacion}")
+                # Obtener configuración óptima para este símbolo
+                config_optima = self.obtener_configuracion_optima(symbol)
+                if not config_optima:
+                    continue
                 
-                # NUEVO: Marcar como esperando reentry en lugar de ejecutar inmediatamente
-                self.esperando_reentry[symbol] = {
-                    'tipo': tipo_operacion,
-                    'timestamp': datetime.now(),
-                    'precio_breakout': info_canal['precio_actual'],
-                    'config': config_optima
-                }
+                # Análisis técnico completo
+                info_canal = self.calcular_analisis_tecnico(symbol, config_optima['timeframe'], config_optima['num_velas'])
+                if not info_canal:
+                    continue
                 
-                # Enviar notificación de breakout detectado
-                self.enviar_notificacion_breakout(symbol, tipo_operacion, info_canal, config_optima)
-                nuevas_senales += 1
+                # Verificar criterios de calidad
+                if not self.verificar_criterios_calidad(info_canal):
+                    continue
+                
+                # Detectar breakout
+                breakout_info = self.detectar_breakout(info_canal, info_canal['datos_mercado'])
+                
+                if breakout_info:
+                    # Procesar señal
+                    self.procesar_senal_breakout(symbol, config_optima, info_canal, breakout_info)
+                    nuevas_senales += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error escaneando {symbol}: {e}")
+                continue
         
         return nuevas_senales
 
-    def enviar_notificacion_breakout(self, symbol, tipo_operacion, info_canal, config_optima):
-        """Enviar notificación de breakout detectado"""
-        try:
-            token = self.config.get('telegram_token')
-            chat_ids = self.config.get('telegram_chat_ids', [])
-            
-            if not token or not chat_ids:
-                return
-            
-            mensaje = f"""
-🔍 <b>BREAKOUT DETECTADO - {symbol}</b>
-📊 <b>Tipo:</b> {tipo_operacion}
-⚡ <b>Estado:</b> Esperando Reentry
-🎯 <b>TF:</b> {config_optima['timeframe']} ({config_optima['num_velas']} velas)
-📈 <b>Precio Actual:</b> {info_canal['precio_actual']:.8f}
-📏 <b>Ancho Canal:</b> {info_canal['ancho_canal_porcentual']:.1f}%
-🔍 <b>Ángulo:</b> {info_canal['angulo_tendencia']:.1f}°
-📊 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
-🎯 <b>R²:</b> {info_canal['r2_score']:.3f}
-🕐 <b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-⏳ <i>Esperando confirmación de reentry para ejecutar...</i>
-            """
-            
-            self._enviar_telegram_simple(mensaje, token, chat_ids)
-            
-        except Exception as e:
-            logger.error(f"Error enviando notificación de breakout: {e}")
-
-    def procesar_senal_reentry(self, symbol, tipo_operacion, config_optima):
-        """Procesar señal de reentry y ejecutar operación"""
-        try:
-            # Obtener datos actualizados
-            datos = self.obtener_datos_mercado_config(
-                symbol, 
-                config_optima['timeframe'], 
-                config_optima['num_velas']
-            )
-            
-            if not datos:
-                return
-            
-            info_canal = self.calcular_canal_precios(
-                datos['cierres'], 
-                datos['maximos'], 
-                datos['minimos'], 
-                config_optima['num_velas']
-            )
-            
-            if not info_canal:
-                return
-            
-            precio_entrada = datos['precio_actual']
-            
-            # Calcular TP y SL
-            if tipo_operacion == "LONG":
-                sl_porcentaje = 0.02
-                tp_porcentaje = 0.04
-                sl = precio_entrada * (1 - sl_porcentaje)
-                tp = precio_entrada * (1 + tp_porcentaje)
-            else:
-                sl_porcentaje = 0.02
-                tp_porcentaje = 0.04
-                sl = precio_entrada * (1 + sl_porcentaje)
-                tp = precio_entrada * (1 - tp_porcentaje)
-            
-            # Generar mensaje de señal
-            mensaje = self.generar_mensaje_senal(symbol, tipo_operacion, precio_entrada, tp, sl, info_canal, config_optima, breakout_info=None)
-            
-            # Enviar señal completa (gráfico + mensaje)
-            self.enviar_senal_completa(symbol, tipo_operacion, precio_entrada, tp, sl, info_canal, config_optima, mensaje, breakout_info=None)
-            
-        except Exception as e:
-            logger.error(f"Error procesando señal de reentry para {symbol}: {e}")
-
-    def obtener_config_optima(self, symbol, timeframes, velas_options):
-        """Obtener la configuración óptima para un símbolo"""
-        # Verificar si ya tenemos una configuración guardada
+    def obtener_configuracion_optima(self, symbol):
+        """Obtener configuración óptima para un símbolo"""
+        # Usar configuración en caché si existe
         if symbol in self.config_optima_por_simbolo:
             return self.config_optima_por_simbolo[symbol]
         
-        # Verificar cuándo fue la última búsqueda para este símbolo
-        ahora = datetime.now()
-        ultima_busqueda = self.ultima_busqueda_config.get(symbol)
+        # Evitar búsquedas muy frecuentes
+        ultima_busqueda = self.ultima_busqueda_config.get(symbol, datetime.min)
+        if (datetime.now() - ultima_busqueda).total_seconds() < 300:  # 5 minutos
+            # Usar configuración por defecto
+            default_config = {
+                'timeframe': random.choice(self.config.get('timeframes', ['5m'])),
+                'num_velas': random.choice(self.config.get('velas_options', [100])),
+                'score': 25
+            }
+            return default_config
         
-        if ultima_busqueda and (ahora - ultima_busqueda).total_seconds() < 7200:  # 2 horas
-            return None  # Esperar antes de buscar nuevamente
-        
-        # Buscar la mejor configuración
+        # Buscar mejor configuración
         mejor_config = None
         mejor_score = -1
         
+        timeframes = self.config.get('timeframes', ['5m', '15m', '30m', '1h', '4h'])
+        velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
+        
         # Priorizar timeframes cortos
-        for timeframe in timeframes:
+        timeframes_ordenados = ['1m', '3m', '5m', '15m', '30m', '1h', '4h']
+        timeframes_disponibles = [tf for tf in timeframes_ordenados if tf in timeframes]
+        if not timeframes_disponibles:
+            timeframes_disponibles = timeframes
+        
+        for timeframe in timeframes_disponibles:
             for num_velas in velas_options:
                 try:
-                    datos = self.obtener_datos_mercado_config(symbol, timeframe, num_velas)
-                    if not datos:
-                        continue
-                    
-                    info_canal = self.calcular_canal_precios(
-                        datos['cierres'], 
-                        datos['maximos'], 
-                        datos['minimos'], 
-                        num_velas
-                    )
-                    
+                    info_canal = self.calcular_analisis_tecnico(symbol, timeframe, num_velas)
                     if not info_canal:
                         continue
                     
-                    # Evaluar calidad de la configuración
-                    score = self.evaluar_configuracion(info_canal)
+                    score = self.calcular_score_configuracion(info_canal)
                     
                     if score > mejor_score:
                         mejor_score = score
@@ -1577,219 +1474,203 @@ class TradingBot:
                             'num_velas': num_velas,
                             'score': score
                         }
-                
+                        
                 except Exception as e:
-                    logger.warning(f"Error evaluando config para {symbol} {timeframe} {num_velas}: {e}")
                     continue
         
-        if mejor_config and mejor_score > 0:
-            # Guardar la configuración
+        # Guardar configuración encontrada
+        if mejor_config:
             self.config_optima_por_simbolo[symbol] = mejor_config
-            self.ultima_busqueda_config[symbol] = ahora
+            self.ultima_busqueda_config[symbol] = datetime.now()
             logger.info(f"✅ Nueva configuración para {symbol}: {mejor_config}")
-            return mejor_config
+        else:
+            # Configuración por defecto
+            mejor_config = {
+                'timeframe': '5m',
+                'num_velas': 100,
+                'score': 25
+            }
         
-        return None
+        return mejor_config
 
-    def evaluar_configuracion(self, info_canal):
-        """Evaluar la calidad de una configuración de trading"""
+    def calcular_score_configuracion(self, info_canal):
+        """Calcular score de calidad para una configuración"""
         score = 0
         
-        # Puntos por fuerza de tendencia
-        if abs(info_canal['angulo_tendencia']) >= self.config.get('trend_threshold_degrees', 16):
+        # Factor 1: Fuerza de tendencia
+        score += info_canal['nivel_fuerza'] * 10
+        
+        # Factor 2: Correlación (Pearson)
+        if abs(info_canal['coeficiente_pearson']) > 0.7:
+            score += 20
+        elif abs(info_canal['coeficiente_pearson']) > 0.5:
             score += 10
         
-        # Puntos por correlación
-        if abs(info_canal['coeficiente_pearson']) >= 0.4:
+        # Factor 3: R² score
+        if info_canal['r2_score'] > 0.7:
+            score += 15
+        elif info_canal['r2_score'] > 0.5:
+            score += 8
+        
+        # Factor 4: Ancho de canal apropiado
+        ancho_pct = info_canal['ancho_canal_porcentual']
+        if 3 <= ancho_pct <= 15:  # Rango óptimo
+            score += 10
+        elif 1 <= ancho_pct <= 3:
             score += 5
         
-        # Puntos por R²
-        if info_canal['r2_score'] >= 0.4:
-            score += 5
-        
-        # Puntos por ancho de canal
-        if info_canal['ancho_canal_porcentual'] >= self.config.get('min_channel_width_percent', 4):
-            score += 5
-        
-        # Puntos por stochastic en rango favorable
-        if 20 <= info_canal['stoch_k'] <= 80 and 20 <= info_canal['stoch_d'] <= 80:
+        # Factor 5: Stochastic en zona apropiada
+        stoch_k = info_canal['stoch_k']
+        if (stoch_k < 30 or stoch_k > 70):  # En zonas extremas
             score += 5
         
         return score
 
-    def generar_mensaje_senal(self, symbol, tipo_operacion, precio_entrada, tp, sl, info_canal, config_optima, breakout_info):
-        """Generar mensaje de señal de trading"""
-        emoji = "🟢" if tipo_operacion == "LONG" else "🔴"
-        direccion = "ALCISTA" if tipo_operacion == "LONG" else "BAJISTA"
+    def verificar_criterios_calidad(self, info_canal):
+        """Verificar si la configuración cumple criterios mínimos de calidad"""
+        # Criterio 1: Fuerza mínima
+        if info_canal['nivel_fuerza'] < 2:
+            return False
         
-        # Calcular RR ratio
-        if tipo_operacion == "LONG":
-            rr_ratio = (tp - precio_entrada) / (precio_entrada - sl)
-        else:
-            rr_ratio = (precio_entrada - tp) / (sl - precio_entrada)
+        # Criterio 2: Correlación mínima
+        if abs(info_canal['coeficiente_pearson']) < 0.3:
+            return False
         
-        # Información de breakout si existe
-        breakout_text = ""
-        if breakout_info:
-            breakout_text = f"\n[B] Breakout: {breakout_info['tipo']} a {breakout_info['precio_breakout']:.8f}"
+        # Criterio 3: R² mínimo
+        if info_canal['r2_score'] < 0.3:
+            return False
+        
+        # Criterio 4: Ancho de canal razonable
+        ancho_pct = info_canal['ancho_canal_porcentual']
+        if ancho_pct < 1 or ancho_pct > 25:
+            return False
+        
+        return True
+
+    def procesar_senal_breakout(self, symbol, config_optima, info_canal, tipo_operacion):
+        """Procesar señal de breakout con envío optimizado a Telegram"""
+        try:
+            precio_entrada = info_canal['datos_mercado']['precio_actual']
+            
+            # Calcular TP y SL
+            sl_porcentaje = 0.02  # 2%
+            tp_porcentaje = 0.04  # 4% (RR 2:1)
+            
+            if tipo_operacion == "LONG":
+                sl = precio_entrada * (1 - sl_porcentaje)
+                tp = precio_entrada * (1 + tp_porcentaje)
+            else:
+                sl = precio_entrada * (1 + sl_porcentaje)
+                tp = precio_entrada * (1 - tp_porcentaje)
+            
+            # Generar mensaje de señal
+            mensaje = self.generar_mensaje_senal(symbol, tipo_operacion, precio_entrada, tp, sl, info_canal, config_optima)
+            
+            # Enviar señal con gráfico optimizado
+            token = self.config.get('telegram_token')
+            chat_ids = self.config.get('telegram_chat_ids', [])
+            
+            if token and chat_ids:
+                # CORRECCIÓN 3: Manejo mejorado de errores en envío de gráficos
+                self.enviar_senal_con_grafico_optimizada(mensaje, token, chat_ids, symbol, info_canal, precio_entrada, tp, sl, tipo_operacion)
+        
+        except Exception as e:
+            logger.error(f"Error procesando señal para {symbol}: {e}")
+
+    def generar_mensaje_senal(self, symbol, tipo_operacion, precio_entrada, tp, sl, info_canal, config_optima):
+        """Generar mensaje de señal optimizado"""
+        direccion = "🟢 LONG" if tipo_operacion == "LONG" else "🔴 SHORT"
+        fuerza_emoji = info_canal['fuerza_texto'].split()[0]
+        direccion_tendencia = self.determinar_direccion_tendencia(info_canal['angulo_tendencia'])
         
         mensaje = f"""
-{emoji} <b>SEÑAL DE TRADING - {symbol}</b>
-📊 <b>Dirección:</b> {direccion}
-🎯 <b>Entrada:</b> {precio_entrada:.8f}
-🛑 <b>Stop Loss:</b> {sl:.8f}
-🎯 <b>Take Profit:</b> {tp:.8f}
-📊 <b>RR Ratio:</b> {rr_ratio:.2f}
-⚡ <b>Timeframe:</b> {config_optima['timeframe']} ({config_optima['num_velas']} velas)
-📏 <b>Ancho Canal:</b> {info_canal['ancho_canal_porcentual']:.1f}%
-🔍 <b>Ángulo Tendencia:</b> {info_canal['angulo_tendencia']:.1f}°
-📈 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
+{fuerza_emoji} <b>BREAKOUT DETECTADO - {symbol}</b>
+{direccion} <b>Tipo:</b> {tipo_operacion}
+📊 <b>Configuración:</b> {config_optima['timeframe']} - {config_optima['num_velas']} velas
+💰 <b>Entrada:</b> {precio_entrada:.8f}
+🎯 <b>TP:</b> {tp:.8f} (+4%)
+🛑 <b>SL:</b> {sl:.8f} (-2%)
+📈 <b>Tendencia:</b> {direccion_tendencia}
+📏 <b>Ángulo:</b> {info_canal['angulo_tendencia']:.1f}°
+📊 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
 🎯 <b>R²:</b> {info_canal['r2_score']:.3f}
-🕐 <b>Stoch K:</b> {info_canal['stoch_k']:.1f} | <b>D:</b> {info_canal['stoch_d']:.1f}
-{breakout_text}
-⏰ <b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📏 <b>Ancho Canal:</b> {info_canal['ancho_canal_porcentual']:.1f}%
+📈 <b>Stoch K:</b> {info_canal['stoch_k']:.1f}
+📉 <b>Stoch D:</b> {info_canal['stoch_d']:.1f}
+⏰ <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
         """
         return mensaje
 
-    def enviar_senal_completa(self, symbol, tipo_operacion, precio_entrada, tp, sl, info_canal, config_optima, mensaje, breakout_info):
-        """Enviar señal completa (gráfico + mensaje) por Telegram"""
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        
-        if token and chat_ids:
-            try:
-                logger.info(f"📤 Generando y enviando señal completa para {symbol}...")
-                
-                # CORRECCIÓN 4: Configuración mejorada para generación de gráficos
-                # Asegurar que matplotlib esté configurado correctamente
-                setup_matplotlib_config()
-                
-                # Generar gráfico con configuración optimizada
-                buf = self.generar_grafico_profesional(
-                    symbol, info_canal, None, precio_entrada, tp, sl, tipo_operacion
-                )
-                
-                if buf:
-                    logger.info(f"📤 Enviando gráfico a {len(chat_ids)} chat(s)...")
-                    print(f"     📨 Enviando gráfico por Telegram...")
-                    
-                    # Verificar tamaño del buffer
-                    buf_size = len(buf.getvalue())
-                    logger.info(f"📊 Tamaño del gráfico: {buf_size} bytes")
-                    
-                    # Enviar gráfico con retry en caso de fallo
-                    exito_grafico = False
-                    max_reintentos = 2
-                    
-                    for intento in range(max_reintentos):
-                        try:
-                            exito_grafico = self.enviar_grafico_telegram(buf, token, chat_ids)
-                            if exito_grafico:
-                                logger.info(f"✅ Gráfico enviado exitosamente (intento {intento + 1})")
-                                break
-                            else:
-                                logger.warning(f"⚠️ Fallo enviando gráfico (intento {intento + 1})")
-                                if intento < max_reintentos - 1:
-                                    time.sleep(2)  # Esperar antes del siguiente intento
-                        except Exception as e:
-                            logger.error(f"❌ Error en intento {intento + 1}: {e}")
-                            if intento < max_reintentos - 1:
-                                time.sleep(2)
-                    
-                    if not exito_grafico:
-                        logger.warning("⚠️ No se pudo enviar el gráfico después de varios intentos")
-                        print(f"     ⚠️ No se pudo enviar el gráfico")
-                    
-                    time.sleep(1)
-                else:
-                    logger.warning("⚠️ No se pudo generar el gráfico")
-                    print(f"     ⚠️ No se pudo generar el gráfico")
-                
-                # Enviar mensaje de texto siempre (incluso si falla el gráfico)
-                logger.info(f"📱 Enviando mensaje de señal...")
-                exito_mensaje = self._enviar_telegram_simple(mensaje, token, chat_ids)
-                
-                if exito_mensaje:
-                    print(f"     ✅ Señal {tipo_operacion} para {symbol} enviada")
-                    logger.info(f"✅ Señal enviada exitosamente")
-                else:
-                    print(f"     ⚠️ Señal enviada sin gráfico")
-                    logger.warning(f"⚠️ Mensaje enviado sin confirmación")
-                    
-            except Exception as e:
-                error_msg = f"Error enviando señal completa: {e}"
-                logger.error(error_msg)
-                print(f"     ❌ Error enviando señal: {e}")
-                
-                # Intentar al menos enviar el mensaje sin gráfico
+    # CORRECCIÓN 4: Función optimizada para enviar señales con gráficos
+    def enviar_senal_con_grafico_optimizada(self, mensaje, token, chat_ids, symbol, info_canal, precio_entrada, tp, sl, tipo_operacion):
+        """Enviar señal con gráfico optimizado para Telegram"""
+        try:
+            logger.info(f"📊 Generando gráfico para {symbol}...")
+            
+            # Intentar generar gráfico
+            exito_grafico = False
+            max_reintentos = 3
+            
+            for intento in range(max_reintentos):
                 try:
-                    logger.info("🔄 Intentando enviar solo el mensaje...")
-                    self._enviar_telegram_simple(mensaje, token, chat_ids)
-                    print(f"     ✅ Mensaje enviado sin gráfico")
-                except Exception as e2:
-                    logger.error(f"❌ Error enviando solo mensaje: {e2}")
-                    print(f"     ❌ Error enviando mensaje: {e2}")
-        
-        # NUEVO: Ejecutar operación automáticamente si está habilitado
-        operacion_ejecutada_exitosa = False
-        if self.ejecutar_operaciones_automaticas and self.bitget_client:
-            print(f"     🤖 Ejecutando operación automática en Bitget...")
-            try:
-                operacion_bitget = ejecutar_operacion_bitget(
-                    bitget_client=self.bitget_client,
-                    simbolo=symbol,
-                    tipo_operacion=tipo_operacion,
-                    capital_usd=self.capital_por_operacion,
-                    leverage=self.leverage_por_defecto
-                )
-                if operacion_bitget:
-                    print(f"     ✅ Operación ejecutada y verificada en Bitget para {symbol}")
-                    operacion_ejecutada_exitosa = True
+                    logger.info(f"   Intento {intento + 1}/{max_reintentos} - Generando gráfico...")
                     
-                    # Enviar confirmación de ejecución
-                    mensaje_confirmacion = f"""
-🤖 <b>OPERACIÓN AUTOMÁTICA EJECUTADA - {symbol}</b>
-✅ <b>Status:</b> EJECUTADA Y VERIFICADA EN BITGET
-📊 <b>Tipo:</b> {tipo_operacion}
-💰 <b>Capital:</b> ${self.capital_por_operacion}
-⚡ <b>Apalancamiento:</b> {self.leverage_por_defecto}x
-🎯 <b>Margen:</b> AISLADO
-🎯 <b>Posición Mode:</b> {self.bitget_client.position_mode}
-🎯 <b>Entrada:</b> {operacion_bitget['precio_entrada']:.8f}
-🛑 <b>Stop Loss:</b> {operacion_bitget['stop_loss']:.8f}
-🎯 <b>Take Profit:</b> {operacion_bitget['take_profit']:.8f}
-📋 <b>ID Orden:</b> {operacion_bitget['orden_entrada'].get('orderId', 'N/A')}
-⏰ <b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                    """
-                    self._enviar_telegram_simple(mensaje_confirmacion, token, chat_ids)
-                else:
-                    print(f"     ❌ Error ejecutando operación en Bitget para {symbol}")
-            except Exception as e:
-                print(f"     ⚠️ Error en ejecución automática: {e}")
-        
-        # Solo agregar al estado interno si la operación se ejecutó exitosamente
-        if operacion_ejecutada_exitosa:
-            self.operaciones_activas[symbol] = {
-                'tipo': tipo_operacion,
-                'precio_entrada': precio_entrada,
-                'take_profit': tp,
-                'stop_loss': sl,
-                'timestamp_entrada': datetime.now().isoformat(),
-                'angulo_tendencia': info_canal['angulo_tendencia'],
-                'pearson': info_canal['coeficiente_pearson'],
-                'r2_score': info_canal['r2_score'],
-                'ancho_canal_relativo': info_canal['ancho_canal'] / precio_entrada,
-                'ancho_canal_porcentual': info_canal['ancho_canal_porcentual'],
-                'nivel_fuerza': info_canal['nivel_fuerza'],
-                'timeframe_utilizado': config_optima['timeframe'],
-                'velas_utilizadas': config_optima['num_velas'],
-                'stoch_k': info_canal['stoch_k'],
-                'stoch_d': info_canal['stoch_d'],
-                'breakout_usado': breakout_info is not None,
-                'operacion_ejecutada': operacion_ejecutada_exitosa
-            }
-            self.senales_enviadas.add(symbol)
-            self.total_operaciones += 1
+                    # Asegurar configuración de matplotlib
+                    setup_matplotlib_config()
+                    
+                    # Generar gráfico optimizado
+                    buf_grafico = self.generar_grafico_profesional(symbol, info_canal, info_canal['datos_mercado'], precio_entrada, tp, sl, tipo_operacion)
+                    
+                    if buf_grafico and len(buf_grafico.getvalue()) > 0:
+                        logger.info(f"   ✅ Gráfico generado, intentando envío...")
+                        
+                        # Enviar gráfico con mensaje
+                        if self.enviar_grafico_telegram(buf_grafico, token, chat_ids):
+                            logger.info(f"   ✅ Gráfico enviado exitosamente")
+                            exito_grafico = True
+                            break
+                        else:
+                            logger.warning(f"   ⚠️ Error enviando gráfico en intento {intento + 1}")
+                    else:
+                        logger.warning(f"   ⚠️ Buffer de gráfico vacío en intento {intento + 1}")
+                    
+                    # Esperar antes del siguiente intento
+                    if intento < max_reintentos - 1:
+                        time.sleep(2)
+                        
+                except Exception as e:
+                    logger.error(f"   ❌ Error en intento {intento + 1}: {e}")
+                    if intento < max_reintentos - 1:
+                        time.sleep(2)
+            
+            if not exito_grafico:
+                logger.warning("⚠️ No se pudo enviar el gráfico después de varios intentos")
+                print(f"     ⚠️ No se pudo enviar el gráfico")
+            
+            # Enviar mensaje de texto siempre (incluso si falla el gráfico)
+            logger.info(f"📱 Enviando mensaje de señal...")
+            exito_mensaje = self._enviar_telegram_simple(mensaje, token, chat_ids)
+            
+            if exito_mensaje:
+                print(f"     ✅ Señal {tipo_operacion} para {symbol} enviada")
+                logger.info(f"✅ Señal enviada exitosamente")
+            else:
+                print(f"     ⚠️ Señal enviada sin confirmación")
+                logger.warning(f"⚠️ Mensaje enviado sin confirmación")
+                
+        except Exception as e:
+            error_msg = f"Error enviando señal completa: {e}"
+            logger.error(error_msg)
+            print(f"     ❌ Error enviando señal: {e}")
+            
+            # Intentar al menos enviar el mensaje sin gráfico
+            try:
+                logger.info("🔄 Intentando enviar solo el mensaje...")
+                self._enviar_telegram_simple(mensaje, token, chat_ids)
+                print(f"     ✅ Mensaje enviado sin gráfico")
+            except Exception as e2:
+                logger.error(f"❌ Error enviando solo mensaje: {e2}")
+                print(f"     ❌ Error enviando mensaje: {e2}")
 
     def inicializar_log(self):
         if not os.path.exists(self.archivo_log):
@@ -2237,10 +2118,10 @@ class TradingBot:
             resistencia_values = []
             soporte_values = []
             for i, t in enumerate(tiempos_reg):
-                resist = info_canal['pendiente_resistencia'] * t + \
-                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
-                sop = info_canal['pendiente_soporte'] * t + \
-                     (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
+                resist = info_canal['pendiente_canal'] * t + \
+                        (info_canal['resistencia'] - info_canal['pendiente_canal'] * tiempos_reg[-1])
+                sop = info_canal['pendiente_canal'] * t + \
+                     (info_canal['soporte'] - info_canal['pendiente_canal'] * tiempos_reg[-1])
                 resistencia_values.append(resist)
                 soporte_values.append(sop)
             df['Resistencia'] = resistencia_values
