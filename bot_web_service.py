@@ -1241,19 +1241,19 @@ class TradingBot:
             stoch_actual = 50
             estado_stoch = "➖ NEUTRO (error cálculo)"
         
-        # Determinar tipo de ruptura
+        # Determinar tipo de ruptura CORREGIDO
         if tipo_breakout == "BREAKOUT_LONG":
-            emoji_principal = "🚀"
+            emoji_principal = "📉"  # BAJISTA
             tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
             direccion_emoji = "⬇️"
-            expectativa = "posible entrada en long si el precio reingresa al canal"
+            expectativa = "posible entrada en SHORT si el precio reingresa al canal"  # CORREGIDO: SHORT no LONG
         else:  # BREAKOUT_SHORT
-            emoji_principal = "📉"
-            tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
+            emoji_principal = "🚀"  # ALCISTA
+            tipo_texto = "RUPTURA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
-            expectativa = "posible entrada en short si el precio reingresa al canal"
+            expectativa = "posible entrada en LONG si el precio reingresa al canal"  # CORREGIDO: LONG no SHORT
         
         mensaje = f"""
 {emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
@@ -1466,8 +1466,14 @@ class TradingBot:
             
             # Generar gráfico base CON STOCHASTIC
             try:
+                # Agregar emoji correcto según tipo de breakout
+                if tipo_breakout == "BREAKOUT_LONG":
+                    emoji_grafico = "📉"  # BAJISTA
+                else:
+                    emoji_grafico = "🚀"  # ALCISTA
+                
                 fig, axes = mpf.plot(df, type='candle', style='charles',
-                                   title=f'{simbolo} | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
+                                   title=f'{simbolo} {emoji_grafico} | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
                                    ylabel='Precio',
                                    addplot=apds,
                                    volume=False,
@@ -1498,8 +1504,13 @@ class TradingBot:
             except Exception as mpl_error:
                 print(f"     ⚠️ Error con mplfinance, usando versión básica: {mpl_error}")
                 # Versión mínima sin marcadores especiales
+                if tipo_breakout == "BREAKOUT_LONG":
+                    emoji_grafico = "📉"  # BAJISTA
+                else:
+                    emoji_grafico = "🚀"  # ALCISTA
+                    
                 fig, axes = mpf.plot(df, type='candle',
-                                   title=f'{simbolo} | {tipo_breakout} | Breakout',
+                                   title=f'{simbolo} {emoji_grafico} | {tipo_breakout} | Breakout',
                                    ylabel='Precio',
                                    addplot=apds,
                                    volume=False,
@@ -1581,17 +1592,76 @@ class TradingBot:
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
         
-        # Verificar reentry según el tipo de breakout
+        # Verificar reentry según el tipo de breakout CORREGIDO
         if tipo_breakout == "BREAKOUT_LONG":
-            # Esperábamos que el precio rompiera el soporte hacia abajo y regresara
-            # Si el precio regresa dentro del canal, es señal de LONG
+            # BREAKOUT_LONG = precio rompió soporte hacia ABAJO
+            # Si el precio reingresa al canal (sube de vuelta) = señal BAJISTA (SHORT)
             if soporte <= precio_actual <= resistencia:
-                return "LONG"
+                # Validar Stochastic para confirmar SHORT
+                try:
+                    if len(datos_mercado['cierres']) >= 14:
+                        period = 14
+                        stoch_k_values = []
+                        for i in range(len(datos_mercado['cierres'])):
+                            if i < period - 1:
+                                stoch_k_values.append(50)
+                            else:
+                                highest_high = max(datos_mercado['maximos'][i-period+1:i+1])
+                                lowest_low = min(datos_mercado['minimos'][i-period+1:i+1])
+                                if highest_high == lowest_low:
+                                    k = 50
+                                else:
+                                    k = 100 * (datos_mercado['cierres'][i] - lowest_low) / (highest_high - lowest_low)
+                                stoch_k_values.append(k)
+                        
+                        stoch_actual = stoch_k_values[-1] if stoch_k_values else 50
+                        
+                        # Para SHORT, Stochastic debe estar en SOBRECOMPRA o al menos neutral
+                        if stoch_actual >= 70 or 30 < stoch_actual < 70:
+                            print(f"     ✅ {simbolo} - Reentry SHORT confirmado con Stochastic: {stoch_actual:.1f}")
+                            return "SHORT"
+                        else:
+                            print(f"     ⚠️ {simbolo} - Stochastic no favorable para SHORT: {stoch_actual:.1f} (en sobreventa)")
+                            return None
+                    else:
+                        return "SHORT"  # Sin datos de Stochastic, proceder
+                except:
+                    return "SHORT"  # Error en cálculo, proceder de todas formas
+                    
         elif tipo_breakout == "BREAKOUT_SHORT":
-            # Esperábamos que el precio rompiera la resistencia hacia arriba y regresara
-            # Si el precio regresa dentro del canal, es señal de SHORT
+            # BREAKOUT_SHORT = precio rompió resistencia hacia ARRIBA
+            # Si el precio reingresa al canal (baja de vuelta) = señal ALCISTA (LONG)
             if soporte <= precio_actual <= resistencia:
-                return "SHORT"
+                # Validar Stochastic para confirmar LONG
+                try:
+                    if len(datos_mercado['cierres']) >= 14:
+                        period = 14
+                        stoch_k_values = []
+                        for i in range(len(datos_mercado['cierres'])):
+                            if i < period - 1:
+                                stoch_k_values.append(50)
+                            else:
+                                highest_high = max(datos_mercado['maximos'][i-period+1:i+1])
+                                lowest_low = min(datos_mercado['minimos'][i-period+1:i+1])
+                                if highest_high == lowest_low:
+                                    k = 50
+                                else:
+                                    k = 100 * (datos_mercado['cierres'][i] - lowest_low) / (highest_high - lowest_low)
+                                stoch_k_values.append(k)
+                        
+                        stoch_actual = stoch_k_values[-1] if stoch_k_values else 50
+                        
+                        # Para LONG, Stochastic debe estar en SOBREVENTA o al menos neutral
+                        if stoch_actual <= 30 or 30 < stoch_actual < 70:
+                            print(f"     ✅ {simbolo} - Reentry LONG confirmado con Stochastic: {stoch_actual:.1f}")
+                            return "LONG"
+                        else:
+                            print(f"     ⚠️ {simbolo} - Stochastic no favorable para LONG: {stoch_actual:.1f} (en sobrecompra)")
+                            return None
+                    else:
+                        return "LONG"  # Sin datos de Stochastic, proceder
+                except:
+                    return "LONG"  # Error en cálculo, proceder de todas formas
         
         return None
 
@@ -1621,7 +1691,13 @@ class TradingBot:
         return precio_entrada, take_profit, stop_loss
 
     def escanear_mercado(self):
-        """Escanea el mercado con estrategia Breakout + Reentry"""
+        """
+        Escanea el mercado con estrategia Breakout + Reentry
+        
+        LÓGICA CORREGIDA:
+        - BREAKOUT_LONG (ruptura soporte): Reentry = señal SHORT
+        - BREAKOUT_SHORT (ruptura resistencia): Reentry = señal LONG
+        """
         print(f"\n🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
         senales_encontradas = 0
         for simbolo in self.config.get('symbols', []):
@@ -2495,7 +2571,7 @@ class TradingBot:
         print(f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}")
         print(f"🕯️ Velas: {self.config.get('velas_options', [])}")
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
-        print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
+        print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch y Ejecutar")
         if self.bitget_client:
             print(f"🤖 BITGET: ✅ API Conectada")
             print(f"⚡ Apalancamiento: {self.leverage_por_defecto}x")
