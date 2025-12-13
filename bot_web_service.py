@@ -1254,7 +1254,7 @@ class TradingBot:
         else:
             print(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
 
-rafico_breakout    def generar_g(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
+        def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
         """
         Genera gráfico especial para el momento del BREAKOUT
         Marca visualmente la ruptura del canal
