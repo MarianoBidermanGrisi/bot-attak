@@ -1202,6 +1202,7 @@ bot = TradingBot(config)
 
 def run_bot_loop():
     """Ejecuta el bot en un hilo separado con manejo robusto de errores"""
+    global bot  # Declarar bot como global al inicio
     consecutive_errors = 0
     max_consecutive_errors = 5
     
@@ -1228,7 +1229,6 @@ def run_bot_loop():
                 print("🚨 Demasiados errores consecutivos. Reiniciando bot...", file=sys.stderr)
                 # Reinicializar el bot en caso de errores consecutivos
                 try:
-                    global bot
                     config = crear_config_desde_entorno()
                     bot = TradingBot(config)
                     consecutive_errors = 0
