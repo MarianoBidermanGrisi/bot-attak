@@ -539,7 +539,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         dict con información de la operación ejecutada o None si falla
     """
     
-    logger.info(f"🚀 EJECUTANDO OPERACIÓN REAL EN BITGET (MARGEN AISLADO)")
+    logger.info(f"[EXEC] EJECUTANDO OPERACIÓN REAL EN BITGET (MARGEN AISLADO)")
     logger.info(f"Símbolo: {simbolo}")
     logger.info(f"Tipo: {tipo_operacion}")
     logger.info(f"Apalancamiento: {leverage}x")
@@ -1229,11 +1229,11 @@ class TradingBot:
                 stoch_actual = stoch_k_values[-1] if stoch_k_values else 50
                 
                 if stoch_actual <= 30:
-                    estado_stoch = "📉 SOBREVENTA (buen momento para LONG)"
+                    estado_stoch = "[SOBREVENTA] (buen momento para LONG)"
                 elif stoch_actual >= 70:
-                    estado_stoch = "📈 SOBRECOMPRA (buen momento para SHORT)"
+                    estado_stoch = "[SOBRECOMPRA] (buen momento para SHORT)"
                 else:
-                    estado_stoch = "➖ NEUTRO"
+                    estado_stoch = "[NEUTRO]"
             else:
                 stoch_actual = 50
                 estado_stoch = "➖ NEUTRO (datos insuficientes)"
@@ -1243,16 +1243,16 @@ class TradingBot:
         
         # Determinar tipo de ruptura CORREGIDO
         if tipo_breakout == "BREAKOUT_LONG":
-            emoji_principal = "📉"  # BAJISTA
+            emoji_principal = "[DOWN]"  # BAJISTA - Sin emojis para evitar problemas de fuente
             tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
-            direccion_emoji = "⬇️"
+            direccion_emoji = "↓"
             expectativa = "posible entrada en SHORT si el precio reingresa al canal"  # CORREGIDO: SHORT no LONG
         else:  # BREAKOUT_SHORT
-            emoji_principal = "🚀"  # ALCISTA
+            emoji_principal = "[UP]"  # ALCISTA - Sin emojis para evitar problemas de fuente
             tipo_texto = "RUPTURA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
-            direccion_emoji = "⬆️"
+            direccion_emoji = "↑"
             expectativa = "posible entrada en LONG si el precio reingresa al canal"  # CORREGIDO: LONG no SHORT
         
         mensaje = f"""
@@ -1444,9 +1444,9 @@ class TradingBot:
             resistencia_array = np.array(resistencia_values)
             soporte_array = np.array(soporte_values)
             
-            print(f"     📈 Precio breakout: {precio_breakout:.8f}")
-            print(f"     📈 Resistencias calculadas: {len(resistencia_values)} puntos")
-            print(f"     📈 Soportes calculados: {len(soporte_values)} puntos")
+            print(f"     [PRICE] Precio breakout: {precio_breakout:.8f}")
+            print(f"     [RESIST] Resistencias calculadas: {len(resistencia_values)} puntos")
+            print(f"     [SUPPORT] Soportes calculados: {len(soporte_values)} puntos")
             print(f"     📊 Stochastic calculado: {len(df)} puntos")
             
             # Crear gráfico CON STOCHASTIC
@@ -1466,14 +1466,14 @@ class TradingBot:
             
             # Generar gráfico base CON STOCHASTIC
             try:
-                # Agregar emoji correcto según tipo de breakout
+                # Usar texto en lugar de emojis para evitar problemas de fuente
                 if tipo_breakout == "BREAKOUT_LONG":
-                    emoji_grafico = "📉"  # BAJISTA
+                    direccion_grafico = "DOWN"  # BAJISTA
                 else:
-                    emoji_grafico = "🚀"  # ALCISTA
+                    direccion_grafico = "UP"  # ALCISTA
                 
                 fig, axes = mpf.plot(df, type='candle', style='charles',
-                                   title=f'{simbolo} {emoji_grafico} | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
+                                   title=f'{simbolo} [{direccion_grafico}] | {tipo_breakout} | {config_optima["timeframe"]} | Breakout Detectado',
                                    ylabel='Precio',
                                    addplot=apds,
                                    volume=False,
@@ -1505,12 +1505,12 @@ class TradingBot:
                 print(f"     ⚠️ Error con mplfinance, usando versión básica: {mpl_error}")
                 # Versión mínima sin marcadores especiales
                 if tipo_breakout == "BREAKOUT_LONG":
-                    emoji_grafico = "📉"  # BAJISTA
+                    direccion_grafico = "DOWN"  # BAJISTA
                 else:
-                    emoji_grafico = "🚀"  # ALCISTA
+                    direccion_grafico = "UP"  # ALCISTA
                     
                 fig, axes = mpf.plot(df, type='candle',
-                                   title=f'{simbolo} {emoji_grafico} | {tipo_breakout} | Breakout',
+                                   title=f'{simbolo} [{direccion_grafico}] | {tipo_breakout} | Breakout',
                                    ylabel='Precio',
                                    addplot=apds,
                                    volume=False,
@@ -1526,7 +1526,7 @@ class TradingBot:
             buf = BytesIO()
             
             try:
-                plt.tight_layout()
+                # plt.tight_layout() removido para evitar warnings con mplfinance
                 plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', 
                            facecolor='white', edgecolor='none')
                 buf.seek(0)
@@ -1723,7 +1723,7 @@ class TradingBot:
                 if info_canal['stoch_k'] <= 30:
                     estado_stoch = "📉 OVERSOLD"
                 elif info_canal['stoch_k'] >= 70:
-                    estado_stoch = "📈 OVERBOUGHT"
+                    estado_stoch = "[OVERBOUGHT]"
                 else:
                     estado_stoch = "➖ NEUTRO"
                 precio_actual = datos_mercado['precio_actual']
@@ -1820,12 +1820,12 @@ class TradingBot:
         # Calcular SL y TP en porcentaje
         sl_percent = abs((sl - precio_entrada) / precio_entrada) * 100
         tp_percent = abs((tp - precio_entrada) / precio_entrada) * 100
-        stoch_estado = "📉 SOBREVENTA" if tipo_operacion == "LONG" else "📈 SOBRECOMPRA"
+        stoch_estado = "[OVERSOLD]" if tipo_operacion == "LONG" else "[OVERBOUGHT]"
         breakout_texto = ""
         if breakout_info:
             tiempo_breakout = (datetime.now() - breakout_info['timestamp']).total_seconds() / 60
             breakout_texto = f"""
-🚀 <b>BREAKOUT + REENTRY DETECTADO:</b>
+[UP] <b>BREAKOUT + REENTRY DETECTADO:</b>
 ⏰ Tiempo desde breakout: {tiempo_breakout:.1f} minutos
 💰 Precio breakout: {breakout_info['precio_breakout']:.8f}
 """
@@ -1845,14 +1845,14 @@ class TradingBot:
 🎯 <b>TP:</b> {tp_percent:.2f}%
 💰 <b>Riesgo:</b> {riesgo:.8f}
 🎯 <b>Beneficio Objetivo:</b> {beneficio:.8f}
-📈 <b>Tendencia:</b> {info_canal['direccion']}
+[TREND] <b>Tendencia:</b> {info_canal['direccion']}
 💪 <b>Fuerza:</b> {info_canal['fuerza_texto']}
 📏 <b>Ángulo:</b> {info_canal['angulo_tendencia']:.1f}°
 📊 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
 🎯 <b>R² Score:</b> {info_canal['r2_score']:.3f}
 🎰 <b>Stochástico:</b> {stoch_estado}
 📊 <b>Stoch K:</b> {info_canal['stoch_k']:.1f}
-📈 <b>Stoch D:</b> {info_canal['stoch_d']:.1f}
+[STOCH_D] <b>Stoch D:</b> {info_canal['stoch_d']:.1f}
 ⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic
         """
@@ -2042,7 +2042,7 @@ class TradingBot:
 📅 {datetime.now().strftime('%d/%m/%Y')} | Últimos 7 días
 <b>RENDIMIENTO GENERAL</b>
 {emoji_resultado} PnL Total: <b>{pnl_total:+.2f}%</b>
-📈 Win Rate: <b>{winrate:.1f}%</b>
+[WINRATE] Win Rate: <b>{winrate:.1f}%</b>
 ✅ Ganadas: {wins} | ❌ Perdidas: {losses}
 <b>ESTADÍSTICAS</b>
 📊 Operaciones: {total_ops}
@@ -2181,7 +2181,7 @@ class TradingBot:
             pnl_absoluto = datos_operacion['precio_salida'] - datos_operacion['precio_entrada']
         else:
             pnl_absoluto = datos_operacion['precio_entrada'] - datos_operacion['precio_salida']
-        breakout_usado = "🚀 Sí" if datos_operacion.get('breakout_usado', False) else "❌ No"
+        breakout_usado = "[YES] Sí" if datos_operacion.get('breakout_usado', False) else "[NO] No"
         operacion_ejecutada = "🤖 Sí" if datos_operacion.get('operacion_ejecutada', False) else "❌ No"
         mensaje = f"""
 {emoji} <b>OPERACIÓN CERRADA - {datos_operacion['symbol']}</b>
@@ -2190,9 +2190,9 @@ class TradingBot:
 💰 Entrada: {datos_operacion['precio_entrada']:.8f}
 🎯 Salida: {datos_operacion['precio_salida']:.8f}
 💵 PnL Absoluto: {pnl_absoluto:.8f}
-📈 PnL %: {datos_operacion['pnl_percent']:.2f}%
+[PNL] PnL %: {datos_operacion['pnl_percent']:.2f}%
 ⏰ Duración: {datos_operacion['duracion_minutos']:.1f} minutos
-🚀 Breakout+Reentry: {breakout_usado}
+[BREAKOUT] Breakout+Reentry: {breakout_usado}
 🤖 Operación Bitget: {operacion_ejecutada}
 📏 Ángulo: {datos_operacion['angulo_tendencia']:.1f}°
 📊 Pearson: {datos_operacion['pearson']:.3f}
@@ -2533,7 +2533,7 @@ class TradingBot:
             try:
                 posiciones_reales = self.bitget_client.get_positions()
                 posiciones_abiertas = [pos for pos in posiciones_reales if pos.get('positionSize', 0) != 0]
-                print(f"   📈 Posiciones Reales en Bitget: {len(posiciones_abiertas)}")
+                print(f"   [POSITIONS] Posiciones Reales en Bitget: {len(posiciones_abiertas)}")
                 
                 if posiciones_abiertas:
                     for pos in posiciones_abiertas:
@@ -2555,7 +2555,7 @@ class TradingBot:
                 ancho_canal = op.get('ancho_canal_porcentual', 0)
                 timeframe = op.get('timeframe_utilizado', 'N/A')
                 velas = op.get('velas_utilizadas', 0)
-                breakout = "🚀" if op.get('breakout_usado', False) else ""
+                breakout = "[B]" if op.get('breakout_usado', False) else ""
                 ejecutada = "✅ REAL" if op.get('operacion_ejecutada', False) else "📢 SEÑAL"
                 print(f"   • {simbolo} {estado} {breakout} {ejecutada} - {timeframe} - {velas}v - Ancho: {ancho_canal:.1f}%")
 
@@ -2571,7 +2571,7 @@ class TradingBot:
         print(f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}")
         print(f"🕯️ Velas: {self.config.get('velas_options', [])}")
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
-        print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch y Ejecutar")
+        print(f"[STRATEGY] Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch y Ejecutar")
         if self.bitget_client:
             print(f"🤖 BITGET: ✅ API Conectada")
             print(f"⚡ Apalancamiento: {self.leverage_por_defecto}x")
@@ -2583,7 +2583,7 @@ class TradingBot:
         else:
             print(f"🤖 BITGET: ❌ No configurado (solo señales)")
         print("=" * 70)
-        print("\n🚀 INICIANDO BOT...")
+        print("\n[START] INICIANDO BOT...")
         try:
             while True:
                 nuevas_senales = self.ejecutar_analisis()
