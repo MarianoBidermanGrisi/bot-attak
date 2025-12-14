@@ -1,5 +1,5 @@
 # bot_web_service.py
-# Adaptación para Render del bot Breakout + Reentry
+# Adaptación para Render del bot Breakout + Reentry - CORREGIDO PARA DEPLOY
 import requests
 import time
 import json
@@ -25,17 +25,28 @@ from flask import Flask, request, jsonify
 import threading
 import logging
 
-# Configurar logging mejorado con múltiples niveles
-logging.basicConfig(
-    level=logging.INFO, 
-    stream=sys.stdout, 
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('bot_trading.log', encoding='utf-8')
-    ]
-)
+# Configurar logging COMPATIBLE con Python 3.13
+# CORREGIDO: No usar stream con handlers en basicConfig
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# Handler para consola
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
+
+# Handler para archivo de log principal
+try:
+    file_handler = logging.FileHandler('bot_trading.log', encoding='utf-8')
+    file_handler.setFormatter(formatter)
+except Exception:
+    # En caso de error con archivo, solo usar consola
+    file_handler = None
+
+# Configurar logger principal
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(console_handler)
+if file_handler:
+    logger.addHandler(file_handler)
 
 # Logger adicional para errores detallados
 error_logger = logging.getLogger('error_logger')
@@ -46,11 +57,11 @@ error_logger.setLevel(logging.ERROR)
 
 # ---------------------------
 # [INICIO DEL CÓDIGO DEL BOT NUEVO]
-# Copiado íntegro de Pasted_Text_1763228298547.txt y corregido para Render
+# Copiado ín corregido para Render.13
 # ---------------------------
 
-# bot_breakout_reentry.py
-# VERSIÓN COMPLETA con estrategia Breakout + Reentry
+# bot.py
+# VERSIÓN COMPLETA con estrategia Breakout + + Python 3tegro y_breakout_reentry Reentry
 import requests
 import time
 import json
@@ -1903,7 +1914,7 @@ class TradingBot:
             logger.info("ℹ️ No hay datos suficientes para generar reporte")
             return False
         token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
+        chat_ids = self.config.get('telegram_chataciones', [])
         if token and chat_ids:
             try:
                 self._enviar_telegram_simple(mensaje, token, chat_ids)
@@ -2029,7 +2040,7 @@ class TradingBot:
 {color_emoji} <b>RESULTADO: {datos_operacion['resultado']}</b>
 📊 Tipo: {datos_operacion['tipo']}
 💰 Entrada: {datos_operacion['precio_entrada']:.8f}
-🎯 Salida: {datos_operacion['precio_salida']:.8f}
+🎯 Salida: {datos_operacion['precio_sentrada']:.8f}
 💵 PnL Absoluto: {pnl_absoluto:.8f}
 📈 PnL %: {datos_operacion['pnl_percent']:.2f}%
 ⏰ Duración: {datos_operacion['duracion_minutos']:.1f} minutos
@@ -2242,7 +2253,7 @@ class TradingBot:
                 if i < k_period - 1:
                     k_smoothed.append(stoch_k_values[i])
                 else:
-                    k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
+                    k_avg = sum(k_values[i-k_period+1:i+1]) / k_period
                     k_smoothed.append(k_avg)
             stoch_d_values = []
             for i in range(len(k_smoothed)):
@@ -2539,4 +2550,4 @@ def setup_telegram_webhook():
 
 if __name__ == '__main__':
     setup_telegram_webhook()
-    app.run(debug=True, port=5000)
+    app.run(debug=False, port=5000, host='0.0.0.0')
