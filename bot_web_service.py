@@ -1,4 +1,3 @@
-
 # bot_web_service.py
 # Adaptación para Render del bot Breakout + Reentry
 import requests
@@ -17,7 +16,7 @@ import itertools
 import statistics
 import random
 import matplotlib
-matplotlib.use('Agg') # Backend sin GUI
+matplotlib.use('Agg')  # Backend sin GUI
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 import pandas as pd
@@ -30,9 +29,11 @@ import logging
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# -# [INICIO DEL CÓDIGO DEL BOT NUEVO]
+# ---------------------------
+# [INICIO DEL CÓDIGO DEL BOT NUEVO]
 # Copiado íntegro de Pasted_Text_1763228298547.txt y corregido para Render
-# -#
+# ---------------------------
+
 # bot_breakout_reentry.py
 # VERSIÓN COMPLETA con estrategia Breakout + Reentry
 import requests
@@ -49,105 +50,381 @@ import random
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import mplfinance as mpf
+import pandas as pd
+from io import BytesIO
 
+# ---------------------------
+# OPTIMIZADOR IA
+# ---------------------------
+class OptimizadorIA:
+    def __init__(self, log_path="operaciones_log.csv", min_samples=15):
+        self.log_path = log_path
+        self.min_samples = min_samples
+        self.datos = self.cargar_datos()
+
+    def cargar_datos(self):
+        datos = []
+        try:
+            with open(self.log_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        pnl = float(row.get('pnl_percent', 0))
+                        angulo = float(row.get('angulo_tendencia', 0))
+                        pearson = float(row.get('pearson', 0))
+                        r2 = float(row.get('r2_score', 0))
+                        ancho_relativo = float(row.get('ancho_canal_relativo', 0))
+                        nivel_fuerza = int(row.get('nivel_fuerza', 1))
+                        datos.append({
+                            'pnl': pnl, 
+                            'angulo': angulo, 
+                            'pearson': pearson, 
+                            'r2': r2,
+                            'ancho_relativo': ancho_relativo,
+                            'nivel_fuerza': nivel_fuerza
+                        })
+                    except Exception as e:
+                        logger.error(f"Error procesando fila en OptimizadorIA.cargar_datos: {e}")
+                        continue
+        except FileNotFoundError:
+            logger.warning("⚠ No se encontró operaciones_log.csv (optimizador)")
+        except Exception as e:
+            logger.error(f"Error inesperado en OptimizadorIA.cargar_datos: {e}")
+        return datos
+
+    def evaluar_configuracion(self, trend_threshold, min_strength, entry_margin):
+        if not self.datos:
+            return -99999
+        filtradas = [
+            op for op in self.datos
+            if abs(op['angulo']) >= trend_threshold
+            and abs(op['angulo']) >= min_strength
+            and abs(op['pearson']) >= 0.4
+            and op.get('nivel_fuerza', 1) >= 2
+            and op.get('r2', 0) >= 0.4
+        ]
+        n = len(filtradas)
+        if n < max(8, int(0.15 * len(self.datos))):
+            return -10000 - n
+        pnls = [op['pnl'] for op in filtradas]
+        pnl_mean = statistics.mean(pnls) if filtradas else 0
+        pnl_std = statistics.stdev(pnls) if len(pnls) > 1 else 0
+        winrate = sum(1 for op in filtradas if op['pnl'] > 0) / n if n > 0 else 0
+        score = (pnl_mean - 0.5 * pnl_std) * winrate * math.sqrt(n)
+        ops_calidad = [op for op in filtradas if op.get('r2', 0) >= 0.6 and op.get('nivel_fuerza', 1) >= 3]
+        if ops_calidad:
+            score *= 1.2
+        return score
+
+    def buscar_mejores_parametros(self):
+        if not self.datos or len(self.datos) < self.min_samples:
+            logger.info(f"ℹ️ No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
+            return None
+        mejor_score = -1e9
+        mejores_param = None
+        trend_values = [3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40]
+        strength_values = [3, 5, 8, 10, 12, 15, 18, 20, 25, 30]
+        margin_values = [0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003, 0.004, 0.005, 0.008, 0.01]
+        combos = list(itertools.product(trend_values, strength_values, margin_values))
+        total = len(combos)
+        logger.info(f"🔎 Optimizador: probando {total} combinaciones...")
+        for idx, (t, s, m) in enumerate(combos, start=1):
+            score = self.evaluar_configuracion(t, s, m)
+            if idx % 100 == 0 or idx == total:
+                logger.info(f"   · probado {idx}/{total} combos (mejor score actual: {mejor_score:.4f})")
+            if score > mejor_score:
+                mejor_score = score
+                mejores_param = {
+                    'trend_threshold_degrees': t,
+                    'min_trend_strength_degrees': s,
+                    'entry_margin': m,
+                    'score': score,
+                    'evaluated_samples': len(self.datos),
+                    'total_combinations': total
+                }
+        if mejores_param:
+            logger.info("✅ Optimizador: mejores parámetros encontrados:", mejores_param)
+            try:
+                with open("mejores_parametros.json", "w", encoding='utf-8') as f:
+                    json.dump(mejores_param, f, indent=2)
+            except Exception as e:
+                logger.error(f"⚠ Error guardando mejores_parametros.json: {e}")
+        else:
+            logger.warning("⚠ No se encontró una configuración mejor")
+        return mejores_param
+
+# ---------------------------
+# BITGET CLIENT - INTEGRACIÓN COMPLETA CON API BITGET
+# ---------------------------
 class BitgetClient:
-    """Cliente para interactuar con la API de Bitget V2"""
     def __init__(self, api_key, api_secret, passphrase):
         self.api_key = api_key
         self.api_secret = api_secret
         self.passphrase = passphrase
-        self.base_url = 'https://api.bitget.com'
+        self.base_url = "https://api.bitget.com"
+        logger.info(f"Cliente Bitget inicializado con API Key: {api_key[:10]}...")
 
-    def _get_headers(self, method, request_path, body=''):
-        """Generar encabezados de autenticación para Bitget V2"""
+    def _generate_signature(self, timestamp, method, request_path, body=''):
+        """Generar firma HMAC-SHA256 para Bitget V2"""
         try:
-            timestamp = str(int(time.time() * 1000))
-            if isinstance(body, dict):
+            if isinstance(body, (dict, list)):
                 body_str = json.dumps(body, separators=(',', ':')) if body else ''
             else:
                 body_str = str(body) if body else ''
+            
             message = timestamp + method.upper() + request_path + body_str
-            mac = hmac.new(bytes(self.api_secret, 'utf-8'), bytes(message, 'utf-8'), digestmod=hashlib.sha256)
+            
+            mac = hmac.new(
+                bytes(self.api_secret, 'utf-8'),
+                bytes(message, 'utf-8'),
+                digestmod=hashlib.sha256
+            )
+            
             signature = base64.b64encode(mac.digest()).decode()
-            headers = {
-                'ACCESS-KEY': self.api_key,
-                'ACCESS-SIGN': signature,
-                'ACCESS-TIMESTAMP': timestamp,
-                'ACCESS-PASSPHRASE': self.passphrase,
-                'Content-Type': 'application/json'
-            }
-            return headers
+            return signature
+            
         except Exception as e:
             logger.error(f"Error generando firma: {e}")
             raise
 
-    def get_klines(self, symbol, interval, limit):
-        """Obtener velas (klines) de Bitget V2"""
+    def _get_headers(self, method, request_path, body=''):
+        """Obtener headers con firma para Bitget V2"""
         try:
-            request_path = '/api/v2/mix/market/candles'
-            params = {
-                'symbol': symbol,
-                'granularity': interval,
-                'limit': str(limit)
+            timestamp = str(int(time.time() * 1000))
+            sign = self._generate_signature(timestamp, method, request_path, body)
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'ACCESS-KEY': self.api_key,
+                'ACCESS-SIGN': sign,
+                'ACCESS-TIMESTAMP': timestamp,
+                'ACCESS-PASSPHRASE': self.passphrase,
+                'locale': 'en-US'
             }
-            query_string = f"?symbol={symbol}&granularity={interval}&limit={limit}"
+            
+            return headers
+            
+        except Exception as e:
+            logger.error(f"Error creando headers: {e}")
+            raise
+
+    def verificar_credenciales(self):
+        """Verificar que las credenciales sean válidas"""
+        try:
+            logger.info("Verificando credenciales Bitget...")
+            
+            if not all([self.api_key, self.api_secret, self.passphrase]):
+                logger.error("Credenciales incompletas. Revisa las variables de entorno BITGET_API_KEY, BITGET_SECRET_KEY, BITGET_PASSPHRASE.")
+                return False
+            
+            accounts = self.get_account_info()
+            if accounts:
+                logger.info("✓ Credenciales verificadas exitosamente")
+                for account in accounts:
+                    if account.get('marginCoin') == 'USDT':
+                        available = float(account.get('available', 0))
+                        logger.info(f"✓ Balance disponible: {available:.2f} USDT")
+                return True
+            else:
+                logger.error("✗ No se pudo verificar credenciales. La API devolvió una respuesta vacía o un error.")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error verificando credenciales: {e}")
+            return False
+
+    def get_account_info(self, product_type='USDT-FUTURES'):
+        """Obtener información de cuenta Bitget V2"""
+        try:
+            request_path = '/api/v2/mix/account/accounts'
+            params = {'productType': product_type, 'marginCoin': 'USDT'}
+            
+            query_string = f"?productType={product_type}&marginCoin=USDT"
             full_request_path = request_path + query_string
+            
             headers = self._get_headers('GET', full_request_path, '')
-            response = requests.get(f"{self.base_url}{request_path}", headers=headers, params=params, timeout=10)
-            logger.info(f"Respuesta klines - Status: {response.status_code}, URL: {full_request_path}")
+            
+            response = requests.get(
+                f"{self.base_url}{request_path}",
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            logger.debug(f"Respuesta cuenta - Status: {response.status_code}, Body: {response.text}")
+            
             if response.status_code == 200:
                 data = response.json()
                 if data.get('code') == '00000':
-                    candles = data.get('data', [])
-                    logger.info(f"✅ Klines obtenidas exitosamente para {symbol}: {len(candles)} velas")
-                    return candles
+                    return data.get('data', [])
                 else:
-                    logger.error(f"❌ Error en la respuesta de klines: {data.get('msg', 'Unknown error')}")
-                    return None
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    logger.error(f"Error API en get_account_info: {error_code} - {error_msg}")
+                    
+                    if error_code == '40020' and product_type == 'USDT-FUTURES':
+                        logger.info("Intentando con productType='USDT-MIX'...")
+                        return self.get_account_info('USDT-MIX')
             else:
-                logger.error(f"❌ Error HTTP al obtener klines: {response.status_code} - {response.text}")
-                return None
+                logger.error(f"Error HTTP en get_account_info: {response.status_code} - {response.text}")
+                
+            return None
+            
         except Exception as e:
-            logger.error(f"❌ Error en get_klines: {e}")
+            logger.error(f"Error en get_account_info: {e}")
             return None
 
-    def place_order(self, symbol, side, marginCoin, size, price='', clientOrderId='', posSide='long'):
-        """Colocar una orden en Bitget V2"""
+    def get_symbol_info(self, symbol):
+        """Obtener información del símbolo"""
+        try:
+            request_path = '/api/v2/mix/market/contracts'
+            params = {'productType': 'USDT-FUTURES'}
+            
+            query_string = f"?productType=USDT-FUTURES"
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    contracts = data.get('data', [])
+                    for contract in contracts:
+                        if contract.get('symbol') == symbol:
+                            return contract
+            
+            # Fallback a USDT-MIX si no se encuentra en USDT-FUTURES
+            params = {'productType': 'USDT-MIX'}
+            query_string = f"?productType=USDT-MIX"
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    contracts = data.get('data', [])
+                    for contract in contracts:
+                        if contract.get('symbol') == symbol:
+                            return contract
+            
+            logger.error(f"No se encontró información para el símbolo {symbol} en USDT-FUTURES ni USDT-MIX.")
+            return None
+        except Exception as e:
+            logger.error(f"Error obteniendo info del símbolo {symbol}: {e}")
+            return None
+
+    def place_order(self, symbol, side, order_type, size, price=None, 
+                    client_order_id=None, time_in_force='normal'):
+        """Colocar orden de mercado o límite"""
         try:
             request_path = '/api/v2/mix/order/place-order'
             body = {
                 'symbol': symbol,
-                'marginCoin': marginCoin,
+                'productType': 'USDT-FUTURES',
+                'marginCoin': 'USDT',
+                'side': side,
+                'orderType': order_type,
                 'size': str(size),
-                'side': side.lower(),
-                'posSide': posSide.lower(),
-                'tradeMode': 'cross',
-                'orderType': 'market' if price == '' else 'limit',
-                'price': price
+                'timeInForce': time_in_force
             }
-            if clientOrderId:
-                body['clientOid'] = clientOrderId
+            if price:
+                body['price'] = str(price)
+            if client_order_id:
+                body['clientOrderId'] = client_order_id
+            
             headers = self._get_headers('POST', request_path, body)
-            response = requests.post(f"{self.base_url}{request_path}", headers=headers, json=body, timeout=10)
-            logger.info(f"Respuesta colocar orden - Status: {response.status_code}, Body: {body}")
+            
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                json=body,
+                timeout=10
+            )
+            
+            logger.debug(f"Respuesta place_order - Status: {response.status_code}, Body: {response.text}")
+
             if response.status_code == 200:
                 data = response.json()
                 if data.get('code') == '00000':
-                    order_data = data.get('data', {})
-                    logger.info(f"✅ Orden colocada exitosamente. ID: {order_data.get('orderId', 'N/A')}")
-                    return order_data
+                    logger.info(f"✓ Orden colocada exitosamente: {data.get('data', {})}")
+                    return data.get('data', {})
                 else:
-                    logger.error(f"❌ Error en la respuesta de colocar orden: {data.get('msg', 'Unknown error')}")
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    logger.error(f"Error en place_order: {error_code} - {error_msg}")
                     return None
             else:
-                logger.error(f"❌ Error HTTP al colocar orden: {response.status_code} - {response.text}")
+                logger.error(f"Error HTTP en place_order: {response.status_code} - {response.text}")
                 return None
         except Exception as e:
-            logger.error(f"❌ Error en place_order: {e}")
+            logger.error(f"Error colocando orden: {e}")
+            return None
+
+    def place_plan_order(self, symbol, side, trigger_price, order_type, size, 
+                         price=None, plan_type='normal_plan'):
+        """Colocar orden de plan (TP/SL)"""
+        try:
+            request_path = '/api/v2/mix/order/place-plan-order'
+            body = {
+                'symbol': symbol,
+                'productType': 'USDT-FUTURES',
+                'marginCoin': 'USDT',
+                'side': side,
+                'orderType': order_type,
+                'triggerPrice': str(trigger_price),
+                'size': str(size),
+                'planType': plan_type,
+                'triggerType': 'market_price'
+            }
+            if price:
+                body['executePrice'] = str(price)
+            
+            headers = self._get_headers('POST', request_path, body)
+            
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                json=body,
+                timeout=10
+            )
+            
+            logger.debug(f"Respuesta place_plan_order - Status: {response.status_code}, Body: {response.text}")
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    logger.info(f"✓ Orden plan ({plan_type}) colocada exitosamente: {data.get('data', {})}")
+                    return data.get('data', {})
+                else:
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    logger.error(f"Error en place_plan_order ({plan_type}): {error_code} - {error_msg}")
+                    return None
+            else:
+                logger.error(f"Error HTTP en place_plan_order ({plan_type}): {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Error colocando plan order ({plan_type}): {e}")
             return None
 
     def set_leverage(self, symbol, leverage, hold_side='long'):
-        """Configurar apalancamiento en Bitget V2"""
+        """Configurar apalancamiento"""
         try:
             request_path = '/api/v2/mix/account/set-leverage'
             body = {
@@ -157,142 +434,304 @@ class BitgetClient:
                 'leverage': str(leverage),
                 'holdSide': hold_side
             }
+            
             headers = self._get_headers('POST', request_path, body)
-            response = requests.post(f"{self.base_url}{request_path}", headers=headers, json=body, timeout=10)
-            logger.info(f"Respuesta set_leverage - Status: {response.status_code}, Body: {body}")
+            
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                json=body,
+                timeout=10
+            )
+            
+            logger.debug(f"Respuesta set_leverage - Status: {response.status_code}, Body: {response.text}")
+
             if response.status_code == 200:
                 data = response.json()
                 if data.get('code') == '00000':
-                    logger.info(f"✓ Apalancamiento {leverage}x configurado para {symbol}")
+                    logger.info(f"✓ Apalancamiento {leverage}x configurado para {symbol} ({hold_side})")
                     return True
                 else:
-                    logger.error(f"❌ Error en la respuesta de set_leverage: {data.get('msg', 'Unknown error')}")
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    # A veces este error no es crítico, si el apalancamiento ya estaba configurado
+                    if "already" in error_msg.lower():
+                        logger.warning(f"Apalancamiento para {symbol} ya estaba configurado. Mensaje: {error_msg}")
+                        return True
+                    logger.error(f"Error configurando leverage: {error_code} - {error_msg}")
                     return False
             else:
-                logger.error(f"❌ Error HTTP en set_leverage: {response.status_code} - {response.text}")
+                logger.error(f"Error HTTP configurando leverage: {response.status_code} - {response.text}")
                 return False
         except Exception as e:
-            logger.error(f"❌ Error en set_leverage: {e}")
+            logger.error(f"Error en set_leverage: {e}")
             return False
 
     def get_positions(self, symbol=None, product_type='USDT-FUTURES'):
-        """Obtener posiciones abiertas en Bitget V2"""
+        """Obtener posiciones abiertas"""
         try:
             request_path = '/api/v2/mix/position/all-position'
             params = {'productType': product_type, 'marginCoin': 'USDT'}
             if symbol:
                 params['symbol'] = symbol
+            
             query_parts = []
             for key, value in params.items():
                 query_parts.append(f"{key}={value}")
-            query_string = "?" + "&".join(query_parts)
+            query_string = "?" + "&".join(query_parts) if query_parts else ""
             full_request_path = request_path + query_string
+            
             headers = self._get_headers('GET', full_request_path, '')
-            response = requests.get(f"{self.base_url}{request_path}", headers=headers, params=params, timeout=10)
-            logger.info(f"Respuesta get_positions - Status: {response.status_code}, Query: {query_string}")
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            logger.debug(f"Respuesta get_positions - Status: {response.status_code}, Body: {response.text}")
+
             if response.status_code == 200:
                 data = response.json()
                 if data.get('code') == '00000':
-                    positions = data.get('data', [])
-                    logger.info(f"✅ Posiciones obtenidas: {len(positions)}")
-                    return positions
+                    return data.get('data', [])
                 else:
-                    logger.error(f"❌ Error en la respuesta de get_positions: {data.get('msg', 'Unknown error')}")
-                    return None
-            else:
-                logger.error(f"❌ Error HTTP en get_positions: {response.status_code} - {response.text}")
-                return None
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    logger.error(f"Error en get_positions: {error_code} - {error_msg}")
+            
+            if product_type == 'USDT-FUTURES':
+                logger.info("Reintentando get_positions con productType='USDT-MIX'")
+                return self.get_positions(symbol, 'USDT-MIX')
+            
+            return []
         except Exception as e:
-            logger.error(f"❌ Error en get_positions: {e}")
-            return None
+            logger.error(f"Error obteniendo posiciones: {e}")
+            return []
 
-    def create_plan_order(self, symbol, marginCoin, size, triggerPrice, executePrice='', planType='normal', side='buy', posSide='long'):
-        """Crear una orden plan (TP/SL) en Bitget V2"""
+    def get_klines(self, symbol, interval='5m', limit=200):
+        """Obtener velas (datos de mercado)"""
         try:
-            request_path = '/api/v2/mix/order/place-plan'
-            body = {
-                'symbol': symbol,
-                'marginCoin': marginCoin,
-                'size': str(size),
-                'triggerPrice': str(triggerPrice),
-                'executePrice': executePrice,
-                'planType': planType,
-                'side': side.lower(),
-                'posSide': posSide.lower(),
-                'triggerType': 'market_price',
-                'tradeMode': 'cross'
+            interval_map = {
+                '1m': '1m', '3m': '3m', '5m': '5m',
+                '15m': '15m', '30m': '30m', '1h': '1H',
+                '4h': '4H', '1d': '1D'
             }
-            headers = self._get_headers('POST', request_path, body)
-            response = requests.post(f"{self.base_url}{request_path}", headers=headers, json=body, timeout=10)
-            logger.info(f"Respuesta crear plan order - Status: {response.status_code}, Body: {body}")
+            bitget_interval = interval_map.get(interval, '5m')
+            request_path = f'/api/v2/mix/market/candles'
+            params = {
+                'symbol': symbol,
+                'productType': 'USDT-FUTURES',
+                'granularity': bitget_interval,
+                'limit': limit
+            }
+            
+            response = requests.get(
+                self.base_url + request_path,
+                params=params,
+                timeout=10
+            )
+            
             if response.status_code == 200:
                 data = response.json()
                 if data.get('code') == '00000':
-                    plan_data = data.get('data', {})
-                    logger.info(f"✅ Plan order creado exitosamente. ID: {plan_data.get('planId', 'N/A')}")
-                    return plan_data
+                    candles = data.get('data', [])
+                    if not candles:
+                        logger.warning(f"No se recibieron velas para {symbol} con intervalo {interval}.")
+                    return candles
                 else:
-                    logger.error(f"❌ Error en la respuesta de crear plan order: {data.get('msg', 'Unknown error')}")
-                    return None
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    logger.error(f"Error en get_klines (USDT-FUTURES): {error_code} - {error_msg}")
+                    
+                    # Intentar con USDT-MIX si falla con USDT-FUTURES
+                    params['productType'] = 'USDT-MIX'
+                    response = requests.get(
+                        self.base_url + request_path,
+                        params=params,
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get('code') == '00000':
+                            candles = data.get('data', [])
+                            if not candles:
+                                logger.warning(f"No se recibieron velas para {symbol} con intervalo {interval} (USDT-MIX).")
+                            return candles
+                        else:
+                            error_msg = data.get('msg', 'Unknown error')
+                            error_code = data.get('code', 'Unknown')
+                            logger.error(f"Error en get_klines (USDT-MIX): {error_code} - {error_msg}")
             else:
-                logger.error(f"❌ Error HTTP al crear plan order: {response.status_code} - {response.text}")
-                return None
+                logger.error(f"Error HTTP en get_klines: {response.status_code} - {response.text}")
+            return None
         except Exception as e:
-            logger.error(f"❌ Error en create_plan_order: {e}")
+            logger.error(f"Error en get_klines para {symbol}: {e}")
             return None
 
-    def get_account_info(self, product_type='USDT-FUTURES'):
-        """Obtener información de cuenta Bitget V2"""
-        try:
-            request_path = '/api/v2/mix/account/accounts'
-            params = {'productType': product_type, 'marginCoin': 'USDT'}
-            query_string = f"?productType={product_type}&marginCoin=USDT"
-            full_request_path = request_path + query_string
-            headers = self._get_headers('GET', full_request_path, '')
-            response = requests.get(f"{self.base_url}{request_path}", headers=headers, params=params, timeout=10)
-            logger.info(f"Respuesta cuenta - Status: {response.status_code}")
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('code') == '00000':
-                    accounts = data.get('data', [])
-                    logger.info(f"✅ Información de cuenta obtenida: {len(accounts)} cuentas")
-                    return accounts
-                else:
-                    logger.error(f"❌ Error en la respuesta de cuenta: {data.get('msg', 'Unknown error')}")
-                    return None
-            else:
-                logger.error(f"❌ Error HTTP al obtener cuenta: {response.status_code} - {response.text}")
-                return None
-        except Exception as e:
-            logger.error(f"❌ Error en get_account_info: {e}")
+# ---------------------------
+# FUNCIONES DE OPERACIONES BITGET
+# ---------------------------
+def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_usd, leverage=20):
+    """
+    Ejecutar una operación completa en Bitget (posición + TP/SL)
+    
+    Args:
+        bitget_client: Instancia de BitgetClient
+        simbolo: Símbolo de trading (ej: 'BTCUSDT')
+        tipo_operacion: 'LONG' o 'SHORT'
+        capital_usd: Capital a usar en USD
+        leverage: Apalancamiento (default: 20)
+    
+    Returns:
+        dict con información de la operación ejecutada
+    """
+    
+    logger.info(f"🚀 EJECUTANDO OPERACIÓN REAL EN BITGET")
+    logger.info(f"Símbolo: {simbolo}")
+    logger.info(f"Tipo: {tipo_operacion}")
+    logger.info(f"Apalancamiento: {leverage}x")
+    logger.info(f"Capital: ${capital_usd}")
+    
+    try:
+        # 1. Configurar apalancamiento
+        hold_side = 'long' if tipo_operacion == 'LONG' else 'short'
+        leverage_ok = bitget_client.set_leverage(simbolo, leverage, hold_side)
+        if not leverage_ok:
+            logger.error("Falló la configuración del apalancamiento. Abortando operación.")
             return None
+        time.sleep(0.5)
+        
+        # 2. Obtener precio actual
+        klines = bitget_client.get_klines(simbolo, '1m', 1)
+        if not klines or len(klines) == 0:
+            logger.error(f"No se pudo obtener el precio actual de {simbolo}. Abortando operación.")
+            return None
+        
+        klines.reverse()  # Bitget devuelve en orden descendente
+        precio_actual = float(klines[0][4])  # Precio de cierre de la última vela
+        
+        # 3. Obtener información del símbolo
+        symbol_info = bitget_client.get_symbol_info(simbolo)
+        if not symbol_info:
+            logger.error(f"No se pudo obtener la información del símbolo {simbolo}. Abortando operación.")
+            return None
+        
+        # 4. Calcular tamaño de la posición
+        size_multiplier = float(symbol_info.get('sizeMultiplier', 1))
+        min_trade_num = float(symbol_info.get('minTradeNum', 1))
+        
+        # Calcular cantidad en USD
+        cantidad_usd = capital_usd * leverage
+        # Convertir a cantidad de contratos
+        cantidad_contratos = cantidad_usd / precio_actual
+        cantidad_contratos = round(cantidad_contratos / size_multiplier) * size_multiplier
+        
+        # Verificar mínimo
+        if cantidad_contratos < min_trade_num:
+            cantidad_contratos = min_trade_num
+        
+        logger.info(f"Cantidad calculada: {cantidad_contratos} contratos (Valor nocional: ${cantidad_contratos * precio_actual:.2f})")
+        
+        # 5. Calcular TP y SL (2% fijo)
+        if tipo_operacion == "LONG":
+            sl_porcentaje = 0.02
+            tp_porcentaje = 0.04  # TP doble del SL (RR 2:1)
+            stop_loss = precio_actual * (1 - sl_porcentaje)
+            take_profit = precio_actual * (1 + tp_porcentaje)
+        else:
+            sl_porcentaje = 0.02
+            tp_porcentaje = 0.04
+            stop_loss = precio_actual * (1 + sl_porcentaje)
+            take_profit = precio_actual * (1 - tp_porcentaje)
+        
+        # 6. Abrir posición
+        side = 'open_long' if tipo_operacion == 'LONG' else 'open_short'
+        orden_entrada = bitget_client.place_order(
+            symbol=simbolo,
+            side=side,
+            order_type='market',
+            size=cantidad_contratos
+        )
+        
+        if not orden_entrada:
+            logger.error("Error abriendo posición principal. Abortando operación.")
+            return None
+        
+        logger.info(f"✓ Posición abierta: {orden_entrada}")
+        time.sleep(1)
+        
+        # 7. Colocar Stop Loss
+        sl_side = 'close_long' if tipo_operacion == 'LONG' else 'close_short'
+        orden_sl = bitget_client.place_plan_order(
+            symbol=simbolo,
+            side=sl_side,
+            trigger_price=stop_loss,
+            order_type='market',
+            size=cantidad_contratos,
+            plan_type='loss_plan'
+        )
+        
+        if orden_sl:
+            logger.info(f"✓ Stop Loss configurado en: {stop_loss:.8f}")
+        else:
+            logger.error("Error crítico: No se pudo configurar el Stop Loss. La posición queda sin protección.")
+        
+        time.sleep(0.5)
+        
+        # 8. Colocar Take Profit
+        orden_tp = bitget_client.place_plan_order(
+            symbol=simbolo,
+            side=sl_side,
+            trigger_price=take_profit,
+            order_type='market',
+            size=cantidad_contratos,
+            plan_type='normal_plan'
+        )
+        
+        if orden_tp:
+            logger.info(f"✓ Take Profit configurado en: {take_profit:.8f}")
+        else:
+            logger.warning("No se pudo configurar el Take Profit.")
+        
+        # 9. Retornar información de la operación
+        operacion_data = {
+            'orden_entrada': orden_entrada,
+            'orden_sl': orden_sl,
+            'orden_tp': orden_tp,
+            'cantidad_contratos': cantidad_contratos,
+            'precio_entrada': precio_actual,
+            'take_profit': take_profit,
+            'stop_loss': stop_loss,
+            'leverage': leverage,
+            'capital_usado': capital_usd,
+            'tipo': tipo_operacion,
+            'timestamp_entrada': datetime.now().isoformat(),
+            'symbol': simbolo
+        }
+        
+        logger.info(f"✅ OPERACIÓN EJECUTADA EXITOSAMENTE")
+        logger.info(f"ID Orden: {orden_entrada.get('orderId', 'N/A')}")
+        logger.info(f"Contratos: {cantidad_contratos}")
+        logger.info(f"Entrada: {precio_actual:.8f}")
+        logger.info(f"SL: {stop_loss:.8f} (-{sl_porcentaje*100}%)")
+        logger.info(f"TP: {take_profit:.8f} (+{tp_porcentaje*100}%)")
+        
+        return operacion_data
+        
+    except Exception as e:
+        logger.error(f"Error inesperado ejecutando operación: {e}", exc_info=True)
+        return None
 
-    def verificar_credenciales(self):
-        """Verificar si las credenciales son válidas"""
-        try:
-            logger.info("Verificando credenciales Bitget...")
-            if not self.api_key or not self.api_secret or not self.passphrase:
-                logger.error("Credenciales incompletas")
-                return False
-            accounts = self.get_account_info()
-            if accounts:
-                logger.info("✓ Credenciales verificadas exitosamente")
-                for account in accounts:
-                    if account.get('marginCoin') == 'USDT':
-                        available = float(account.get('available', 0))
-                        logger.info(f"✓ Balance disponible: {available:.2f} USDT")
-                        return True
-            else:
-                logger.error("✗ No se pudo verificar credenciales")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Error verificando credenciales: {e}")
-            return False
-
-class BotBreakoutReentry:
-    def __init__(self, config_file='config.json'):
-        self.config = {}
-        self.load_config(config_file)
+# ---------------------------
+# BOT PRINCIPAL - BREAKOUT + REENTRY CON INTEGRACIÓN BITGET
+# ---------------------------
+class TradingBot:
+    def __init__(self, config):
+        self.config = config
+        self.log_path = config.get('log_path', 'operaciones_log.csv')
+        self.auto_optimize = config.get('auto_optimize', True)
         self.ultima_optimizacion = datetime.now()
         self.operaciones_desde_optimizacion = 0
         self.total_operaciones = 0
@@ -304,7 +743,7 @@ class BotBreakoutReentry:
         self.esperando_reentry = {}
         self.estado_file = config.get('estado_file', 'estado_bot.json')
         self.cargar_estado()
-
+        
         # NUEVO: Inicializar cliente Bitget si están las credenciales
         self.bitget_client = None
         if config.get('bitget_api_key') and config.get('bitget_api_secret') and config.get('bitget_passphrase'):
@@ -313,78 +752,37 @@ class BotBreakoutReentry:
                 api_secret=config['bitget_api_secret'],
                 passphrase=config['bitget_passphrase']
             )
-            if self.bitget_client.verificar_credenciales():
-                logger.info("✅ Cliente Bitget inicializado y verificado")
-            else:
-                logger.warning("⚠️ No se pudieron verificar las credenciales de Bitget")
-
+            if not self.bitget_client.verificar_credenciales():
+                logger.warning("⚠️ No se pudieron verificar las credenciales de Bitget. El bot operará sin ejecutar operaciones reales.")
+                self.bitget_client = None # Deshabilitar cliente si las credenciales fallan
+        else:
+            logger.warning("⚠️ Faltan credenciales de Bitget (API Key, Secret, Passphrase). El bot operará sin ejecutar operaciones reales.")
+        
         # NUEVO: Configuración de operaciones automáticas
         self.ejecutar_operaciones_automaticas = config.get('ejecutar_operaciones_automaticas', False)
         self.capital_por_operacion = config.get('capital_por_operacion', 50)
         self.leverage_por_defecto = config.get('leverage_por_defecto', 20)
-
-        # Optimización automática
-        self.auto_optimize = config.get('auto_optimize', True)
+        
         parametros_optimizados = None
         if self.auto_optimize:
             try:
-                from optimizador_ia import OptimizadorIA
                 ia = OptimizadorIA(log_path=self.log_path, min_samples=config.get('min_samples_optimizacion', 15))
                 parametros_optimizados = ia.buscar_mejores_parametros()
             except Exception as e:
-                print("⚠ Error en optimización automática:", e)
+                logger.error(f"⚠ Error en optimización automática: {e}")
                 parametros_optimizados = None
-
         if parametros_optimizados:
-            self.config['trend_threshold_degrees'] = parametros_optimizados.get('trend_threshold_degrees', self.config.get('trend_threshold_degrees', 13))
-            self.config['min_trend_strength_degrees'] = parametros_optimizados.get('min_trend_strength_degrees', self.config.get('min_trend_strength_degrees', 16))
-            self.config['entry_margin'] = parametros_optimizados.get('entry_margin', self.config.get('entry_margin', 0.001))
-
+            self.config['trend_threshold_degrees'] = parametros_optimizados.get('trend_threshold_degrees', 
+                                                                               self.config.get('trend_threshold_degrees', 13))
+            self.config['min_trend_strength_degrees'] = parametros_optimizados.get('min_trend_strength_degrees', 
+                                                                                   self.config.get('min_trend_strength_degrees', 16))
+            self.config['entry_margin'] = parametros_optimizados.get('entry_margin', 
+                                                                     self.config.get('entry_margin', 0.001))
         self.ultimos_datos = {}
         self.operaciones_activas = {}
         self.senales_enviadas = set()
         self.archivo_log = self.log_path
         self.inicializar_log()
-
-    def load_config(self, config_file):
-        """Cargar configuración desde archivo o variables de entorno"""
-        try:
-            with open(config_file, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
-        except FileNotFoundError:
-            logger.warning(f"Archivo de configuración {config_file} no encontrado. Usando variables de entorno.")
-            self.config = {
-                'symbols': ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT', 'XRPUSDT', 'DOTUSDT', 'DOGEUSDT', 'AVAXUSDT', 'LINKUSDT'],
-                'timeframes': ['1m', '3m', '5m', '15m', '30m'],
-                'velas_options': [80, 100, 120, 150, 200],
-                'trend_threshold_degrees': 13,
-                'min_trend_strength_degrees': 16,
-                'entry_margin': 0.001,
-                'scan_interval_minutes': 1,
-                'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
-                'telegram_chat_ids': [int(os.environ.get('TELEGRAM_CHAT_ID'))] if os.environ.get('TELEGRAM_CHAT_ID') else [],
-                'bitget_api_key': os.environ.get('BITGET_API_KEY'),
-                'bitget_secret_key': os.environ.get('BITGET_SECRET_KEY'),
-                'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
-                'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-                'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', 50)),
-                'leverage_por_defecto': int(os.environ.get('LEVERAGE_POR_DEFECTO', 20)),
-                'log_path': 'bot_log.txt',
-                'estado_file': 'estado_bot.json',
-                'auto_optimize': True,
-                'min_samples_optimizacion': 15
-            }
-        except Exception as e:
-            logger.error(f"Error cargando configuración: {e}")
-            self.config = {}
-
-    def inicializar_log(self):
-        """Inicializar el archivo de log"""
-        try:
-            with open(self.archivo_log, 'a', encoding='utf-8') as f:
-                f.write(f"\n--- INICIO DE SESIÓN {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-        except Exception as e:
-            logger.error(f"Error inicializando log: {e}")
 
     def cargar_estado(self):
         """Carga el estado previo del bot incluyendo breakouts"""
@@ -392,20 +790,39 @@ class BotBreakoutReentry:
             if os.path.exists(self.estado_file):
                 with open(self.estado_file, 'r', encoding='utf-8') as f:
                     estado = json.load(f)
-                    self.ultima_optimizacion = datetime.fromisoformat(estado.get('ultima_optimizacion', datetime.now().isoformat()))
-                    self.operaciones_desde_optimizacion = estado.get('operaciones_desde_optimizacion', 0)
-                    self.total_operaciones = estado.get('total_operaciones', 0)
-                    self.breakout_history = {k: datetime.fromisoformat(v) for k, v in estado.get('breakout_history', {}).items()}
-                    self.config_optima_por_simbolo = estado.get('config_optima_por_simbolo', {})
-                    self.ultima_busqueda_config = {k: datetime.fromisoformat(v) for k, v in estado.get('ultima_busqueda_config', {}).items()}
-                    self.breakouts_detectados = estado.get('breakouts_detectados', {})
-                    self.esperando_reentry = estado.get('esperando_reentry', {})
-                    self.operaciones_activas = estado.get('operaciones_activas', {})
-                    self.senales_enviadas = set(estado.get('senales_enviadas', []))
-                    logger.info("✅ Estado cargado correctamente")
+                if 'ultima_optimizacion' in estado:
+                    estado['ultima_optimizacion'] = datetime.fromisoformat(estado['ultima_optimizacion'])
+                if 'ultima_busqueda_config' in estado:
+                    for simbolo, fecha_str in estado['ultima_busqueda_config'].items():
+                        estado['ultima_busqueda_config'][simbolo] = datetime.fromisoformat(fecha_str)
+                if 'breakout_history' in estado:
+                    for simbolo, fecha_str in estado['breakout_history'].items():
+                        estado['breakout_history'][simbolo] = datetime.fromisoformat(fecha_str)
+                # Cargar breakouts y reingresos esperados
+                if 'esperando_reentry' in estado:
+                    for simbolo, info in estado['esperando_reentry'].items():
+                        info['timestamp'] = datetime.fromisoformat(info['timestamp'])
+                        estado['esperando_reentry'][simbolo] = info
+                    self.esperando_reentry = estado['esperando_reentry']
+                if 'breakouts_detectados' in estado:
+                    for simbolo, info in estado['breakouts_detectados'].items():
+                        info['timestamp'] = datetime.fromisoformat(info['timestamp'])
+                        estado['breakouts_detectados'][simbolo] = info
+                    self.breakouts_detectados = estado['breakouts_detectados']
+                self.ultima_optimizacion = estado.get('ultima_optimizacion', datetime.now())
+                self.operaciones_desde_optimizacion = estado.get('operaciones_desde_optimizacion', 0)
+                self.total_operaciones = estado.get('total_operaciones', 0)
+                self.breakout_history = estado.get('breakout_history', {})
+                self.config_optima_por_simbolo = estado.get('config_optima_por_simbolo', {})
+                self.ultima_busqueda_config = estado.get('ultima_busqueda_config', {})
+                self.operaciones_activas = estado.get('operaciones_activas', {})
+                self.senales_enviadas = set(estado.get('senales_enviadas', []))
+                logger.info("✅ Estado anterior cargado correctamente")
+                logger.info(f"   📊 Operaciones activas: {len(self.operaciones_activas)}")
+                logger.info(f"   ⏳ Esperando reentry: {len(self.esperando_reentry)}")
         except Exception as e:
             logger.error(f"⚠ Error cargando estado previo: {e}")
-            logger.info("Se iniciará con estado limpio")
+            logger.info("   Se iniciará con estado limpio")
 
     def guardar_estado(self):
         """Guarda el estado actual del bot incluyendo breakouts"""
@@ -417,165 +834,30 @@ class BotBreakoutReentry:
                 'breakout_history': {k: v.isoformat() for k, v in self.breakout_history.items()},
                 'config_optima_por_simbolo': self.config_optima_por_simbolo,
                 'ultima_busqueda_config': {k: v.isoformat() for k, v in self.ultima_busqueda_config.items()},
-                'breakouts_detectados': self.breakouts_detectados,
-                'esperando_reentry': self.esperando_reentry,
                 'operaciones_activas': self.operaciones_activas,
-                'senales_enviadas': list(self.senales_enviadas)
+                'senales_enviadas': list(self.senales_enviadas),
+                'esperando_reentry': {
+                    k: {
+                        'tipo': v['tipo'],
+                        'timestamp': v['timestamp'].isoformat(),
+                        'precio_breakout': v['precio_breakout'],
+                        'config': v.get('config', {})
+                    } for k, v in self.esperando_reentry.items()
+                },
+                'breakouts_detectados': {
+                    k: {
+                        'tipo': v['tipo'],
+                        'timestamp': v['timestamp'].isoformat(),
+                        'precio_breakout': v.get('precio_breakout', 0)
+                    } for k, v in self.breakouts_detectados.items()
+                },
+                'timestamp_guardado': datetime.now().isoformat()
             }
             with open(self.estado_file, 'w', encoding='utf-8') as f:
                 json.dump(estado, f, indent=2, ensure_ascii=False)
             logger.info("💾 Estado guardado correctamente")
         except Exception as e:
             logger.error(f"⚠ Error guardando estado: {e}")
-
-    def obtener_datos_mercado_config(self, simbolo, timeframe, num_velas):
-        """Obtiene datos con configuración específica usando API de Bitget"""
-        # Usar API de Bitget en lugar de Binance
-        if self.bitget_client:
-            try:
-                candles = self.bitget_client.get_klines(simbolo, timeframe, num_velas + 14)
-                if not candles or len(candles) == 0:
-                    logger.error(f"❌ No se obtuvieron velas para {simbolo} en {timeframe}")
-                    return None
-
-                # Procesar datos de Bitget
-                maximos = []
-                minimos = []
-                cierres = []
-                tiempos = []
-                for i, candle in enumerate(candles):
-                    # Formato Bitget: [timestamp, open, high, low, close, volume, ...]
-                    maximos.append(float(candle[2]))  # high
-                    minimos.append(float(candle[3]))  # low
-                    cierres.append(float(candle[4]))  # close
-                    tiempos.append(i)
-
-                precio_actual = cierres[-1]
-                logger.info(f"✅ Datos obtenidos para {simbolo}: {len(cierres)} velas, precio actual: {precio_actual:.8f}")
-                return {
-                    'maximos': maximos,
-                    'minimos': minimos,
-                    'cierres': cierres,
-                    'tiempos': tiempos,
-                    'precio_actual': precio_actual,
-                    'timeframe': timeframe,
-                    'num_velas': num_velas
-                }
-            except Exception as e:
-                logger.error(f"❌ Error obteniendo datos de Bitget para {simbolo}: {e}")
-                return None
-        else:
-            # Fallback a Binance
-            try:
-                url = "https://api.binance.com/api/v3/klines"
-                params = {
-                    'symbol': simbolo,
-                    'interval': timeframe,
-                    'limit': num_velas + 14
-                }
-                respuesta = requests.get(url, params=params, timeout=10)
-                klines = respuesta.json()
-                df_data = []
-                for kline in klines:
-                    df_data.append({
-                        'Date': pd.to_datetime(kline[0], unit='ms'),
-                        'Open': float(kline[1]),
-                        'High': float(kline[2]),
-                        'Low': float(kline[3]),
-                        'Close': float(kline[4]),
-                        'Volume': float(kline[5])
-                    })
-                df = pd.DataFrame(df_data)
-                df.set_index('Date', inplace=True)
-                maximos = df['High'].tolist()
-                minimos = df['Low'].tolist()
-                cierres = df['Close'].tolist()
-                tiempos = list(range(len(cierres)))
-                precio_actual = cierres[-1]
-                logger.info(f"✅ Datos obtenidos de Binance para {simbolo}: {len(cierres)} velas, precio actual: {precio_actual:.8f}")
-                return {
-                    'maximos': maximos,
-                    'minimos': minimos,
-                    'cierres': cierres,
-                    'tiempos': tiempos,
-                    'precio_actual': precio_actual,
-                    'timeframe': timeframe,
-                    'num_velas': num_velas
-                }
-            except Exception as e:
-                logger.error(f"❌ Error obteniendo datos de Binance para {simbolo}: {e}")
-                return None
-
-    def calcular_canal_regresion_config(self, datos_mercado, num_velas):
-        """Calcula el canal de regresión lineal para los datos proporcionados"""
-        try:
-            cierres = datos_mercado['cierres']
-            tiempos = datos_mercado['tiempos']
-            maximos = datos_mercado['maximos']
-            minimos = datos_mercado['minimos']
-
-            # Calcular regresión lineal
-            x = np.array(tiempos)
-            y = np.array(cierres)
-            coeficiente_pearson = np.corrcoef(x, y)[0, 1]
-            r2_score = coeficiente_pearson ** 2
-
-            # Calcular pendiente y intercepto
-            m, b = np.polyfit(x, y, 1)
-            pendiente_grados = np.degrees(np.arctan(m))
-
-            # Calcular niveles de soporte y resistencia
-            desviacion_estandar = np.std(y)
-            resistencia = y + desviacion_estandar
-            soporte = y - desviacion_estandar
-
-            # Calcular ancho del canal
-            ancho_canal = np.mean(resistencia - soporte)
-            ancho_canal_porcentual = (ancho_canal / np.mean(y)) * 100
-
-            # Calcular Stochastic Oscillator
-            n = 14
-            if len(y) >= n:
-                lowest_low = np.min(y[-n:])
-                highest_high = np.max(y[-n:])
-                stoch_k = ((y[-1] - lowest_low) / (highest_high - lowest_low)) * 100 if highest_high != lowest_low else 50
-                stoch_d = np.mean([stoch_k])  # Simplificado, usar media móvil en producción
-            else:
-                stoch_k = 50
-                stoch_d = 50
-
-            # Determinar dirección del canal
-            direccion_canal = "ALCISTA" if m > 0 else "BAJISTA"
-
-            # Calcular fuerza del canal
-            nivel_fuerza = 0
-            if abs(pendiente_grados) >= self.config.get('min_trend_strength_degrees', 16):
-                nivel_fuerza = 2
-            elif abs(pendiente_grados) >= self.config.get('trend_threshold_degrees', 13):
-                nivel_fuerza = 1
-
-            info_canal = {
-                'pendiente_grados': pendiente_grados,
-                'coeficiente_pearson': coeficiente_pearson,
-                'r2_score': r2_score,
-                'nivel_fuerza': nivel_fuerza,
-                'ancho_canal': ancho_canal,
-                'ancho_canal_porcentual': ancho_canal_porcentual,
-                'direccion_canal': direccion_canal,
-                'stoch_k': stoch_k,
-                'stoch_d': stoch_d,
-                'pendiente_resistencia': np.polyfit(x, resistencia, 1)[0],
-                'pendiente_soporte': np.polyfit(x, soporte, 1)[0],
-                'timeframe': datos_mercado.get('timeframe', 'N/A'),
-                'num_velas': num_velas
-            }
-
-            logger.info(f"✅ Canal calculado para {datos_mercado.get('timeframe', 'N/A')} - R²: {r2_score:.4f}, Pendiente: {pendiente_grados:.2f}°, Fuerza: {nivel_fuerza}")
-            return info_canal
-
-        except Exception as e:
-            logger.error(f"❌ Error calculando canal de regresión: {e}")
-            return None
 
     def buscar_configuracion_optima_simbolo(self, simbolo):
         """Busca la mejor combinación de velas/timeframe"""
@@ -585,1125 +867,1227 @@ class BotBreakoutReentry:
             if ultima_busqueda and (datetime.now() - ultima_busqueda).total_seconds() < 7200:
                 return config_optima
             else:
-                logger.info(f" 🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
-
-        logger.info(f" 🔍 Buscando configuración óptima para {simbolo}...")
+                logger.info(f"   🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
+        logger.info(f"   🔍 Buscando configuración óptima para {simbolo}...")
         timeframes = self.config.get('timeframes', ['1m', '3m', '5m', '15m', '30m'])
         velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
         mejor_config = None
         mejor_puntaje = -999999
         prioridad_timeframe = {'1m': 200, '3m': 150, '5m': 120, '15m': 100, '30m': 80}
-
         for timeframe in timeframes:
             for num_velas in velas_options:
                 try:
                     datos = self.obtener_datos_mercado_config(simbolo, timeframe, num_velas)
                     if not datos:
                         continue
-
                     canal_info = self.calcular_canal_regresion_config(datos, num_velas)
                     if not canal_info:
                         continue
-
-                    if (canal_info['nivel_fuerza'] >= 2 and
-                        abs(canal_info['coeficiente_pearson']) >= 0.4 and
+                    if (canal_info['nivel_fuerza'] >= 2 and 
+                        abs(canal_info['coeficiente_pearson']) >= 0.4 and 
                         canal_info['r2_score'] >= 0.4):
-
                         ancho_actual = canal_info['ancho_canal_porcentual']
-                        puntaje_ancho = ancho_actual * 10
-                        puntaje_timeframe = prioridad_timeframe.get(timeframe, 50) * 100
-                        puntaje_total = puntaje_timeframe + puntaje_ancho
-
-                        if puntaje_total > mejor_puntaje:
-                            mejor_puntaje = puntaje_total
-                            mejor_config = {
-                                'timeframe': timeframe,
-                                'num_velas': num_velas,
-                                'puntaje': puntaje_total,
-                                'info_canal': canal_info
-                            }
-
+                        if ancho_actual >= self.config.get('min_channel_width_percent', 4.0):
+                            puntaje_ancho = ancho_actual * 10
+                            puntaje_timeframe = prioridad_timeframe.get(timeframe, 50) * 100
+                            puntaje_total = puntaje_timeframe + puntaje_ancho
+                            if puntaje_total > mejor_puntaje:
+                                mejor_puntaje = puntaje_total
+                                mejor_config = {
+                                    'timeframe': timeframe,
+                                    'num_velas': num_velas,
+                                    'ancho_canal': ancho_actual,
+                                    'puntaje_total': puntaje_total
+                                }
                 except Exception as e:
-                    logger.error(f"❌ Error evaluando configuración {timeframe}/{num_velas} para {simbolo}: {e}")
+                    logger.error(f"Error evaluando configuración {timeframe}-{num_velas}: {e}")
                     continue
-
+        if not mejor_config:
+            for timeframe in timeframes:
+                for num_velas in velas_options:
+                    try:
+                        datos = self.obtener_datos_mercado_config(simbolo, timeframe, num_velas)
+                        if not datos:
+                            continue
+                        canal_info = self.calcular_canal_regresion_config(datos, num_velas)
+                        if not canal_info:
+                            continue
+                        if (canal_info['nivel_fuerza'] >= 2 and 
+                            abs(canal_info['coeficiente_pearson']) >= 0.4 and 
+                            canal_info['r2_score'] >= 0.4):
+                            ancho_actual = canal_info['ancho_canal_porcentual']
+                            puntaje_ancho = ancho_actual * 10
+                            puntaje_timeframe = prioridad_timeframe.get(timeframe, 50) * 100
+                            puntaje_total = puntaje_timeframe + puntaje_ancho
+                            if puntaje_total > mejor_puntaje:
+                                mejor_puntaje = puntaje_total
+                                mejor_config = {
+                                    'timeframe': timeframe,
+                                    'num_velas': num_velas,
+                                    'ancho_canal': ancho_actual,
+                                    'puntaje_total': puntaje_total
+                                }
+                    except Exception as e:
+                        logger.error(f"Error evaluando configuración alternativa {timeframe}-{num_velas}: {e}")
+                        continue
         if mejor_config:
             self.config_optima_por_simbolo[simbolo] = mejor_config
             self.ultima_busqueda_config[simbolo] = datetime.now()
-            logger.info(f" ✅ Mejor configuración encontrada para {simbolo}: {mejor_config['timeframe']}/{mejor_config['num_velas']} - Puntaje: {mejor_config['puntaje']:.2f}")
-            return mejor_config
-        else:
-            logger.warning(f" ❌ No se encontró configuración óptima para {simbolo}")
+            logger.info(f"   ✅ Config óptima: {mejor_config['timeframe']} - {mejor_config['num_velas']} velas - Ancho: {mejor_config['ancho_canal']:.1f}%")
+        return mejor_config
+
+    def obtener_datos_mercado_config(self, simbolo, timeframe, num_velas):
+        """Obtiene datos con configuración específica usando API de Bitget"""
+        # Usar API de Bitget en lugar de Binance
+        if self.bitget_client:
+            try:
+                candles = self.bitget_client.get_klines(simbolo, timeframe, num_velas + 14)
+                if not candles or len(candles) == 0:
+                    logger.warning(f"No se obtuvieron velas de Bitget para {simbolo} {timeframe}")
+                    return None
+                
+                # Procesar datos de Bitget
+                maximos = []
+                minimos = []
+                cierres = []
+                tiempos = []
+                
+                for i, candle in enumerate(candles):
+                    # Formato Bitget: [timestamp, open, high, low, close, volume, ...]
+                    maximos.append(float(candle[2]))  # high
+                    minimos.append(float(candle[3]))  # low
+                    cierres.append(float(candle[4]))  # close
+                    tiempos.append(i)
+                
+                return {
+                    'maximos': maximos,
+                    'minimos': minimos,
+                    'cierres': cierres,
+                    'tiempos': tiempos,
+                    'precio_actual': cierres[-1] if cierres else 0,
+                    'timeframe': timeframe,
+                    'num_velas': num_velas
+                }
+            except Exception as e:
+                logger.error(f"Error obteniendo datos de Bitget para {simbolo}: {e}")
+                # Fallback a Binance si falla Bitget
+                pass
+        
+        # Fallback a Binance API (código original)
+        try:
+            url = "https://api.binance.com/api/v3/klines"
+            params = {'symbol': simbolo, 'interval': timeframe, 'limit': num_velas + 14}
+            respuesta = requests.get(url, params=params, timeout=10)
+            datos = respuesta.json()
+            if not isinstance(datos, list) or len(datos) == 0:
+                return None
+            maximos = [float(vela[2]) for vela in datos]
+            minimos = [float(vela[3]) for vela in datos]
+            cierres = [float(vela[4]) for vela in datos]
+            tiempos = list(range(len(datos)))
+            return {
+                'maximos': maximos,
+                'minimos': minimos,
+                'cierres': cierres,
+                'tiempos': tiempos,
+                'precio_actual': cierres[-1] if cierres else 0,
+                'timeframe': timeframe,
+                'num_velas': num_velas
+            }
+        except Exception as e:
+            logger.error(f"Error obteniendo datos de Binance para {simbolo}: {e}")
             return None
 
-    def detectar_breakout(self, simbolo, info_canal, datos_mercado):
-        """Detecta si hay un breakout en el canal"""
+    def calcular_canal_regresion_config(self, datos_mercado, candle_period):
+        """Calcula canal de regresión"""
         try:
-            precio_cierre = datos_mercado['cierres'][-1]
-            resistencia = info_canal['pendiente_resistencia'] * len(datos_mercado['tiempos']) + info_canal['pendiente_resistencia']
-            soporte = info_canal['pendiente_soporte'] * len(datos_mercado['tiempos']) + info_canal['pendiente_soporte']
-            margen = self.config.get('entry_margin', 0.001)
-
-            # Lógica corregida para breakout
-            # BREAKOUT_LONG: Ruptura de resistencia en canal BAJISTA (reversión alcista)
-            # BREAKOUT_SHORT: Ruptura de soporte en canal ALCISTA (reversión bajista)
-            if info_canal['direccion_canal'] == "BAJISTA" and precio_cierre > resistencia * (1 + margen):
-                tipo_breakout = "LONG"
-                logger.info(f" 🚀 BREAKOUT LONG detectado en {simbolo} - Precio: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
-                return tipo_breakout
-            elif info_canal['direccion_canal'] == "ALCISTA" and precio_cierre < soporte * (1 - margen):
-                tipo_breakout = "SHORT"
-                logger.info(f" 📉 BREAKOUT SHORT detectado en {simbolo} - Precio: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
-                return tipo_breakout
-            else:
-                logger.debug(f" ⏸️ Sin breakout en {simbolo} - Precio: {precio_cierre:.8f}, Resistencia: {resistencia:.8f}, Soporte: {soporte:.8f}")
+            if not datos_mercado or len(datos_mercado['maximos']) < candle_period:
                 return None
-
+            start_idx = -candle_period
+            tiempos = datos_mercado['tiempos'][start_idx:]
+            maximos = datos_mercado['maximos'][start_idx:]
+            minimos = datos_mercado['minimos'][start_idx:]
+            cierres = datos_mercado['cierres'][start_idx:]
+            tiempos_reg = list(range(len(tiempos)))
+            reg_max = self.calcular_regresion_lineal(tiempos_reg, maximos)
+            reg_min = self.calcular_regresion_lineal(tiempos_reg, minimos)
+            reg_close = self.calcular_regresion_lineal(tiempos_reg, cierres)
+            if not all([reg_max, reg_min, reg_close]):
+                return None
+            pendiente_max, intercepto_max = reg_max
+            pendiente_min, intercepto_min = reg_min
+            pendiente_cierre, intercepto_cierre = reg_close
+            tiempo_actual = tiempos_reg[-1]
+            resistencia_media = pendiente_max * tiempo_actual + intercepto_max
+            soporte_media = pendiente_min * tiempo_actual + intercepto_min
+            diferencias_max = [maximos[i] - (pendiente_max * tiempos_reg[i] + intercepto_max) for i in range(len(tiempos_reg))]
+            diferencias_min = [minimos[i] - (pendiente_min * tiempos_reg[i] + intercepto_min) for i in range(len(tiempos_reg))]
+            desviacion_max = np.std(diferencias_max) if diferencias_max else 0
+            desviacion_min = np.std(diferencias_min) if diferencias_min else 0
+            resistencia_superior = resistencia_media + desviacion_max
+            soporte_inferior = soporte_media - desviacion_min
+            precio_actual = datos_mercado['precio_actual']
+            pearson, angulo_tendencia = self.calcular_pearson_y_angulo(tiempos_reg, cierres)
+            fuerza_texto, nivel_fuerza = self.clasificar_fuerza_tendencia(angulo_tendencia)
+            direccion = self.determinar_direccion_tendencia(angulo_tendencia, 1)
+            stoch_k, stoch_d = self.calcular_stochastic(datos_mercado)
+            precio_medio = (resistencia_superior + soporte_inferior) / 2
+            ancho_canal_absoluto = resistencia_superior - soporte_inferior
+            ancho_canal_porcentual = (ancho_canal_absoluto / precio_medio) * 100
+            return {
+                'resistencia': resistencia_superior,
+                'soporte': soporte_inferior,
+                'resistencia_media': resistencia_media,
+                'soporte_media': soporte_media,
+                'linea_tendencia': pendiente_cierre * tiempo_actual + intercepto_cierre,
+                'pendiente_tendencia': pendiente_cierre,
+                'precio_actual': precio_actual,
+                'ancho_canal': ancho_canal_absoluto,
+                'ancho_canal_porcentual': ancho_canal_porcentual,
+                'angulo_tendencia': angulo_tendencia,
+                'coeficiente_pearson': pearson,
+                'fuerza_texto': fuerza_texto,
+                'nivel_fuerza': nivel_fuerza,
+                'direccion': direccion,
+                'r2_score': self.calcular_r2(cierres, tiempos_reg, pendiente_cierre, intercepto_cierre),
+                'pendiente_resistencia': pendiente_max,
+                'pendiente_soporte': pendiente_min,
+                'stoch_k': stoch_k,
+                'stoch_d': stoch_d,
+                'timeframe': datos_mercado.get('timeframe', 'N/A'),
+                'num_velas': candle_period
+            }
         except Exception as e:
-            logger.error(f"❌ Error detectando breakout para {simbolo}: {e}")
+            logger.error(f"Error en calcular_canal_regresion_config: {e}")
             return None
 
     def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
-        """Envía alerta de BREAKOUT detectado a Telegram con gráfico"""
+        """
+        Envía alerta de BREAKOUT detectado a Telegram con gráfico
+        LÓGICA CORREGIDA:
+        - BREAKOUT_LONG → Ruptura de resistencia en canal BAJISTA (oportunidad de reversión alcista)
+        - BREAKOUT_SHORT → Ruptura de soporte en canal ALCISTA (oportunidad de reversión bajista)
+        """
         try:
             precio_cierre = datos_mercado['cierres'][-1]
-            resistencia = info_canal['pendiente_resistencia'] * len(datos_mercado['tiempos']) + info_canal['pendiente_resistencia']
-            soporte = info_canal['pendiente_soporte'] * len(datos_mercado['tiempos']) + info_canal['pendiente_soporte']
-            direccion_canal = info_canal['direccion_canal']
-            margen = self.config.get('entry_margin', 0.001)
-
-            # Preparar mensaje según el tipo de breakout
-            if tipo_breakout == "LONG":
-                emoji_principal = "📈"
-                tipo_texto = "RUPTURA ALCISTA de RESISTENCIA"
-                nivel_roto = f"Resistencia: {resistencia:.8f}"
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            direccion_canal = info_canal['direccion']
+            # Determinar tipo de ruptura CORREGIDO SEGÚN TU ESTRATEGIA
+            if tipo_breakout == "BREAKOUT_LONG":
+                # Para un LONG, nos interesa la ruptura del SOPORTE hacia arriba
+                emoji_principal = "🚀"
+                tipo_texto = "RUPTURA de SOPORTE"
+                nivel_roto = f"Soporte: {soporte:.8f}"
                 direccion_emoji = "⬇️"
-                contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
+                contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
                 expectativa = "posible entrada en long si el precio reingresa al canal"
-            else:  # SHORT
+            else:  # BREAKOUT_SHORT
+                # Para un SHORT, nos interesa la ruptura de la RESISTENCIA hacia abajo
                 emoji_principal = "📉"
                 tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
                 nivel_roto = f"Resistencia: {resistencia:.8f}"
                 direccion_emoji = "⬆️"
                 contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
-                expectativa = "posible entrada en short si el precio reingresa al canal"
-
-            mensaje = f"""{emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
+                expectativa = "posible entrada en sort si el precio reingresa al canal"
+            # Mensaje de alerta
+            mensaje = f"""
+{emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
 ⚠️ <b>{tipo_texto}</b> {direccion_emoji}
 ⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ⏳ <b>ESPERANDO REINGRESO...</b>
 👁️ Máximo 30 minutos para confirmación
-
-📍 {expectativa}"""
-
+📍 {expectativa}
+            """
             token = self.config.get('telegram_token')
             chat_ids = self.config.get('telegram_chat_ids', [])
-
             if token and chat_ids:
                 try:
-                    logger.info(f" 📊 Generando gráfico de breakout para {simbolo}...")
+                    logger.info(f"     📊 Generando gráfico de breakout para {simbolo}...")
                     buf = self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
                     if buf:
-                        logger.info(f" 📨 Enviando alerta de breakout por Telegram...")
+                        logger.info(f"     📨 Enviando alerta de breakout por Telegram...")
                         self.enviar_grafico_telegram(buf, token, chat_ids)
                         time.sleep(0.5)
                         self._enviar_telegram_simple(mensaje, token, chat_ids)
-                        logger.info(f" ✅ Alerta de breakout enviada para {simbolo}")
+                        logger.info(f"     ✅ Alerta de breakout enviada para {simbolo}")
                     else:
-                        logger.warning(f" ⚠️ Alerta enviada sin gráfico")
                         self._enviar_telegram_simple(mensaje, token, chat_ids)
+                        logger.warning(f"     ⚠️ Alerta enviada sin gráfico para {simbolo}")
                 except Exception as e:
-                    logger.error(f" ❌ Error enviando alerta de breakout: {e}")
+                    logger.error(f"     ❌ Error enviando alerta de breakout: {e}")
             else:
-                logger.info(f" 📢 Breakout detectado en {simbolo} (sin Telegram)")
+                logger.info(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
         except Exception as e:
-            logger.error(f" ❌ Error general en enviar_alerta_breakout: {e}")
+            logger.error(f"Error en enviar_alerta_breakout: {e}")
 
     def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
-        """Genera gráfico especial para el momento del BREAKOUT"""
+        """
+        Genera gráfico especial para el momento del BREAKOUT
+        Marca visualmente la ruptura del canal
+        """
         try:
             import matplotlib.font_manager as fm
             plt.rcParams['font.family'] = ['DejaVu Sans', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji']
-
+            
             # Usar API de Bitget si está disponible
             if self.bitget_client:
-                klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-                if klines:
-                    df_data = []
-                    for kline in klines:
-                        df_data.append({
-                            'Date': pd.to_datetime(int(kline[0]), unit='ms'),
-                            'Open': float(kline[1]),
-                            'High': float(kline[2]),
-                            'Low': float(kline[3]),
-                            'Close': float(kline[4]),
-                            'Volume': float(kline[5])
-                        })
-                    df = pd.DataFrame(df_data)
-                    df.set_index('Date', inplace=True)
-                else:
-                    logger.warning(f" ❗ No se pudieron obtener klines de Bitget para {simbolo}. Usando Binance.")
+                try:
+                    klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
+                    if klines:
+                        df_data = []
+                        for kline in klines:
+                            df_data.append({
+                                'Date': pd.to_datetime(int(kline[0]), unit='ms'),
+                                'Open': float(kline[1]),
+                                'High': float(kline[2]),
+                                'Low': float(kline[3]),
+                                'Close': float(kline[4]),
+                                'Volume': float(kline[5])
+                            })
+                        df = pd.DataFrame(df_data)
+                        df.set_index('Date', inplace=True)
+                    else:
+                        logger.warning(f"No se obtuvieron datos de Bitget para el gráfico de {simbolo}")
+                        # Fallback a Binance
+                        return self._generar_grafico_breakout_binance(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
+                except Exception as e:
+                    logger.error(f"Error obteniendo datos de Bitget para gráfico: {e}")
                     # Fallback a Binance
-                    url = "https://api.binance.com/api/v3/klines"
-                    params = {
-                        'symbol': simbolo,
-                        'interval': config_optima['timeframe'],
-                        'limit': config_optima['num_velas']
-                    }
-                    respuesta = requests.get(url, params=params, timeout=10)
-                    klines = respuesta.json()
-                    df_data = []
-                    for kline in klines:
-                        df_data.append({
-                            'Date': pd.to_datetime(kline[0], unit='ms'),
-                            'Open': float(kline[1]),
-                            'High': float(kline[2]),
-                            'Low': float(kline[3]),
-                            'Close': float(kline[4]),
-                            'Volume': float(kline[5])
-                        })
-                    df = pd.DataFrame(df_data)
-                    df.set_index('Date', inplace=True)
+                    return self._generar_grafico_breakout_binance(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
             else:
                 # Fallback a Binance
-                url = "https://api.binance.com/api/v3/klines"
-                params = {
-                    'symbol': simbolo,
-                    'interval': config_optima['timeframe'],
-                    'limit': config_optima['num_velas']
-                }
-                respuesta = requests.get(url, params=params, timeout=10)
-                klines = respuesta.json()
-                df_data = []
-                for kline in klines:
-                    df_data.append({
-                        'Date': pd.to_datetime(kline[0], unit='ms'),
-                        'Open': float(kline[1]),
-                        'High': float(kline[2]),
-                        'Low': float(kline[3]),
-                        'Close': float(kline[4]),
-                        'Volume': float(kline[5])
-                    })
-                df = pd.DataFrame(df_data)
-                df.set_index('Date', inplace=True)
-
-            # Calcular canal de regresión para el gráfico
-            x = np.arange(len(df))
-            y = df['Close'].values
-            m, b = np.polyfit(x, y, 1)
-            resistencia = y + np.std(y)
-            soporte = y - np.std(y)
-
-            # Crear gráfico
-            fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
-            fig.patch.set_facecolor('#1a1a1a')
-            axes[0].set_facecolor('#1a1a1a')
-            axes[1].set_facecolor('#1a1a1a')
-
-            # Plotear velas
-            mpf.plot(df, type='candle', ax=axes[0], style='charles', volume=False, show_nontrading=False)
-
-            # Plotear canal de regresión
-            axes[0].plot(df.index, m * x + b, color='yellow', linestyle='--', label='Regresión')
-            axes[0].plot(df.index, resistencia, color='red', linestyle='--', label='Resistencia')
-            axes[0].plot(df.index, soporte, color='green', linestyle='--', label='Soporte')
-
-            # Marcar el breakout
-            ultimo_precio = df['Close'].iloc[-1]
-            if tipo_breakout == "LONG":
-                axes[0].axhline(y=resistencia[-1], color='red', linestyle='--', linewidth=2, label='Breakout Long')
-                axes[0].scatter(df.index[-1], ultimo_precio, color='green', s=100, zorder=5, label='Breakout Point')
+                return self._generar_grafico_breakout_binance(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
+            
+            # Calcular líneas del canal
+            tiempos_reg = list(range(len(df)))
+            resistencia_values = []
+            soporte_values = []
+            for i, t in enumerate(tiempos_reg):
+                resist = info_canal['pendiente_resistencia'] * t + \
+                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
+                soport = info_canal['pendiente_soporte'] * t + \
+                        (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
+                resistencia_values.append(resist)
+                soporte_values.append(soport)
+            
+            # Configurar el gráfico
+            fig, axes = plt.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]}, figsize=(12, 8))
+            fig.suptitle(f'BREAKOUT DETECTADO - {simbolo} ({config_optima["timeframe"]})', fontsize=14)
+            
+            # Gráfico de precios
+            mpf.plot(df, type='candle', ax=axes[0], volume=False, style='yahoo')
+            
+            # Añadir líneas del canal
+            axes[0].plot(df.index, resistencia_values, 'r--', label='Resistencia')
+            axes[0].plot(df.index, soporte_values, 'g--', label='Soporte')
+            
+            # Marcar el punto de breakout
+            if tipo_breakout == "BREAKOUT_LONG":
+                breakout_price = info_canal['soporte']
+                breakout_color = 'green'
+                breakout_label = 'Ruptura de Soporte'
             else:
-                axes[0].axhline(y=soporte[-1], color='green', linestyle='--', linewidth=2, label='Breakout Short')
-                axes[0].scatter(df.index[-1], ultimo_precio, color='red', s=100, zorder=5, label='Breakout Point')
-
-            axes[0].set_title(f'{simbolo}| {tipo_breakout}| {config_optima["timeframe"]}| Bitget + Breakout+Reentry', color='white', fontsize=14)
-            axes[0].set_ylabel('Precio', color='white')
-            axes[0].tick_params(colors='white')
-            axes[0].grid(True, alpha=0.3, color='gray')
-            axes[0].legend(loc='upper left', facecolor='#1a1a1a', edgecolor='white')
-
-            # Plotear Stochastic
-            n = 14
-            if len(y) >= n:
-                lowest_low = np.min(y[-n:])
-                highest_high = np.max(y[-n:])
-                stoch_k = ((y[-1] - lowest_low) / (highest_high - lowest_low)) * 100 if highest_high != lowest_low else 50
-                stoch_d = np.mean([stoch_k])  # Simplificado
-            else:
-                stoch_k = 50
-                stoch_d = 50
-
-            axes[1].plot(df.index, [stoch_k] * len(df), color='blue', label='Stoch K')
-            axes[1].plot(df.index, [stoch_d] * len(df), color='orange', label='Stoch D')
-            axes[1].axhline(y=80, color='red', linestyle='--', label='Overbought')
-            axes[1].axhline(y=20, color='green', linestyle='--', label='Oversold')
-            axes[1].set_ylim([0, 100])
-            axes[1].set_ylabel('Stochastic', color='white')
-            axes[1].tick_params(colors='white')
-            axes[1].grid(True, alpha=0.3, color='gray')
-            axes[1].legend(loc='upper left', facecolor='#1a1a1a', edgecolor='white')
-
+                breakout_price = info_canal['resistencia']
+                breakout_color = 'red'
+                breakout_label = 'Ruptura de Resistencia'
+            
+            axes[0].axhline(y=breakout_price, color=breakout_color, linestyle=':', label=breakout_label)
+            axes[0].scatter(df.index[-1], df['Close'].iloc[-1], color=breakout_color, s=100, marker='o')
+            
+            # Añadir indicadores
+            axes[0].set_title(f'Precio: {df["Close"].iloc[-1]:.8f} | Canal: {info_canal["direccion"]} | Fuerza: {info_canal["fuerza_texto"]}')
+            axes[0].legend()
+            
+            # Gráfico de volumen
+            axes[1].bar(df.index, df['Volume'], color='blue', alpha=0.5)
+            axes[1].set_title('Volumen')
+            
+            # Ajustar diseño
+            plt.tight_layout()
+            
+            # Guardar en buffer
             buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+            plt.savefig(buf, format='png', dpi=100)
             buf.seek(0)
-            plt.close(fig)
-            logger.info(f" ✅ Gráfico de breakout generado para {simbolo}")
+            plt.close()
+            
             return buf
-
         except Exception as e:
-            logger.error(f"⚠️ Error generando gráfico de breakout: {e}")
+            logger.error(f"Error generando gráfico de breakout: {e}")
             return None
 
-    def detectar_reentry(self, simbolo, info_canal, datos_mercado):
-        """Detecta si hay un reentry válido después de un breakout"""
+    def _generar_grafico_breakout_binance(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
+        """Fallback method para generar gráfico usando datos de Binance"""
         try:
-            precio_actual = datos_mercado['precio_actual']
-            resistencia = info_canal['pendiente_resistencia'] * len(datos_mercado['tiempos']) + info_canal['pendiente_resistencia']
-            soporte = info_canal['pendiente_soporte'] * len(datos_mercado['tiempos']) + info_canal['pendiente_soporte']
-            margen = self.config.get('entry_margin', 0.001)
-
-            # Verificar si el precio ha reingresado al canal
-            if info_canal['direccion_canal'] == "BAJISTA" and precio_actual <= resistencia * (1 + margen) and precio_actual >= soporte * (1 - margen):
-                return "LONG"
-            elif info_canal['direccion_canal'] == "ALCISTA" and precio_actual >= soporte * (1 - margen) and precio_actual <= resistencia * (1 + margen):
-                return "SHORT"
+            url = "https://api.binance.com/api/v3/klines"
+            params = {
+                'symbol': simbolo,
+                'interval': config_optima['timeframe'],
+                'limit': config_optima['num_velas']
+            }
+            respuesta = requests.get(url, params=params, timeout=10)
+            klines = respuesta.json()
+            
+            df_data = []
+            for kline in klines:
+                df_data.append({
+                    'Date': pd.to_datetime(kline[0], unit='ms'),
+                    'Open': float(kline[1]),
+                    'High': float(kline[2]),
+                    'Low': float(kline[3]),
+                    'Close': float(kline[4]),
+                    'Volume': float(kline[5])
+                })
+            df = pd.DataFrame(df_data)
+            df.set_index('Date', inplace=True)
+            
+            # Calcular líneas del canal
+            tiempos_reg = list(range(len(df)))
+            resistencia_values = []
+            soporte_values = []
+            for i, t in enumerate(tiempos_reg):
+                resist = info_canal['pendiente_resistencia'] * t + \
+                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
+                soport = info_canal['pendiente_soporte'] * t + \
+                        (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
+                resistencia_values.append(resist)
+                soporte_values.append(soport)
+            
+            # Configurar el gráfico
+            fig, axes = plt.subplots(2, 1, gridspec_kw={'height_ratios': [3, 1]}, figsize=(12, 8))
+            fig.suptitle(f'BREAKOUT DETECTADO - {simbolo} ({config_optima["timeframe"]})', fontsize=14)
+            
+            # Gráfico de precios
+            mpf.plot(df, type='candle', ax=axes[0], volume=False, style='yahoo')
+            
+            # Añadir líneas del canal
+            axes[0].plot(df.index, resistencia_values, 'r--', label='Resistencia')
+            axes[0].plot(df.index, soporte_values, 'g--', label='Soporte')
+            
+            # Marcar el punto de breakout
+            if tipo_breakout == "BREAKOUT_LONG":
+                breakout_price = info_canal['soporte']
+                breakout_color = 'green'
+                breakout_label = 'Ruptura de Soporte'
             else:
-                logger.debug(f" ⏸️ Sin reentry en {simbolo} - Precio: {precio_actual:.8f}, Resistencia: {resistencia:.8f}, Soporte: {soporte:.8f}")
-                return None
-
-        except Exception as e:
-            logger.error(f"❌ Error detectando reentry para {simbolo}: {e}")
-            return None
-
-    def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual):
-        """Calcula los niveles de entrada, TP y SL basados en el canal"""
-        try:
-            # Calcular niveles de entrada
-            if tipo_operacion == "LONG":
-                precio_entrada = precio_actual
-                tp = precio_actual * 1.02  # 2% de ganancia
-                sl = precio_actual * 0.98  # 2% de pérdida
-            else:  # SHORT
-                precio_entrada = precio_actual
-                tp = precio_actual * 0.98  # 2% de ganancia
-                sl = precio_actual * 1.02  # 2% de pérdida
-
-            logger.info(f" ✅ Niveles calculados para {tipo_operacion}: Entrada: {precio_entrada:.8f}, TP: {tp:.8f}, SL: {sl:.8f}")
-            return precio_entrada, tp, sl
-
-        except Exception as e:
-            logger.error(f"❌ Error calculando niveles de entrada: {e}")
-            return None, None, None
-
-    def generar_grafico_profesional(self, simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion):
-        """Genera gráfico profesional con niveles de entrada, TP y SL"""
-        try:
-            config_optima = self.config_optima_por_simbolo.get(simbolo)
-            if not config_optima:
-                return None
-
-            # Usar API de Bitget si está disponible
-            if self.bitget_client:
-                klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-                if klines:
-                    df_data = []
-                    for kline in klines:
-                        df_data.append({
-                            'Date': pd.to_datetime(int(kline[0]), unit='ms'),
-                            'Open': float(kline[1]),
-                            'High': float(kline[2]),
-                            'Low': float(kline[3]),
-                            'Close': float(kline[4]),
-                            'Volume': float(kline[5])
-                        })
-                    df = pd.DataFrame(df_data)
-                    df.set_index('Date', inplace=True)
-                else:
-                    logger.warning(f" ❗ No se pudieron obtener klines de Bitget para {simbolo}. Usando Binance.")
-                    # Fallback a Binance
-                    url = "https://api.binance.com/api/v3/klines"
-                    params = {
-                        'symbol': simbolo,
-                        'interval': config_optima['timeframe'],
-                        'limit': config_optima['num_velas']
-                    }
-                    respuesta = requests.get(url, params=params, timeout=10)
-                    klines = respuesta.json()
-                    df_data = []
-                    for kline in klines:
-                        df_data.append({
-                            'Date': pd.to_datetime(kline[0], unit='ms'),
-                            'Open': float(kline[1]),
-                            'High': float(kline[2]),
-                            'Low': float(kline[3]),
-                            'Close': float(kline[4]),
-                            'Volume': float(kline[5])
-                        })
-                    df = pd.DataFrame(df_data)
-                    df.set_index('Date', inplace=True)
-            else:
-                # Fallback a Binance
-                url = "https://api.binance.com/api/v3/klines"
-                params = {
-                    'symbol': simbolo,
-                    'interval': config_optima['timeframe'],
-                    'limit': config_optima['num_velas']
-                }
-                respuesta = requests.get(url, params=params, timeout=10)
-                klines = respuesta.json()
-                df_data = []
-                for kline in klines:
-                    df_data.append({
-                        'Date': pd.to_datetime(kline[0], unit='ms'),
-                        'Open': float(kline[1]),
-                        'High': float(kline[2]),
-                        'Low': float(kline[3]),
-                        'Close': float(kline[4]),
-                        'Volume': float(kline[5])
-                    })
-                df = pd.DataFrame(df_data)
-                df.set_index('Date', inplace=True)
-
-            # Calcular canal de regresión
-            x = np.arange(len(df))
-            y = df['Close'].values
-            m, b = np.polyfit(x, y, 1)
-            resistencia = y + np.std(y)
-            soporte = y - np.std(y)
-
-            # Crear gráfico
-            fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
-            fig.patch.set_facecolor('#1a1a1a')
-            axes[0].set_facecolor('#1a1a1a')
-            axes[1].set_facecolor('#1a1a1a')
-
-            # Plotear velas
-            mpf.plot(df, type='candle', ax=axes[0], style='charles', volume=False, show_nontrading=False)
-
-            # Plotear canal de regresión
-            axes[0].plot(df.index, m * x + b, color='yellow', linestyle='--', label='Regresión')
-            axes[0].plot(df.index, resistencia, color='red', linestyle='--', label='Resistencia')
-            axes[0].plot(df.index, soporte, color='green', linestyle='--', label='Soporte')
-
-            # Plotear niveles de entrada, TP y SL
-            axes[0].axhline(y=precio_entrada, color='blue', linestyle='-', linewidth=2, label=f'Entrada: {precio_entrada:.8f}')
-            axes[0].axhline(y=tp, color='green', linestyle='--', linewidth=2, label=f'TP: {tp:.8f}')
-            axes[0].axhline(y=sl, color='red', linestyle='--', linewidth=2, label=f'SL: {sl:.8f}')
-
-            # Marcar el punto de entrada
-            axes[0].scatter(df.index[-1], precio_actual, color='blue', s=100, zorder=5, label='Entrada')
-
-            axes[0].set_title(f'{simbolo}| {tipo_operacion}| {config_optima["timeframe"]}| Bitget + Breakout+Reentry', color='white', fontsize=14)
-            axes[0].set_ylabel('Precio', color='white')
-            axes[0].tick_params(colors='white')
-            axes[0].grid(True, alpha=0.3, color='gray')
-            axes[0].legend(loc='upper left', facecolor='#1a1a1a', edgecolor='white')
-
-            # Plotear Stochastic
-            n = 14
-            if len(y) >= n:
-                lowest_low = np.min(y[-n:])
-                highest_high = np.max(y[-n:])
-                stoch_k = ((y[-1] - lowest_low) / (highest_high - lowest_low)) * 100 if highest_high != lowest_low else 50
-                stoch_d = np.mean([stoch_k])  # Simplificado
-            else:
-                stoch_k = 50
-                stoch_d = 50
-
-            axes[1].plot(df.index, [stoch_k] * len(df), color='blue', label='Stoch K')
-            axes[1].plot(df.index, [stoch_d] * len(df), color='orange', label='Stoch D')
-            axes[1].axhline(y=80, color='red', linestyle='--', label='Overbought')
-            axes[1].axhline(y=20, color='green', linestyle='--', label='Oversold')
-            axes[1].set_ylim([0, 100])
-            axes[1].set_ylabel('Stochastic', color='white')
-            axes[1].tick_params(colors='white')
-            axes[1].grid(True, alpha=0.3, color='gray')
-            axes[1].legend(loc='upper left', facecolor='#1a1a1a', edgecolor='white')
-
+                breakout_price = info_canal['resistencia']
+                breakout_color = 'red'
+                breakout_label = 'Ruptura de Resistencia'
+            
+            axes[0].axhline(y=breakout_price, color=breakout_color, linestyle=':', label=breakout_label)
+            axes[0].scatter(df.index[-1], df['Close'].iloc[-1], color=breakout_color, s=100, marker='o')
+            
+            # Añadir indicadores
+            axes[0].set_title(f'Precio: {df["Close"].iloc[-1]:.8f} | Canal: {info_canal["direccion"]} | Fuerza: {info_canal["fuerza_texto"]}')
+            axes[0].legend()
+            
+            # Gráfico de volumen
+            axes[1].bar(df.index, df['Volume'], color='blue', alpha=0.5)
+            axes[1].set_title('Volumen')
+            
+            # Ajustar diseño
+            plt.tight_layout()
+            
+            # Guardar en buffer
             buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+            plt.savefig(buf, format='png', dpi=100)
             buf.seek(0)
-            plt.close(fig)
-            logger.info(f" ✅ Gráfico profesional generado para {simbolo}")
+            plt.close()
+            
             return buf
-
         except Exception as e:
-            logger.error(f"⚠️ Error generando gráfico profesional: {e}")
+            logger.error(f"Error generando gráfico de breakout con Binance: {e}")
             return None
-
-    def generar_senal_operacion(self, simbolo, tipo_operacion, precio_entrada, tp, sl, info_canal, datos_mercado, config_optima, breakout_info):
-        """Genera y envía la señal de operación"""
-        try:
-            # Preparar mensaje
-            emoji = "🟢" if tipo_operacion == "LONG" else "🔴"
-            color_emoji = "✅" if tipo_operacion == "LONG" else "❌"
-            direccion = "↑" if tipo_operacion == "LONG" else "↓"
-            estado_stoch = ""
-            if info_canal['stoch_k'] <= 30:
-                estado_stoch = "📉 OVERSOLD"
-            elif info_canal['stoch_k'] >= 70:
-                estado_stoch = "📈 OVERBOUGHT"
-            else:
-                estado_stoch = "➖ NEUTRO"
-
-            mensaje = f"""{emoji} <b>SEÑAL DE OPERACIÓN - {simbolo}</b>
-⚡ <b>Tipo:</b> {tipo_operacion} {direccion}
-💰 <b>Precio Entrada:</b> {precio_entrada:.8f}
-🎯 <b>Take Profit:</b> {tp:.8f}
-🛑 <b>Stop Loss:</b> {sl:.8f}
-📊 <b>Timeframe:</b> {config_optima['timeframe']}
-📈 <b>Stochastic:</b> {info_canal['stoch_k']:.2f} ({estado_stoch})
-🔄 <b>Breakout Detectado:</b> {breakout_info['tipo']} el {breakout_info['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}
-💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic"""
-
-            token = self.config.get('telegram_token')
-            chat_ids = self.config.get('telegram_chat_ids', [])
-
-            if token and chat_ids:
-                try:
-                    logger.info(f" 📊 Generando gráfico para {simbolo}...")
-                    buf = self.generar_grafico_profesional(simbolo, info_canal, datos_mercado, precio_entrada, tp, sl, tipo_operacion)
-                    if buf:
-                        logger.info(f" 📨 Enviando gráfico por Telegram...")
-                        self.enviar_grafico_telegram(buf, token, chat_ids)
-                        time.sleep(1)
-                        self._enviar_telegram_simple(mensaje, token, chat_ids)
-                        logger.info(f" ✅ Señal {tipo_operacion} para {simbolo} enviada")
-                    else:
-                        logger.warning(f" ⚠️ Señal enviada sin gráfico")
-                        self._enviar_telegram_simple(mensaje, token, chat_ids)
-                except Exception as e:
-                    logger.error(f" ❌ Error enviando señal: {e}")
-            else:
-                logger.info(f" 📢 Señal generada para {simbolo} (sin Telegram)")
-
-            # NUEVO: Ejecutar operación automáticamente si está habilitado
-            if self.ejecutar_operaciones_automaticas and self.bitget_client:
-                try:
-                    logger.info(f" 🤖 Ejecutando operación automática para {simbolo}...")
-                    resultado = self.ejecutar_operacion_bitget(simbolo, tipo_operacion, self.capital_por_operacion, self.leverage_por_defecto)
-                    if resultado:
-                        logger.info(f" ✅ Operación ejecutada exitosamente para {simbolo}")
-                    else:
-                        logger.error(f" ❌ Fallo en la ejecución automática para {simbolo}")
-                except Exception as e:
-                    logger.error(f" ⚠️ Error en ejecución automática: {e}")
-
-        except Exception as e:
-            logger.error(f" ❌ Error generando señal de operación: {e}")
-
-    def ejecutar_operacion_bitget(self, simbolo, tipo_operacion, capital_usd, leverage=20):
-        """Ejecutar una operación completa en Bitget (posición + TP/SL)"""
-        try:
-            if not self.bitget_client:
-                logger.error("❌ Cliente Bitget no inicializado")
-                return False
-
-            # Configurar apalancamiento
-            if not self.bitget_client.set_leverage(simbolo, leverage, tipo_operacion.lower()):
-                logger.error(f"❌ Fallo al configurar apalancamiento para {simbolo}")
-                return False
-
-            # Obtener información de cuenta
-            accounts = self.bitget_client.get_account_info()
-            if not accounts:
-                logger.error("❌ No se pudo obtener información de cuenta")
-                return False
-
-            balance_disponible = 0
-            for account in accounts:
-                if account.get('marginCoin') == 'USDT':
-                    balance_disponible = float(account.get('available', 0))
-                    break
-
-            if balance_disponible < capital_usd:
-                logger.error(f"❌ Saldo insuficiente: {balance_disponible:.2f} USDT < {capital_usd} USDT requeridos")
-                return False
-
-            # Calcular tamaño de la posición
-            precio_actual = self.obtener_datos_mercado_config(simbolo, '1m', 1)['precio_actual']
-            cantidad_contratos = (capital_usd * leverage) / precio_actual
-
-            # Colocar orden de entrada
-            orden_entrada = self.bitget_client.place_order(
-                symbol=simbolo,
-                side='buy' if tipo_operacion == 'LONG' else 'sell',
-                marginCoin='USDT',
-                size=str(cantidad_contratos),
-                posSide=tipo_operacion.lower()
-            )
-
-            if not orden_entrada:
-                logger.error(f"❌ Fallo al colocar orden de entrada para {simbolo}")
-                return False
-
-            # Crear orden TP
-            take_profit = precio_actual * 1.02 if tipo_operacion == 'LONG' else precio_actual * 0.98
-            orden_tp = self.bitget_client.create_plan_order(
-                symbol=simbolo,
-                marginCoin='USDT',
-                size=str(cantidad_contratos),
-                triggerPrice=str(take_profit),
-                executePrice=str(take_profit),
-                planType='normal',
-                side='sell' if tipo_operacion == 'LONG' else 'buy',
-                posSide=tipo_operacion.lower()
-            )
-
-            # Crear orden SL
-            stop_loss = precio_actual * 0.98 if tipo_operacion == 'LONG' else precio_actual * 1.02
-            orden_sl = self.bitget_client.create_plan_order(
-                symbol=simbolo,
-                marginCoin='USDT',
-                size=str(cantidad_contratos),
-                triggerPrice=str(stop_loss),
-                executePrice=str(stop_loss),
-                planType='normal',
-                side='sell' if tipo_operacion == 'LONG' else 'buy',
-                posSide=tipo_operacion.lower()
-            )
-
-            # Registrar operación activa
-            self.operaciones_activas[simbolo] = {
-                'tipo': tipo_operacion,
-                'precio_entrada': precio_actual,
-                'take_profit': take_profit,
-                'stop_loss': stop_loss,
-                'timestamp_entrada': datetime.now().isoformat(),
-                'angulo_tendencia': info_canal['angulo_tendencia'],
-                'pearson': info_canal['coeficiente_pearson'],
-                'r2_score': info_canal['r2_score'],
-                'ancho_canal_relativo': info_canal['ancho_canal'] / precio_actual,
-                'ancho_canal_porcentual': info_canal['ancho_canal_porcentual'],
-                'nivel_fuerza': info_canal['nivel_fuerza'],
-                'timeframe_utilizado': config_optima['timeframe'],
-                'velas_utilizadas': config_optima['num_velas'],
-                'stoch_k': info_canal['stoch_k'],
-                'stoch_d': info_canal['stoch_d'],
-                'breakout_usado': True,
-                'operacion_ejecutada': True
-            }
-
-            # Enviar confirmación por Telegram
-            token = self.config.get('telegram_token')
-            chat_ids = self.config.get('telegram_chat_ids', [])
-            if token and chat_ids:
-                mensaje_confirmacion = f"""{emoji} <b>OPERACIÓN EJECUTADA - {simbolo}</b>
-⚡ <b>Tipo:</b> {tipo_operacion}
-💰 <b>Precio Entrada:</b> {precio_actual:.8f}
-🎯 <b>Take Profit:</b> {take_profit:.8f}
-🛑 <b>Stop Loss:</b> {stop_loss:.8f}
-⚖️ <b>Apalancamiento:</b> {leverage}x
-🎯 <b>Entrada:</b> {precio_actual:.8f}
-🛑 <b>Stop Loss:</b> {stop_loss:.8f}
-🎯 <b>Take Profit:</b> {take_profit:.8f}
-📋 <b>ID Orden:</b> {orden_entrada.get('orderId', 'N/A')}
-⏰ <b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-                self._enviar_telegram_simple(mensaje_confirmacion, token, chat_ids)
-
-            logger.info(f"✅ OPERACIÓN EJECUTADA EXITOSAMENTE para {simbolo}")
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Error ejecutando operación en Bitget para {simbolo}: {e}")
-            return False
-
-    def escanear_mercado(self):
-        """Escanea el mercado con estrategia Breakout + Reentry"""
-        logger.info(f"🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
-        senales_encontradas = 0
-
-        for simbolo in self.config.get('symbols', []):
-            try:
-                if simbolo in self.operaciones_activas:
-                    logger.info(f" ⚡ {simbolo} - Operación activa, omitiendo...")
-                    continue
-
-                config_optima = self.buscar_configuracion_optima_simbolo(simbolo)
-                if not config_optima:
-                    logger.warning(f" ❌ {simbolo} - No se encontró configuración válida")
-                    continue
-
-                datos_mercado = self.obtener_datos_mercado_config(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-                if not datos_mercado:
-                    logger.error(f" ❌ {simbolo} - Error obteniendo datos")
-                    continue
-
-                info_canal = self.calcular_canal_regresion_config(datos_mercado, config_optima['num_velas'])
-                if not info_canal:
-                    logger.error(f" ❌ {simbolo} - Error calculando canal")
-                    continue
-
-                estado_stoch = ""
-                if info_canal['stoch_k'] <= 30:
-                    estado_stoch = "📉 OVERSOLD"
-                elif info_canal['stoch_k'] >= 70:
-                    estado_stoch = "📈 OVERBOUGHT"
-                else:
-                    estado_stoch = "➖ NEUTRO"
-
-                precio_actual = datos_mercado['precio_actual']
-
-                # Detectar breakout
-                tipo_breakout = self.detectar_breakout(simbolo, info_canal, datos_mercado)
-                if tipo_breakout:
-                    logger.info(f" 🚀 Breakout detectado en {simbolo} - Tipo: {tipo_breakout}")
-                    self.breakouts_detectados[simbolo] = {
-                        'tipo': tipo_breakout,
-                        'timestamp': datetime.now()
-                    }
-                    self.esperando_reentry[simbolo] = {
-                        'tipo': tipo_breakout,
-                        'timestamp': datetime.now(),
-                        'info_canal': info_canal,
-                        'datos_mercado': datos_mercado,
-                        'config_optima': config_optima
-                    }
-                    self.enviar_alerta_breakout(simbolo, tipo_breakout, info_canal, datos_mercado, config_optima)
-                    continue
-
-                # Detectar reentry
-                tipo_operacion = self.detectar_reentry(simbolo, info_canal, datos_mercado)
-                if not tipo_operacion:
-                    continue
-
-                precio_entrada, tp, sl = self.calcular_niveles_entrada(tipo_operacion, info_canal, precio_actual)
-                if not precio_entrada or not tp or not sl:
-                    continue
-
-                if simbolo in self.breakout_history:
-                    ultimo_breakout = self.breakout_history[simbolo]
-                    tiempo_desde_ultimo = (datetime.now() - ultimo_breakout).total_seconds() / 3600
-                    if tiempo_desde_ultimo < 2:
-                        logger.info(f" ⏳ {simbolo} - Señal reciente, omitiendo...")
-                        continue
-
-                breakout_info = self.esperando_reentry.get(simbolo)
-                if breakout_info:
-                    self.generar_senal_operacion(simbolo, tipo_operacion, precio_entrada, tp, sl, info_canal, datos_mercado, config_optima, breakout_info)
-                    senales_encontradas += 1
-                    self.breakout_history[simbolo] = datetime.now()
-                    del self.esperando_reentry[simbolo]
-
-            except Exception as e:
-                logger.error(f"⚠️ Error analizando {simbolo}: {e}")
-                continue
-
-        if self.esperando_reentry:
-            logger.info(f"⏳ Esperando reingreso en {len(self.esperando_reentry)} símbolos:")
-            for simbolo, info in self.esperando_reentry.items():
-                tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
-                logger.info(f" • {simbolo} - {info['tipo']} - Esperando {tiempo_espera:.1f} min")
-
-        # NUEVO: Mostrar breakouts detectados recientemente
-        if self.breakouts_detectados:
-            logger.info(f"⏰ Breakouts detectados recientemente:")
-            for simbolo, info in self.breakouts_detectados.items():
-                tiempo_desde_deteccion = (datetime.now() - info['timestamp']).total_seconds() / 60
-                logger.info(f" • {simbolo} - {info['tipo']} - Hace {tiempo_desde_deteccion:.1f} min")
-
-        return senales_encontradas
-
-    def verificar_cierre_operaciones(self):
-        """Verifica si las operaciones deben cerrarse por TP o SL"""
-        if not self.operaciones_activas:
-            return []
-
-        operaciones_cerradas = []
-        for simbolo, operacion in list(self.operaciones_activas.items()):
-            config_optima = self.config_optima_por_simbolo.get(simbolo)
-            if not config_optima:
-                continue
-
-            datos = self.obtener_datos_mercado_config(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-            if not datos:
-                continue
-
-            precio_actual = datos['precio_actual']
-            tp = operacion['take_profit']
-            sl = operacion['stop_loss']
-            tipo = operacion['tipo']
-
-            resultado = None
-            pnl_percent = 0
-
-            if tipo == "LONG":
-                if precio_actual >= tp:
-                    resultado = "TP"
-                    pnl_percent = ((precio_actual - operacion['precio_entrada']) / operacion['precio_entrada']) * 100
-                elif precio_actual <= sl:
-                    resultado = "SL"
-                    pnl_percent = ((precio_actual - operacion['precio_entrada']) / operacion['precio_entrada']) * 100
-            else:  # SHORT
-                if precio_actual <= tp:
-                    resultado = "TP"
-                    pnl_percent = ((operacion['precio_entrada'] - precio_actual) / operacion['precio_entrada']) * 100
-                elif precio_actual >= sl:
-                    resultado = "SL"
-                    pnl_percent = ((operacion['precio_entrada'] - precio_actual) / operacion['precio_entrada']) * 100
-
-            if resultado:
-                # Registrar operación cerrada
-                datos_operacion = {
-                    'simbolo': simbolo,
-                    'tipo': tipo,
-                    'precio_entrada': operacion['precio_entrada'],
-                    'precio_salida': precio_actual,
-                    'take_profit': tp,
-                    'stop_loss': sl,
-                    'resultado': resultado,
-                    'pnl_percent': pnl_percent,
-                    'timestamp_salida': datetime.now().isoformat(),
-                    'timeframe_utilizado': operacion.get('timeframe_utilizado', 'N/A'),
-                    'velas_utilizadas': operacion.get('velas_utilizadas', 0),
-                    'stoch_k': operacion.get('stoch_k', 0),
-                    'stoch_d': operacion.get('stoch_d', 0),
-                    'breakout_usado': operacion.get('breakout_usado', False),
-                    'operacion_ejecutada': operacion.get('operacion_ejecutada', False)
-                }
-
-                mensaje_cierre = self.generar_mensaje_cierre(datos_operacion)
-                token = self.config.get('telegram_token')
-                chats = self.config.get('telegram_chat_ids', [])
-                if token and chats:
-                    try:
-                        self._enviar_telegram_simple(mensaje_cierre, token, chats)
-                    except Exception:
-                        pass
-
-                self.registrar_operacion(datos_operacion)
-                operaciones_cerradas.append(simbolo)
-                del self.operaciones_activas[simbolo]
-                if simbolo in self.senales_enviadas:
-                    self.senales_enviadas.remove(simbolo)
-                self.operaciones_desde_optimizacion += 1
-                logger.info(f" 📊 {simbolo} Operación {resultado} - PnL: {pnl_percent:.2f}%")
-
-        return operaciones_cerradas
-
-    def generar_mensaje_cierre(self, datos_operacion):
-        """Genera el mensaje de cierre de operación"""
-        emoji = "🟢" if datos_operacion['resultado'] == "TP" else "🔴"
-        color_emoji = "✅" if datos_operacion['resultado'] == "TP" else "❌"
-        if datos_operacion['tipo'] == 'LONG':
-            direccion = "↑"
-        else:
-            direccion = "↓"
-
-        mensaje = f"""{emoji} <b>OPERACIÓN CERRADA - {datos_operacion['simbolo']}</b>
-{color_emoji} <b>Resultado:</b> {datos_operacion['resultado']}
-💰 <b>Precio Entrada:</b> {datos_operacion['precio_entrada']:.8f}
-💸 <b>Precio Salida:</b> {datos_operacion['precio_salida']:.8f}
-📊 <b>PnL:</b> {datos_operacion['pnl_percent']:.2f}%
-⚡ <b>Tipo:</b> {datos_operacion['tipo']} {direccion}
-🕒 <b>Duration:</b> {(datetime.fromisoformat(datos_operacion['timestamp_salida']) - datetime.fromisoformat(datos_operacion['timestamp_entrada'])).seconds // 60} min
-📈 <b>Stochastic:</b> K={datos_operacion['stoch_k']:.2f}, D={datos_operacion['stoch_d']:.2f}
-🔄 <b>Breakout Usado:</b> {datos_operacion['breakout_usado']}
-🤖 <b>Operación Ejecutada:</b> {datos_operacion['operacion_ejecutada']}
-⏰ <b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        return mensaje
-
-    def registrar_operacion(self, datos_operacion):
-        """Registra la operación en un archivo CSV"""
-        try:
-            with open('operaciones_historicas.csv', 'a', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['simbolo', 'tipo', 'precio_entrada', 'precio_salida', 'take_profit', 'stop_loss', 'resultado', 'pnl_percent', 'timestamp_entrada', 'timestamp_salida', 'timeframe_utilizado', 'velas_utilizadas', 'stoch_k', 'stoch_d', 'breakout_usado', 'operacion_ejecutada']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                if csvfile.tell() == 0:
-                    writer.writeheader()
-                writer.writerow(datos_operacion)
-            logger.info(f" ✅ Operación registrada en CSV: {datos_operacion['simbolo']}")
-        except Exception as e:
-            logger.error(f" ❌ Error registrando operación: {e}")
-
-    def verificar_envio_reporte_automatico(self):
-        """Verifica si debe enviar el reporte semanal (cada lunes a las 9:00)"""
-        ahora = datetime.now()
-        if ahora.weekday() == 0 and 9 <= ahora.hour < 10:
-            archivo_control = "ultimo_reporte.txt"
-            try:
-                if os.path.exists(archivo_control):
-                    with open(archivo_control, 'r') as f:
-                        ultima_fecha = f.read().strip()
-                        if ultima_fecha == ahora.strftime('%Y-%m-%d'):
-                            return False
-                if self.enviar_reporte_semanal():
-                    with open(archivo_control, 'w') as f:
-                        f.write(ahora.strftime('%Y-%m-%d'))
-                    return True
-            except Exception as e:
-                logger.error(f" ❌ Error verificando envío de reporte: {e}")
-                return False
-        return False
-
-    def enviar_reporte_semanal(self):
-        """Envía el reporte semanal por Telegram"""
-        mensaje = self.generar_reporte_semanal()
-        if not mensaje:
-            logger.info("ℹ️ No hay datos suficientes para generar reporte")
-            return False
-
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        if token and chat_ids:
-            try:
-                self._enviar_telegram_simple(mensaje, token, chat_ids)
-                logger.info("✅ Reporte semanal enviado correctamente")
-                return True
-            except Exception as e:
-                logger.error(f" ❌ Error enviando reporte: {e}")
-                return False
-        return False
-
-    def generar_reporte_semanal(self):
-        """Genera reporte automático cada semana"""
-        try:
-            # Contar operaciones totales
-            total_operaciones = self.total_operaciones
-            operaciones_ganadoras = 0
-            operaciones_perdedoras = 0
-            pnl_total = 0
-            operaciones_con_breakout = 0
-
-            # Leer operaciones históricas
-            operaciones = []
-            if os.path.exists('operaciones_historicas.csv'):
-                with open('operaciones_historicas.csv', 'r', encoding='utf-8') as csvfile:
-                    reader = csv.DictReader(csvfile)
-                    for row in reader:
-                        operaciones.append({
-                            'simbolo': row['simbolo'],
-                            'tipo': row['tipo'],
-                            'precio_entrada': float(row['precio_entrada']),
-                            'precio_salida': float(row['precio_salida']),
-                            'take_profit': float(row['take_profit']),
-                            'stop_loss': float(row['stop_loss']),
-                            'resultado': row['resultado'],
-                            'pnl_percent': float(row['pnl_percent']),
-                            'timestamp_entrada': row['timestamp_entrada'],
-                            'timestamp_salida': row['timestamp_salida'],
-                            'timeframe_utilizado': row['timeframe_utilizado'],
-                            'velas_utilizadas': int(row['velas_utilizadas']),
-                            'stoch_k': float(row['stoch_k']),
-                            'stoch_d': float(row['stoch_d']),
-                            'breakout_usado': row.get('breakout_usado', 'False') == 'True',
-                            'operacion_ejecutada': row.get('operacion_ejecutada', 'False') == 'True'
-                        })
-
-            # Filtrar operaciones de la última semana
-            hoy = datetime.now()
-            una_semana_atras = hoy - timedelta(days=7)
-            ops_ultima_semana = [op for op in operaciones if datetime.fromisoformat(op['timestamp_salida']) >= una_semana_atras]
-
-            # Calcular estadísticas
-            if ops_ultima_semana:
-                operaciones_ganadoras = sum(1 for op in ops_ultima_semana if op['resultado'] == 'TP')
-                operaciones_perdedoras = sum(1 for op in ops_ultima_semana if op['resultado'] == 'SL')
-                pnl_total = sum(op['pnl_percent'] for op in ops_ultima_semana)
-                operaciones_con_breakout = sum(1 for op in ops_ultima_semana if op['breakout_usado'])
-
-                win_rate = (operaciones_ganadoras / len(ops_ultima_semana)) * 100 if len(ops_ultima_semana) > 0 else 0
-                avg_pnl = pnl_total / len(ops_ultima_semana) if len(ops_ultima_semana) > 0 else 0
-
-                mensaje = f"""📊 <b>REPORTE SEMANAL DEL BOT</b>
-📅 <b>Periodo:</b> {una_semana_atras.strftime('%Y-%m-%d')} - {hoy.strftime('%Y-%m-%d')}
-📈 <b>Operaciones Totales:</b> {len(ops_ultima_semana)}
-✅ <b>Ganadoras:</b> {operaciones_ganadoras}
-❌ <b>Perdedoras:</b> {operaciones_perdedoras}
-🎯 <b>Win Rate:</b> {win_rate:.2f}%
-💰 <b>PnL Total:</b> {pnl_total:.2f}%
-📈 <b>PnL Promedio:</b> {avg_pnl:.2f}%
-🚀 <b>Con Breakout:</b> {operaciones_con_breakout}
-
-🤖 Bot automático 24/7
-⚡ Estrategia: Breakout + Reentry
-💎 Integración: Bitget API
-💻 Acceso Premium: @TuUsuario"""
-                return mensaje
-            else:
-                return "ℹ️ No hubo operaciones esta semana."
-        except Exception as e:
-            logger.error(f" ❌ Error generando reporte semanal: {e}")
-            return "❌ Error generando reporte semanal."
-
-    def mostrar_resumen_operaciones(self):
-        """Muestra un resumen de las operaciones actuales"""
-        logger.info(f"📊 RESUMEN OPERACIONES:")
-        logger.info(f" Activas: {len(self.operaciones_activas)}")
-        logger.info(f" Esperando reentry: {len(self.esperando_reentry)}")
-        logger.info(f" Total ejecutadas: {self.total_operaciones}")
-        if self.bitget_client:
-            logger.info(" 🤖 Bitget: ✅ Conectado")
-        else:
-            logger.info(" 🤖 Bitget: ❌ No configurado")
-        if self.operaciones_activas:
-            for simbolo, op in self.operaciones_activas.items():
-                estado = "🟢 LONG" if op['tipo'] == 'LONG' else "🔴 SHORT"
-                ancho_canal = op.get('ancho_canal_porcentual', 0)
-                timeframe = op.get('timeframe_utilizado', 'N/A')
-                velas = op.get('velas_utilizadas', 0)
-                breakout = "🚀" if op.get('breakout_usado', False) else ""
-                ejecutada = "🤖" if op.get('operacion_ejecutada', False) else ""
-                logger.info(f" • {simbolo} {estado} {breakout} {ejecutada} - {timeframe} - {velas}v - Ancho: {ancho_canal:.1f}%")
-
-    def reoptimizar_periodicamente(self):
-        """Reoptimiza los parámetros periódicamente"""
-        try:
-            logger.info("🔄 Reoptimizando parámetros...")
-            from optimizador_ia import OptimizadorIA
-            ia = OptimizadorIA(log_path=self.log_path, min_samples=self.config.get('min_samples_optimizacion', 15))
-            nuevos_parametros = ia.buscar_mejores_parametros()
-            if nuevos_parametros:
-                self.config['trend_threshold_degrees'] = nuevos_parametros.get('trend_threshold_degrees', self.config.get('trend_threshold_degrees', 13))
-                self.config['min_trend_strength_degrees'] = nuevos_parametros.get('min_trend_strength_degrees', self.config.get('min_trend_strength_degrees', 16))
-                self.config['entry_margin'] = nuevos_parametros.get('entry_margin', self.config.get('entry_margin', 0.001))
-                logger.info("✅ Parámetros reoptimizados")
-        except Exception as e:
-            logger.error(f"⚠ Error en reoptimización: {e}")
-
-    def ejecutar_analisis(self):
-        """Ejecuta el análisis completo del bot"""
-        try:
-            if random.random() < 0.1:
-                self.reoptimizar_periodicamente()
-            self.verificar_envio_reporte_automatico()
-            cierres = self.verificar_cierre_operaciones()
-            if cierres:
-                logger.info(f" 📊 Operaciones cerradas: {', '.join(cierres)}")
-            self.guardar_estado()
-            return self.escanear_mercado()
-        except Exception as e:
-            logger.error(f" ❌ Error en ejecutar_analisis: {e}")
-            return 0
-
-    def iniciar(self):
-        """Inicia el bot"""
-        logger.info("=" * 70)
-        logger.info("🤖 BOT DE TRADING - ESTRATEGIA BREAKOUT + REENTRY")
-        logger.info("🎯 PRIORIDAD: TIMEFRAMES CORTOS (1m > 3m > 5m > 15m > 30m)")
-        logger.info("💾 PERSISTENCIA: ACTIVADA")
-        logger.info("🔄 REEVALUACIÓN: CADA 2 HORAS")
-        logger.info("🏦 INTEGRACIÓN: BITGET API")
-        logger.info("=" * 70)
-        logger.info(f"💱 Símbolos: {len(self.config.get('symbols', []))} monedas")
-        if self.bitget_client:
-            logger.info("🤖 BITGET: ✅ Conectado")
-        else:
-            logger.info("🤖 BITGET: ❌ No configurado (solo señales)")
-        logger.info("=" * 70)
-        logger.info("🚀 INICIANDO BOT...")
-
-        try:
-            while True:
-                nuevas_senales = self.ejecutar_analisis()
-                self.mostrar_resumen_operaciones()
-                minutos_espera = self.config.get('scan_interval_minutes', 1)
-                logger.info(f"✅ Análisis completado. Señales nuevas: {nuevas_senales}")
-                logger.info(f"⏳ Próximo análisis en {minutos_espera} minutos...")
-                logger.info("-" * 60)
-                for minuto in range(minutos_espera):
-                    time.sleep(60)
-                    restantes = minutos_espera - (minuto + 1)
-                    if restantes > 0 and restantes % 5 == 0:
-                        logger.info(f" ⏰ {restantes} minutos restantes...")
-        except KeyboardInterrupt:
-            logger.info("🛑 Bot detenido por el usuario")
-        except Exception as e:
-            logger.error(f" ❌ Error en el hilo del bot: {e}")
-            time.sleep(60)
-
-    def _enviar_telegram_simple(self, mensaje, token, chat_ids):
-        """Envía un mensaje simple a Telegram"""
-        if not token or not chat_ids:
-            return False
-        resultados = []
-        for chat_id in chat_ids:
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {
-                'chat_id': chat_id,
-                'text': mensaje,
-                'parse_mode': 'HTML'
-            }
-            try:
-                r = requests.post(url, data=payload, timeout=120)
-                if r.status_code == 200:
-                    resultados.append(True)
-                else:
-                    logger.error(f" ❌ Error enviando mensaje a {chat_id}: {r.status_code} - {r.text}")
-                    resultados.append(False)
-            except Exception as e:
-                logger.error(f" ❌ Error enviando mensaje a {chat_id}: {e}")
-                resultados.append(False)
-        return all(resultados)
 
     def enviar_grafico_telegram(self, buf, token, chat_ids):
-        """Envía un gráfico a Telegram"""
-        if not buf or not token or not chat_ids:
-            return False
-        buf.seek(0)
-        exito = False
-        for chat_id in chat_ids:
-            url = f"https://api.telegram.org/bot{token}/sendPhoto"
-            try:
-                buf.seek(0)
-                files = {'photo': ('grafico.png', buf.read(), 'image/png')}
+        """Envía un gráfico a través de Telegram"""
+        try:
+            for chat_id in chat_ids:
+                url = f"https://api.telegram.org/bot{token}/sendPhoto"
+                files = {'photo': buf}
                 data = {'chat_id': chat_id}
-                r = requests.post(url, files=files, data=data, timeout=120)
-                if r.status_code == 200:
-                    exito = True
-                else:
-                    logger.error(f" ❌ Error enviando gráfico a {chat_id}: {r.status_code} - {r.text}")
-            except Exception as e:
-                logger.error(f" ❌ Error enviando gráfico a {chat_id}: {e}")
-        return exito
+                response = requests.post(url, files=files, data=data, timeout=10)
+                if response.status_code != 200:
+                    logger.error(f"Error enviando gráfico a Telegram: {response.text}")
+        except Exception as e:
+            logger.error(f"Error en enviar_grafico_telegram: {e}")
 
-# Configuración de Flask
+    def _enviar_telegram_simple(self, mensaje, token, chat_ids):
+        """Envía un mensaje simple a través de Telegram"""
+        try:
+            for chat_id in chat_ids:
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                data = {
+                    'chat_id': chat_id,
+                    'text': mensaje,
+                    'parse_mode': 'HTML'
+                }
+                response = requests.post(url, json=data, timeout=10)
+                if response.status_code != 200:
+                    logger.error(f"Error enviando mensaje a Telegram: {response.text}")
+        except Exception as e:
+            logger.error(f"Error en _enviar_telegram_simple: {e}")
+
+    def calcular_regresion_lineal(self, x, y):
+        """Calcula la regresión lineal de y sobre x"""
+        try:
+            if len(x) != len(y) or len(x) == 0:
+                return None
+            n = len(x)
+            sum_x = sum(x)
+            sum_y = sum(y)
+            sum_xy = sum(x[i] * y[i] for i in range(n))
+            sum_x2 = sum(x[i] ** 2 for i in range(n))
+            
+            # Calcular pendiente e intercepto
+            denominator = n * sum_x2 - sum_x ** 2
+            if denominator == 0:
+                return None
+            
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
+            intercept = (sum_y - slope * sum_x) / n
+            
+            return (slope, intercept)
+        except Exception as e:
+            logger.error(f"Error en calcular_regresion_lineal: {e}")
+            return None
+
+    def calcular_pearson_y_angulo(self, x, y):
+        """Calcula el coeficiente de Pearson y el ángulo de la tendencia"""
+        try:
+            if len(x) != len(y) or len(x) < 2:
+                return (0, 0)
+            
+            # Calcular coeficiente de Pearson
+            n = len(x)
+            sum_x = sum(x)
+            sum_y = sum(y)
+            sum_xy = sum(x[i] * y[i] for i in range(n))
+            sum_x2 = sum(x[i] ** 2 for i in range(n))
+            sum_y2 = sum(y[i] ** 2 for i in range(n))
+            
+            numerator = n * sum_xy - sum_x * sum_y
+            denominator_x = math.sqrt(n * sum_x2 - sum_x ** 2)
+            denominator_y = math.sqrt(n * sum_y2 - sum_y ** 2)
+            
+            if denominator_x == 0 or denominator_y == 0:
+                return (0, 0)
+            
+            pearson = numerator / (denominator_x * denominator_y)
+            
+            # Calcular ángulo en grados
+            if len(x) >= 2:
+                slope = (y[-1] - y[0]) / (x[-1] - x[0])
+                angle_rad = math.atan(slope)
+                angle_deg = math.degrees(angle_rad)
+            else:
+                angle_deg = 0
+            
+            return (pearson, angle_deg)
+        except Exception as e:
+            logger.error(f"Error en calcular_pearson_y_angulo: {e}")
+            return (0, 0)
+
+    def clasificar_fuerza_tendencia(self, angulo):
+        """Clasifica la fuerza de la tendencia según el ángulo"""
+        try:
+            abs_angulo = abs(angulo)
+            if abs_angulo < 5:
+                return ("Muy débil", 1)
+            elif abs_angulo < 10:
+                return ("Débil", 2)
+            elif abs_angulo < 20:
+                return ("Moderada", 3)
+            elif abs_angulo < 30:
+                return ("Fuerte", 4)
+            else:
+                return ("Muy fuerte", 5)
+        except Exception as e:
+            logger.error(f"Error en clasificar_fuerza_tendencia: {e}")
+            return ("Desconocida", 0)
+
+    def determinar_direccion_tendencia(self, angulo, umbral=0):
+        """Determina la dirección de la tendencia"""
+        try:
+            if angulo > umbral:
+                return "ALCISTA"
+            elif angulo < -umbral:
+                return "BAJISTA"
+            else:
+                return "LATERAL"
+        except Exception as e:
+            logger.error(f"Error en determinar_direccion_tendencia: {e}")
+            return "DESCONOCIDA"
+
+    def calcular_r2(self, y, x, slope, intercept):
+        """Calcula el coeficiente de determinación R²"""
+        try:
+            if len(y) != len(x) or len(y) == 0:
+                return 0
+            
+            # Calcular valores predichos
+            y_pred = [slope * xi + intercept for xi in x]
+            
+            # Calcular mediana de y
+            y_mean = sum(y) / len(y)
+            
+            # Calcular sumatorias
+            ss_res = sum((y[i] - y_pred[i]) ** 2 for i in range(len(y)))
+            ss_tot = sum((y[i] - y_mean) ** 2 for i in range(len(y)))
+            
+            # Calcular R²
+            if ss_tot == 0:
+                return 0
+            
+            r2 = 1 - (ss_res / ss_tot)
+            return r2
+        except Exception as e:
+            logger.error(f"Error en calcular_r2: {e}")
+            return 0
+
+    def calcular_stochastic(self, datos_mercado, k_period=14, d_period=3):
+        """Calcula el indicador estocástico"""
+        try:
+            if not datos_mercado or len(datos_mercado['cierres']) < k_period:
+                return (50, 50)  # Valores por defecto si no hay suficientes datos
+            
+            cierres = datos_mercado['cierres']
+            maximos = datos_mercado['maximos']
+            minimos = datos_mercado['minimos']
+            
+            # Calcular %K
+            k_values = []
+            for i in range(k_period - 1, len(cierres)):
+                highest_high = max(maximos[i - k_period + 1:i + 1])
+                lowest_low = min(minimos[i - k_period + 1:i + 1])
+                
+                if highest_high == lowest_low:
+                    k_percent = 50  # Evitar división por cero
+                else:
+                    k_percent = 100 * ((cierres[i] - lowest_low) / (highest_high - lowest_low))
+                
+                k_values.append(k_percent)
+            
+            # Calcular %D como media móvil de %K
+            if len(k_values) >= d_period:
+                d_values = []
+                for i in range(d_period - 1, len(k_values)):
+                    d_values.append(sum(k_values[i - d_period + 1:i + 1]) / d_period)
+                
+                return (k_values[-1], d_values[-1])
+            else:
+                return (k_values[-1], k_values[-1])  # Si no hay suficientes valores para %D
+        except Exception as e:
+            logger.error(f"Error en calcular_stochastic: {e}")
+            return (50, 50)  # Valores por defecto en caso de error
+
+    def inicializar_log(self):
+        """Inicializa el archivo de log de operaciones"""
+        try:
+            if not os.path.exists(self.archivo_log):
+                with open(self.archivo_log, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        'timestamp', 'symbol', 'tipo', 'precio_entrada', 'precio_salida',
+                        'pnl_percent', 'angulo_tendencia', 'pearson', 'r2_score',
+                        'ancho_canal_relativo', 'nivel_fuerza', 'timeframe', 'num_velas'
+                    ])
+        except Exception as e:
+            logger.error(f"Error inicializando log: {e}")
+
+    def registrar_operacion(self, simbolo, tipo, precio_entrada, precio_salida, info_canal, config_optima):
+        """Registra una operación en el log"""
+        try:
+            pnl_percent = ((precio_salida - precio_entrada) / precio_entrada) * 100
+            if tipo == 'SHORT':
+                pnl_percent = -pnl_percent
+            
+            with open(self.archivo_log, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now().isoformat(),
+                    simbolo,
+                    tipo,
+                    precio_entrada,
+                    precio_salida,
+                    pnl_percent,
+                    info_canal.get('angulo_tendencia', 0),
+                    info_canal.get('coeficiente_pearson', 0),
+                    info_canal.get('r2_score', 0),
+                    info_canal.get('ancho_canal_porcentual', 0),
+                    info_canal.get('nivel_fuerza', 0),
+                    config_optima.get('timeframe', 'N/A'),
+                    config_optima.get('num_velas', 0)
+                ])
+            
+            self.total_operaciones += 1
+            self.operaciones_desde_optimizacion += 1
+            
+            # Verificar si es momento de optimizar
+            if (self.auto_optimize and 
+                self.operaciones_desde_optimizacion >= 20 and 
+                (datetime.now() - self.ultima_optimizacion).days >= 7):
+                logger.info("⚙️ Iniciando optimización automática...")
+                try:
+                    ia = OptimizadorIA(log_path=self.log_path, min_samples=15)
+                    parametros_optimizados = ia.buscar_mejores_parametros()
+                    if parametros_optimizados:
+                        self.config['trend_threshold_degrees'] = parametros_optimizados.get('trend_threshold_degrees', 
+                                                                                        self.config.get('trend_threshold_degrees', 13))
+                        self.config['min_trend_strength_degrees'] = parametros_optimizados.get('min_trend_strength_degrees', 
+                                                                                               self.config.get('min_trend_strength_degrees', 16))
+                        self.config['entry_margin'] = parametros_optimizados.get('entry_margin', 
+                                                                               self.config.get('entry_margin', 0.001))
+                        self.ultima_optimizacion = datetime.now()
+                        self.operaciones_desde_optimizacion = 0
+                        logger.info("✅ Parámetros optimizados y actualizados")
+                except Exception as e:
+                    logger.error(f"Error en optimización automática: {e}")
+        except Exception as e:
+            logger.error(f"Error registrando operación: {e}")
+
+    def procesar_senal(self, simbolo, tipo_senal, info_canal, datos_mercado, config_optima):
+        """Procesa una señal de trading"""
+        try:
+            timestamp_actual = datetime.now()
+            
+            # Verificar si ya hay una operación activa para este símbolo
+            if simbolo in self.operaciones_activas:
+                logger.info(f"Ya hay una operación activa para {simbolo}, ignorando señal")
+                return
+            
+            # Crear ID único para esta señal
+            senal_id = f"{simbolo}_{tipo_senal}_{timestamp_actual.strftime('%Y%m%d%H%M%S')}"
+            
+            # Verificar si ya se envió esta señal
+            if senal_id in self.senales_enviadas:
+                logger.info(f"Señal ya enviada: {senal_id}")
+                return
+            
+            # Agregar a señales enviadas
+            self.senales_enviadas.add(senal_id)
+            
+            # Guardar estado
+            self.guardar_estado()
+            
+            # Si está habilitada la ejecución automática, ejecutar la operación
+            if self.ejecutar_operaciones_automaticas and self.bitget_client:
+                try:
+                    # Ejecutar operación en Bitget
+                    operacion = ejecutar_operacion_bitget(
+                        bitget_client=self.bitget_client,
+                        simbolo=simbolo,
+                        tipo_operacion=tipo_senal.split('_')[1],  # LONG o SHORT
+                        capital_usd=self.capital_por_operacion,
+                        leverage=self.leverage_por_defecto
+                    )
+                    
+                    if operacion:
+                        # Registrar operación activa
+                        self.operaciones_activas[simbolo] = {
+                            'timestamp': timestamp_actual,
+                            'tipo': tipo_senal,
+                            'operacion': operacion,
+                            'info_canal': info_canal,
+                            'config_optima': config_optima
+                        }
+                        
+                        # Enviar confirmación a Telegram
+                        mensaje = f"""
+✅ <b>OPERACIÓN EJECUTADA - {simbolo}</b>
+📈 <b>Tipo:</b> {tipo_senal}
+💰 <b>Capital:</b> ${self.capital_por_operacion}
+⚙️ <b>Apalancamiento:</b> {self.leverage_por_defecto}x
+💵 <b>Precio entrada:</b> {operacion['precio_entrada']:.8f}
+🎯 <b>Take Profit:</b> {operacion['take_profit']:.8f}
+🛡️ <b>Stop Loss:</b> {operacion['stop_loss']:.8f}
+⏰ <b>Hora:</b> {timestamp_actual.strftime('%Y-%m-%d %H:%M:%S')}
+                        """
+                        
+                        token = self.config.get('telegram_token')
+                        chat_ids = self.config.get('telegram_chat_ids', [])
+                        if token and chat_ids:
+                            self._enviar_telegram_simple(mensaje, token, chat_ids)
+                        
+                        logger.info(f"Operación ejecutada para {simbolo}: {tipo_senal}")
+                    else:
+                        logger.error(f"No se pudo ejecutar la operación para {simbolo}")
+                except Exception as e:
+                    logger.error(f"Error ejecutando operación para {simbolo}: {e}")
+            else:
+                logger.info(f"Señal detectada para {simbolo}: {tipo_senal} (ejecución automática deshabilitada o cliente Bitget no disponible)")
+        except Exception as e:
+            logger.error(f"Error procesando señal: {e}")
+
+    def verificar_breakouts_y_reentry(self, simbolo):
+        """Verifica si hay breakouts o reingresos para un símbolo"""
+        try:
+            # Buscar configuración óptima para este símbolo
+            config_optima = self.buscar_configuracion_optima_simbolo(simbolo)
+            if not config_optima:
+                logger.warning(f"No se encontró configuración óptima para {simbolo}")
+                return
+            
+            # Obtener datos de mercado
+            datos_mercado = self.obtener_datos_mercado_config(
+                simbolo, 
+                config_optima['timeframe'], 
+                config_optima['num_velas']
+            )
+            if not datos_mercado:
+                logger.warning(f"No se pudieron obtener datos para {simbolo}")
+                return
+            
+            # Calcular canal de regresión
+            info_canal = self.calcular_canal_regresion_config(datos_mercado, config_optima['num_velas'])
+            if not info_canal:
+                logger.warning(f"No se pudo calcular canal para {simbolo}")
+                return
+            
+            # Verificar condiciones de breakout
+            precio_actual = datos_mercado['precio_actual']
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            
+            # Verificar si ya hay un breakout detectado para este símbolo
+            if simbolo in self.breakouts_detectados:
+                breakout_info = self.breakouts_detectados[simbolo]
+                tiempo_breakout = breakout_info['timestamp']
+                tipo_breakout = breakout_info['tipo']
+                
+                # Verificar si ha pasado mucho tiempo desde el breakout (más de 30 minutos)
+                if (datetime.now() - tiempo_breakout).total_seconds() > 1800:
+                    # Demasiado tiempo, eliminar breakout
+                    del self.breakouts_detectados[simbolo]
+                    logger.info(f"Breakout para {simbolo} expirado por tiempo")
+                    return
+                
+                # Verificar si hay reingreso
+                if tipo_breakout == "BREAKOUT_LONG":
+                    # Buscar reingreso por encima del soporte
+                    if precio_actual > soporte * (1 - self.config.get('entry_margin', 0.001)):
+                        logger.info(f"¡REINGRESO DETECTADO para {simbolo} (LONG)!")
+                        self.enviar_alerta_reentry(simbolo, "REENTRY_LONG", info_canal, datos_mercado, config_optima)
+                        self.procesar_senal(simbolo, "REENTRY_LONG", info_canal, datos_mercado, config_optima)
+                        del self.breakouts_detectados[simbolo]
+                else:  # BREAKOUT_SHORT
+                    # Buscar reingreso por debajo de la resistencia
+                    if precio_actual < resistencia * (1 + self.config.get('entry_margin', 0.001)):
+                        logger.info(f"¡REINGRESO DETECTADO para {simbolo} (SHORT)!")
+                        self.enviar_alerta_reentry(simbolo, "REENTRY_SHORT", info_canal, datos_mercado, config_optima)
+                        self.procesar_senal(simbolo, "REENTRY_SHORT", info_canal, datos_mercado, config_optima)
+                        del self.breakouts_detectados[simbolo]
+            else:
+                # No hay breakout detectado, verificar si hay uno nuevo
+                # Para BREAKOUT_LONG: precio por debajo del soporte en canal bajista
+                if (info_canal['direccion'] == "BAJISTA" and 
+                    precio_actual < soporte and
+                    abs(info_canal['angulo_tendencia']) >= self.config.get('trend_threshold_degrees', 13) and
+                    abs(info_canal['angulo_tendencia']) >= self.config.get('min_trend_strength_degrees', 16) and
+                    abs(info_canal['coeficiente_pearson']) >= 0.4 and
+                    info_canal['r2_score'] >= 0.4 and
+                    info_canal['nivel_fuerza'] >= 2):
+                    
+                    logger.info(f"¡BREAKOUT_LONG DETECTADO para {simbolo}!")
+                    self.breakouts_detectados[simbolo] = {
+                        'tipo': 'BREAKOUT_LONG',
+                        'timestamp': datetime.now(),
+                        'precio_breakout': precio_actual
+                    }
+                    self.enviar_alerta_breakout(simbolo, "BREAKOUT_LONG", info_canal, datos_mercado, config_optima)
+                
+                # Para BREAKOUT_SHORT: precio por encima de la resistencia en canal alcista
+                elif (info_canal['direccion'] == "ALCISTA" and 
+                      precio_actual > resistencia and
+                      abs(info_canal['angulo_tendencia']) >= self.config.get('trend_threshold_degrees', 13) and
+                      abs(info_canal['angulo_tendencia']) >= self.config.get('min_trend_strength_degrees', 16) and
+                      abs(info_canal['coeficiente_pearson']) >= 0.4 and
+                      info_canal['r2_score'] >= 0.4 and
+                      info_canal['nivel_fuerza'] >= 2):
+                    
+                    logger.info(f"¡BREAKOUT_SHORT DETECTADO para {simbolo}!")
+                    self.breakouts_detectados[simbolo] = {
+                        'tipo': 'BREAKOUT_SHORT',
+                        'timestamp': datetime.now(),
+                        'precio_breakout': precio_actual
+                    }
+                    self.enviar_alerta_breakout(simbolo, "BREAKOUT_SHORT", info_canal, datos_mercado, config_optima)
+        except Exception as e:
+            logger.error(f"Error verificando breakouts para {simbolo}: {e}")
+
+    def enviar_alerta_reentry(self, simbolo, tipo_reentry, info_canal, datos_mercado, config_optima):
+        """Envía alerta de REENTRY detectado a Telegram con gráfico"""
+        try:
+            precio_cierre = datos_mercado['cierres'][-1]
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            direccion_canal = info_canal['direccion']
+            
+            if tipo_reentry == "REENTRY_LONG":
+                emoji_principal = "🟢"
+                tipo_texto = "REINGRESO ALCISTA"
+                nivel = f"Soporte: {soporte:.8f}"
+                expectativa = "posible operación en LONG"
+            else:  # REENTRY_SHORT
+                emoji_principal = "🔴"
+                tipo_texto = "REINGRESO BAJISTA"
+                nivel = f"Resistencia: {resistencia:.8f}"
+                expectativa = "posible operación en SHORT"
+            
+            # Mensaje de alerta
+            mensaje = f"""
+{emoji_principal} <b>¡REENTRY DETECTADO! - {simbolo}</b>
+✅ <b>{tipo_texto}</b>
+⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📍 <b>Precio actual:</b> {precio_cierre:.8f}
+📍 <b>{nivel}</b>
+📈 <b>Canal:</b> {direccion_canal}
+🎯 <b>{expectativa}</b>
+            """
+            
+            token = self.config.get('telegram_token')
+            chat_ids = self.config.get('telegram_chat_ids', [])
+            if token and chat_ids:
+                try:
+                    logger.info(f"     📊 Generando gráfico de reentry para {simbolo}...")
+                    buf = self.generar_grafico_reentry(simbolo, info_canal, datos_mercado, tipo_reentry, config_optima)
+                    if buf:
+                        logger.info(f"     📨 Enviando alerta de reentry por Telegram...")
+                        self.enviar_grafico_telegram(buf, token, chat_ids)
+                        time.sleep(0.5)
+                        self._enviar_telegram_simple(mensaje, token, chat_ids)
+                        logger.info(f"     ✅ Alerta de reentry enviada para {simbolo}")
+                    else:
+                        self._enviar_telegram_simple(mensaje, token, chat_ids)
+                        logger.warning(f"     ⚠️ Alerta de reentry enviada sin gráfico para {simbolo}")
+                except Exception as e:
+                    logger.error(f"     ❌ Error enviando alerta de reentry: {e}")
+            else:
+                logger.info(f"     📢 Reentry detectado en {simbolo} (sin Telegram)")
+        except Exception as e:
+            logger.error(f"Error en enviar_alerta_reentry: {e}")
+
+    def generar_grafico_reentry(self, simbolo, info_canal, datos_mercado, tipo_reentry, config_optima):
+        """Genera gráfico especial para el momento del REENTRY"""
+        try:
+            # Usar el mismo método que para generar_grafico_breakout pero con cambios menores
+            return self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_reentry, config_optima)
+        except Exception as e:
+            logger.error(f"Error generando gráfico de reentry: {e}")
+            return None
+
+    def generar_reporte_semanal(self):
+        """Genera un reporte semanal de operaciones"""
+        try:
+            logger.info("Generando reporte semanal...")
+            
+            # Leer datos del log
+            operaciones = []
+            try:
+                with open(self.archivo_log, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        operaciones.append(row)
+            except FileNotFoundError:
+                logger.warning("No se encontró el archivo de log para generar reporte")
+                return
+            
+            if not operaciones:
+                logger.warning("No hay operaciones para generar reporte")
+                return
+            
+            # Filtrar operaciones de la última semana
+            una_semana_atras = datetime.now() - timedelta(days=7)
+            operaciones_semana = [
+                op for op in operaciones 
+                if datetime.fromisoformat(op['timestamp']) >= una_semana_atras
+            ]
+            
+            if not operaciones_semana:
+                logger.warning("No hay operaciones en la última semana")
+                return
+            
+            # Calcular estadísticas
+            total_operaciones = len(operaciones_semana)
+            operaciones_ganadoras = [op for op in operaciones_semana if float(op['pnl_percent']) > 0]
+            operaciones_perdedoras = [op for op in operaciones_semana if float(op['pnl_percent']) < 0]
+            
+            winrate = len(operaciones_ganadoras) / total_operaciones * 100 if total_operaciones > 0 else 0
+            
+            pnl_total = sum(float(op['pnl_percent']) for op in operaciones_semana)
+            pnl_promedio = pnl_total / total_operaciones if total_operaciones > 0 else 0
+            
+            # Agrupar por símbolo
+            simbolos = {}
+            for op in operaciones_semana:
+                simbolo = op['symbol']
+                if simbolo not in simbolos:
+                    simbolos[simbolo] = {
+                        'operaciones': 0,
+                        'ganadoras': 0,
+                        'pnl_total': 0
+                    }
+                
+                simbolos[simbolo]['operaciones'] += 1
+                simbolos[simbolo]['pnl_total'] += float(op['pnl_percent'])
+                
+                if float(op['pnl_percent']) > 0:
+                    simbolos[simbolo]['ganadoras'] += 1
+            
+            # Generar mensaje del reporte
+            mensaje = f"""
+📊 <b>REPORTE SEMANAL DE OPERACIONES</b>
+📅 <b>Período:</b> {una_semana_atras.strftime('%Y-%m-%d')} a {datetime.now().strftime('%Y-%m-%d')}
+📈 <b>Total operaciones:</b> {total_operaciones}
+✅ <b>Operaciones ganadoras:</b> {len(operaciones_ganadoras)} ({winrate:.1f}%)
+❌ <b>Operaciones perdedoras:</b> {len(operaciones_perdedoras)} ({100-winrate:.1f}%)
+💰 <b>PnL total:</b> {pnl_total:.2f}%
+📊 <b>PnL promedio:</b> {pnl_promedio:.2f}%
+
+<b>Resultados por símbolo:</b>
+            """
+            
+            for simbolo, datos in sorted(simbolos.items(), key=lambda x: x[1]['pnl_total'], reverse=True):
+                winrate_simbolo = datos['ganadoras'] / datos['operaciones'] * 100 if datos['operaciones'] > 0 else 0
+                mensaje += f"\n• {simbolo}: {datos['operaciones']} ops, {datos['pnl_total']:.2f}% PnL, {winrate_simbolo:.1f}% winrate"
+            
+            # Enviar reporte a Telegram
+            token = self.config.get('telegram_token')
+            chat_ids = self.config.get('telegram_chat_ids', [])
+            if token and chat_ids:
+                self._enviar_telegram_simple(mensaje, token, chat_ids)
+                logger.info("Reporte semanal enviado a Telegram")
+            else:
+                logger.info("Reporte semanal generado (sin Telegram)")
+        except Exception as e:
+            logger.error(f"Error generando reporte semanal: {e}")
+
+    def iniciar_bot(self):
+        """Inicia el bot de trading"""
+        logger.info("Iniciando bot de trading...")
+        
+        # Verificar si hay un estado previo
+        self.cargar_estado()
+        
+        # Lista de símbolos a monitorear
+        simbolos = self.config.get('simbolos', ['BTCUSDT', 'ETHUSDT', 'ADAUSDT'])
+        
+        # Bucle principal
+        while True:
+            try:
+                # Verificar cada símbolo
+                for simbolo in simbolos:
+                    try:
+                        self.verificar_breakouts_y_reentry(simbolo)
+                    except Exception as e:
+                        logger.error(f"Error verificando {simbolo}: {e}")
+                
+                # Verificar si es hora de generar reporte semanal (cada domingo a las 23:00)
+                ahora = datetime.now()
+                if ahora.weekday() == 6 and ahora.hour == 23 and ahora.minute == 0:
+                    self.generar_reporte_semanal()
+                
+                # Guardar estado cada 5 minutos
+                if ahora.minute % 5 == 0:
+                    self.guardar_estado()
+                
+                # Esperar antes de la siguiente iteración
+                time.sleep(60)  # Verificar cada minuto
+            except KeyboardInterrupt:
+                logger.info("Bot detenido por el usuario")
+                self.guardar_estado()
+                break
+            except Exception as e:
+                logger.error(f"Error en bucle principal: {e}")
+                time.sleep(60)  # Esperar antes de reintentar
+
+# ---------------------------
+# FLASK WEB SERVICE
+# ---------------------------
 app = Flask(__name__)
 
-# Iniciar bot en un hilo separado
-def run_bot_loop():
-    try:
-        bot = BotBreakoutReentry()
-        bot.iniciar()
-    except Exception as e:
-        logger.error(f"Error en el hilo del bot: {e}", file=sys.stderr)
-        time.sleep(60)
+# Variable global para el bot y su hilo
+bot = None
+bot_thread = None
 
-# Iniciar hilo del bot
-bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
-bot_thread.start()
+def start_bot_instance(config=None):
+    """Función para iniciar la instancia del bot y su hilo"""
+    global bot, bot_thread
+    if bot is not None:
+        logger.warning("El bot ya está en ejecución o se está iniciando.")
+        return False
+
+    if config is None:
+        logger.info("Cargando configuración desde variables de entorno...")
+        config = {
+            'simbolos': os.environ.get('SIMBOLOS',  'BTCUSDT','ETHUSDT','XMRUSDT','AAVEUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','AVAXUSDT',
+            'DOGEUSDT','LTCUSDT','ATOMUSDT','XLMUSDT','ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT',
+            'BCHUSDT','NEOUSDT','TRXUSDT','XTZUSDT','SUSHIUSDT','COMPUSDT','PEPEUSDT','ETCUSDT',
+            'SNXUSDT','RENDERUSDT','1INCHUSDT','UNIUSDT','ZILUSDT','HOTUSDT','ENJUSDT','HYPEUSDT',
+            'BEATUSDT','PIPPINUSDT','ADAUSDT','ASTERUSDT','ENAUSDT','TAOUSDT','HEMIUSDT','LUNCUSDT',
+            'WLDUSDT','WIFUSDT','APTUSDT','HBARUSDT','CRVUSDT','LUNAUSDT','TIAUSDT','ARBUSDT','ONDOUSDT',
+            '1000BONKUSDT','FOLKSUSDT','BRETTUSDT','TRUMPUSDT','INJUSDT','ZECUSDT','NOTUSDT','SHIBUSDT',
+            'LDOUSDT','KASUSDT','STRKUSDT','DYDXUSDT','SEIUSDT','TONUSDT','NMRUSDT').split(','),
+            'timeframes': os.environ.get('TIMEFRAMES', '5m,15m,30m,1H,4H ').split(','),
+            'velas_options': [int(x) for x in os.environ.get('VELAS_OPTIONS', '80,100,120,150,200').split(',')],
+            'trend_threshold_degrees': float(os.environ.get('TREND_THRESHOLD_DEGREES', 13)),
+            'min_trend_strength_degrees': float(os.environ.get('MIN_TREND_STRENGTH_DEGREES', 16)),
+            'entry_margin': float(os.environ.get('ENTRY_MARGIN', 0.001)),
+            'min_channel_width_percent': float(os.environ.get('MIN_CHANNEL_WIDTH_PERCENT', 4.0)),
+            'auto_optimize': os.environ.get('AUTO_OPTIMIZE', 'True').lower() == 'true',
+            'min_samples_optimizacion': int(os.environ.get('MIN_SAMPLES_OPTIMIZACION', 30)),
+            'telegram_token': os.environ.get('TELEGRAM_TOKEN', ''),
+            'telegram_chat_ids': [id.strip() for id in os.environ.get('TELEGRAM_CHAT_IDS', '').split(',') if id.strip()],
+            'bitget_api_key': os.environ.get('BITGET_API_KEY', ''),
+            'bitget_api_secret': os.environ.get('BITGET_SECRET_KEY', ''),
+            'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE', ''),
+            'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES', 'False').lower() == 'true',
+            'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', 3)),
+            'leverage_por_defecto': int(os.environ.get('LEVERAGE_POR_DEFECTO', 10))
+        }
+
+    try:
+        logger.info("Creando instancia del TradingBot...")
+        bot = TradingBot(config)
+        logger.info("Iniciando hilo del bot...")
+        bot_thread = threading.Thread(target=bot.iniciar_bot, daemon=True)
+        bot_thread.start()
+        logger.info("Bot iniciado en un hilo separado.")
+        return True
+    except Exception as e:
+        logger.error(f"Error al iniciar la instancia del bot: {e}")
+        bot = None
+        return False
+
+# Iniciar el bot automáticamente al desplegar
+logger.info("=== INICIO DE SERVICIO - INTENTANDO INICIAR BOT AUTOMÁTICAMENTE ===")
+if not start_bot_instance():
+    logger.error("Fallo al iniciar el bot automáticamente. Revisa la configuración y los logs.")
+else:
+    logger.info("=== BOT INICIADO CORRECTAMENTE ===")
+
 
 @app.route('/')
 def index():
-    return "Bot Breakout + Reentry con integración Bitget está en línea.", 200
+    return "Bot Breakout + Reentry está en ejecución. Usa los endpoints /start, /stop, /status para controlarlo."
 
-@app.route('/webhook', methods=['POST'])
-def telegram_webhook():
-    if request.is_json:
-        update = request.get_json()
-        logger.info(f"Update recibido: {json.dumps(update)}")
-        return jsonify({"status": "ok"}), 200
-    return jsonify({"error": "Request must be JSON"}), 400
-
-# Configuración automática del webhook
-def setup_telegram_webhook():
-    token = os.environ.get('TELEGRAM_TOKEN')
-    if not token:
-        return
-    webhook_url = os.environ.get('WEBHOOK_URL')
-    if not webhook_url:
-        render_url = os.environ.get('RENDER_EXTERNAL_URL')
-        if render_url:
-            webhook_url = f"{render_url}/webhook"
-        else:
-            return
+@app.route('/start', methods=['POST'])
+def start_bot_endpoint():
+    global bot
     try:
-        requests.get(f"https://api.telegram.org/bot{token}/deleteWebhook")
-        requests.get(f"https://api.telegram.org/bot{token}/setWebhook?url={webhook_url}")
+        if bot is not None:
+            return jsonify({"status": "error", "message": "El bot ya está en ejecución o se está iniciando."})
+        
+        # Obtener configuración de la solicitud si se proporciona
+        config = request.json
+        
+        # Iniciar bot con la configuración proporcionada o la del entorno
+        if start_bot_instance(config):
+            return jsonify({"status": "success", "message": "Bot iniciado correctamente."})
+        else:
+            return jsonify({"status": "error", "message": "No se pudo iniciar el bot. Revisa los logs para más detalles."})
+            
     except Exception as e:
-        logger.error(f"Error configurando webhook: {e}", file=sys.stderr)
+        logger.error(f"Error en el endpoint /start: {e}")
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/stop', methods=['POST'])
+def stop_bot():
+    global bot, bot_thread
+    try:
+        if bot is None:
+            return jsonify({"status": "error", "message": "El bot no está en ejecución"})
+        
+        # Guardar estado antes de detener
+        if bot:
+            bot.guardar_estado()
+        
+        # Detener bot (el hilo es daemon, se detendrá solo)
+        bot = None
+        bot_thread = None
+        
+        return jsonify({"status": "success", "message": "Bot detenido correctamente."})
+    except Exception as e:
+        logger.error(f"Error en el endpoint /stop: {e}")
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/status', methods=['GET'])
+def status():
+    try:
+        global bot
+        if bot is None:
+            return jsonify({"status": "stopped", "message": "El bot no está en ejecución"})
+        
+        # Obtener estado del bot
+        estado = {
+            "status": "running",
+            "total_operaciones": bot.total_operaciones,
+            "operaciones_desde_optimizacion": bot.operaciones_desde_optimizacion,
+            "ultima_optimizacion": bot.ultima_optimizacion.isoformat() if bot.ultima_optimizacion else None,
+            "breakouts_detectados": len(bot.breakouts_detectados),
+            "operaciones_activas": len(bot.operaciones_activas),
+            "simbolos_monitoreados": bot.config.get('simbolos', []),
+            "ejecucion_automatica_habilitada": bot.ejecutar_operaciones_automaticas,
+            "cliente_bitget_disponible": bot.bitget_client is not None
+        }
+        
+        return jsonify(estado)
+    except Exception as e:
+        logger.error(f"Error en el endpoint /status: {e}")
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/optimize', methods=['POST'])
+def optimize():
+    try:
+        global bot
+        if bot is None:
+            return jsonify({"status": "error", "message": "El bot no está en ejecución"})
+        
+        # Ejecutar optimización
+        ia = OptimizadorIA(log_path=bot.log_path, min_samples=bot.config.get('min_samples_optimizacion', 15))
+        parametros_optimizados = ia.buscar_mejores_parametros()
+        
+        if parametros_optimizados:
+            # Actualizar configuración del bot
+            bot.config['trend_threshold_degrees'] = parametros_optimizados.get('trend_threshold_degrees', 
+                                                                             bot.config.get('trend_threshold_degrees', 13))
+            bot.config['min_trend_strength_degrees'] = parametros_optimizados.get('min_trend_strength_degrees', 
+                                                                                 bot.config.get('min_trend_strength_degrees', 16))
+            bot.config['entry_margin'] = parametros_optimizados.get('entry_margin', 
+                                                                     bot.config.get('entry_margin', 0.001))
+            bot.ultima_optimizacion = datetime.now()
+            bot.operaciones_desde_optimizacion = 0
+            
+            return jsonify({
+                "status": "success", 
+                "message": "Optimización completada",
+                "parametros": parametros_optimizados
+            })
+        else:
+            return jsonify({
+                "status": "warning", 
+                "message": "No se encontraron parámetros optimizados"
+            })
+    except Exception as e:
+        logger.error(f"Error en el endpoint /optimize: {e}")
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/report', methods=['GET'])
+def generate_report():
+    try:
+        global bot
+        if bot is None:
+            return jsonify({"status": "error", "message": "El bot no está en ejecución"})
+        
+        # Generar reporte semanal
+        bot.generar_reporte_semanal()
+        
+        return jsonify({"status": "success", "message": "Reporte generado y enviado"})
+    except Exception as e:
+        logger.error(f"Error en el endpoint /report: {e}")
+        return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == '__main__':
-    setup_telegram_webhook()
-    app.run(debug=True, port=5000)
+    # Este bloque no se ejecuta en Render, pero es útil para pruebas locales
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
