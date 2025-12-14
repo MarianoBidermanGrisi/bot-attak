@@ -25,8 +25,23 @@ from flask import Flask, request, jsonify
 import threading
 import logging
 
-# Configurar logging básico
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configurar logging básico - MEJORADO
+logging.basicConfig(
+    level=logging.INFO, 
+    stream=sys.stdout, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# CORRECCIÓN: Configuración adicional para requests
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Configurar requests con logging
+requests_log = logging.getLogger("requests.packages.urllib3")
+requests_log.setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------
@@ -161,57 +176,88 @@ class BitgetClient:
         self.api_secret = api_secret
         self.passphrase = passphrase
         self.base_url = "https://api.bitget.com"
+        
+        # CORRECCIÓN: Configuración robusta de sesión
         self.session = requests.Session()
         self.session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': 'BitgetBot/1.0'
+            'User-Agent': 'BitgetBot/2.0',
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip, deflate'
         })
-        # Mejorar configuración de conexión
-        adapter = requests.adapters.HTTPAdapter(
-            max_retries=3,
-            pool_connections=10,
-            pool_maxsize=20
+        
+        # CORRECCIÓN: Configuración mejorada de conexión
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
         )
+        
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=20,
+            pool_maxsize=50,
+            pool_block=False
+        )
+        
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
+        
+        # CORRECCIÓN: Configuración adicional para robustez
+        self.session.timeout = (10, 60)  # (connect, read)
+        
         logger.info(f"Cliente Bitget inicializado con API Key: {api_key[:10]}...")
 
     def _generate_signature(self, timestamp, method, request_path, body=''):
-        """Generar firma HMAC-SHA256 para Bitget V2 - CORREGIDO"""
+        """Generar firma HMAC-SHA256 para Bitget V2 - COMPLETAMENTE CORREGIDO"""
         try:
             logger.debug(f"Generando firma - timestamp: {timestamp}, method: {method}, path: {request_path}")
             
-            # CORRECCIÓN: Asegurar que el body sea una cadena vacía si está vacío o es None
-            if not body:
+            # CORRECCIÓN: Manejo robusto del body
+            if body is None:
                 body_str = ''
             elif isinstance(body, dict):
-                # Usar dumps sin espacios para consistencia
-                body_str = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+                # Usar dumps sin espacios y asegurar ordenamiento consistente
+                body_str = json.dumps(body, separators=(',', ':'), ensure_ascii=False, sort_keys=True)
             else:
                 body_str = str(body)
             
-            # CORRECCIÓN: Formato correcto para Bitget V2
+            # CORRECCIÓN: Formato exacto requerido por Bitget V2
+            # timestamp + method + request_path + body
             message = timestamp + method.upper() + request_path + body_str
             logger.debug(f"Message para firma: '{message}'")
+            logger.debug(f"Body str: '{body_str}'")
             
-            # Crear firma HMAC-SHA256
+            # Crear firma HMAC-SHA256 con manejo robusto
             mac = hmac.new(
-                bytes(self.api_secret, 'utf-8'),
-                bytes(message, 'utf-8'),
+                self.api_secret.encode('utf-8'),
+                message.encode('utf-8'),
                 digestmod=hashlib.sha256
             )
             
-            signature = base64.b64encode(mac.digest()).decode()
+            signature = base64.b64encode(mac.digest()).decode('utf-8')
             logger.debug(f"Signatura generada: {signature[:20]}...")
+            
+            # Validar que la firma no esté vacía
+            if not signature:
+                raise ValueError("La firma generada está vacía")
+                
             return signature
             
         except Exception as e:
             logger.error(f"Error generando firma: {e}")
+            logger.error(f"Timestamp: {timestamp}, Method: {method}, Path: {request_path}")
+            logger.error(f"Body: {body}")
             raise
 
     def _get_headers(self, method, request_path, body=''):
-        """Obtener headers con firma para Bitget V2 - CORREGIDO"""
+        """Obtener headers con firma para Bitget V2 - ROBUSTO"""
         try:
+            # CORRECCIÓN: Timestamp más preciso
             timestamp = str(int(time.time() * 1000))
             sign = self._generate_signature(timestamp, method, request_path, body)
             
@@ -224,11 +270,18 @@ class BitgetClient:
                 'locale': 'en-US'
             }
             
+            # CORRECCIÓN: Validar que todos los headers estén presentes
+            required_headers = ['ACCESS-KEY', 'ACCESS-SIGN', 'ACCESS-TIMESTAMP', 'ACCESS-PASSPHRASE']
+            for header in required_headers:
+                if not headers.get(header):
+                    raise ValueError(f"Header requerido faltante: {header}")
+            
             logger.debug(f"Headers creados para {method} {request_path}")
             return headers
             
         except Exception as e:
             logger.error(f"Error creando headers: {e}")
+            logger.error(f"Método: {method}, Path: {request_path}")
             raise
 
     def verificar_credenciales(self):
@@ -268,7 +321,7 @@ class BitgetClient:
             return False
 
     def get_account_info(self, product_type='USDT-FUTURES'):
-        """Obtener información de cuenta Bitget V2 - CON MEJOR MANEJO DE ERRORES"""
+        """Obtener información de cuenta Bitget V2 - ROBUSTO"""
         try:
             logger.debug(f"Obteniendo info de cuenta para productType: {product_type}")
             
@@ -280,40 +333,65 @@ class BitgetClient:
             
             headers = self._get_headers('GET', full_request_path, '')
             
-            # CORRECCIÓN: Aumentar timeout y manejar errores de conexión
-            response = self.session.get(
-                f"{self.base_url}{request_path}",
-                headers=headers,
-                params=params,
-                timeout=30  # Aumentado de 15 a 30
-            )
-            
-            logger.info(f"📡 Respuesta cuenta - Status: {response.status_code}")
-            logger.debug(f"📡 Respuesta cuenta - Headers: {dict(response.headers)}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                logger.debug(f"📡 Respuesta datos: {data}")
-                
-                if data.get('code') == '00000':
-                    logger.info(f"✅ Cuenta obtenida exitosamente con {product_type}")
-                    return data.get('data', [])
-                else:
-                    error_msg = data.get('msg', 'Unknown error')
-                    error_code = data.get('code', 'Unknown')
-                    logger.error(f"❌ Error API: {error_code} - {error_msg}")
+            # CORRECCIÓN: Manejo robusto de errores con reintentos
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = self.session.get(
+                        f"{self.base_url}{request_path}",
+                        headers=headers,
+                        params=params,
+                        timeout=(10, 60)  # (connect, read)
+                    )
                     
-                    if error_code == '40020':
-                        logger.warning(f"⚠️ productType {product_type} no válido, intentando con el siguiente...")
-                        return None
-            else:
-                logger.error(f"❌ Error HTTP: {response.status_code} - {response.text}")
-                
+                    logger.info(f"📡 Respuesta cuenta - Status: {response.status_code} (Intento {attempt + 1})")
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        logger.debug(f"📡 Respuesta datos: {data}")
+                        
+                        if data.get('code') == '00000':
+                            logger.info(f"✅ Cuenta obtenida exitosamente con {product_type}")
+                            return data.get('data', [])
+                        else:
+                            error_msg = data.get('msg', 'Unknown error')
+                            error_code = data.get('code', 'Unknown')
+                            logger.error(f"❌ Error API: {error_code} - {error_msg}")
+                            
+                            # No reintentar errores de autenticación
+                            if error_code in ['40009', '40001', '40002']:
+                                return None
+                            
+                            if error_code == '40020':
+                                logger.warning(f"⚠️ productType {product_type} no válido")
+                                return None
+                                
+                    elif response.status_code == 429:
+                        logger.warning(f"⚠️ Rate limit, esperando {2 ** attempt} segundos...")
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        logger.error(f"❌ Error HTTP: {response.status_code} - {response.text}")
+                        
+                    break  # Si llegamos aquí, no reintentar
+                    
+                except requests.exceptions.Timeout as e:
+                    logger.warning(f"⚠️ Timeout en intento {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        raise e
+                except requests.exceptions.ConnectionError as e:
+                    logger.warning(f"⚠️ Error de conexión en intento {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        raise e
+                        
             return None
             
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"❌ Error de conexión en get_account_info: {e}")
-            return None
         except Exception as e:
             logger.error(f"❌ Error en get_account_info: {e}")
             return None
@@ -464,7 +542,7 @@ class BitgetClient:
             return None
 
     def set_leverage(self, symbol, leverage, hold_side='long'):
-        """Configurar apalancamiento - CON MANEJO MEJORADO DE ERRORES"""
+        """Configurar apalancamiento - ROBUSTO"""
         try:
             logger.info(f"⚙️ Configurando leverage {leverage}x para {symbol} ({hold_side})")
             
@@ -479,39 +557,90 @@ class BitgetClient:
             
             logger.debug(f"📤 Body leverage: {body}")
             
-            headers = self._get_headers('POST', request_path, body)
-            
-            response = self.session.post(
-                self.base_url + request_path,
-                headers=headers,
-                json=body,
-                timeout=30
-            )
-            
-            logger.info(f"📡 Respuesta leverage - Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                logger.debug(f"📡 Respuesta leverage: {data}")
-                
-                if data.get('code') == '00000':
-                    logger.info(f"✅ Apalancamiento {leverage}x configurado para {symbol}")
-                    return True
-                else:
-                    error_msg = data.get('msg', 'Unknown error')
-                    error_code = data.get('code', 'Unknown')
-                    logger.error(f"❌ Error configurando leverage: {error_code} - {error_msg}")
+            # CORRECCIÓN: Múltiples reintentos con backoff exponencial
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    headers = self._get_headers('POST', request_path, body)
                     
-                    # Si es error de firma, intentar de nuevo una vez
-                    if error_code == '40009':
-                        logger.info("🔄 Reintentando configuración de leverage...")
-                        time.sleep(1)
-                        return self.set_leverage(symbol, leverage, hold_side)
+                    response = self.session.post(
+                        self.base_url + request_path,
+                        headers=headers,
+                        json=body,
+                        timeout=(15, 90)  # (connect, read)
+                    )
                     
-                    return False
-            else:
-                logger.error(f"❌ Error HTTP leverage: {response.status_code} - {response.text}")
-                return False
+                    logger.info(f"📡 Respuesta leverage - Status: {response.status_code} (Intento {attempt + 1})")
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        logger.debug(f"📡 Respuesta leverage: {data}")
+                        
+                        if data.get('code') == '00000':
+                            logger.info(f"✅ Apalancamiento {leverage}x configurado para {symbol}")
+                            return True
+                        else:
+                            error_msg = data.get('msg', 'Unknown error')
+                            error_code = data.get('code', 'Unknown')
+                            logger.error(f"❌ Error configurando leverage: {error_code} - {error_msg}")
+                            
+                            # Error de firma - reintentar con nuevo timestamp
+                            if error_code == '40009':
+                                logger.warning(f"🔄 Error de firma en intento {attempt + 1}, reintentando...")
+                                if attempt < max_retries - 1:
+                                    time.sleep(1.5 ** attempt)  # Backoff exponencial
+                                    continue
+                                else:
+                                    logger.error("❌ Máximo número de reintentos para error de firma")
+                                    return False
+                            
+                            # Error de parámetros - no reintentar
+                            elif error_code in ['40001', '40002', '40003']:
+                                logger.error(f"❌ Error de parámetros: {error_msg}")
+                                return False
+                            
+                            # Otros errores - intentar de nuevo
+                            else:
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"🔄 Reintentando en {2 ** attempt} segundos...")
+                                    time.sleep(2 ** attempt)
+                                    continue
+                                else:
+                                    return False
+                    
+                    elif response.status_code == 429:
+                        logger.warning(f"⚠️ Rate limit, esperando {3 ** attempt} segundos...")
+                        time.sleep(3 ** attempt)
+                        continue
+                    else:
+                        logger.error(f"❌ Error HTTP leverage: {response.status_code} - {response.text}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        else:
+                            return False
+                            
+                except requests.exceptions.Timeout as e:
+                    logger.warning(f"⚠️ Timeout en intento {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        logger.error("❌ Timeout en todos los intentos")
+                        return False
+                        
+                except requests.exceptions.ConnectionError as e:
+                    logger.warning(f"⚠️ Error de conexión en intento {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        logger.error("❌ Error de conexión en todos los intentos")
+                        return False
+                        
+            logger.error("❌ No se pudo configurar el apalancamiento después de todos los intentos")
+            return False
+            
         except Exception as e:
             logger.error(f"❌ Error en set_leverage: {e}")
             return False
@@ -562,7 +691,7 @@ class BitgetClient:
             return []
 
     def get_klines(self, symbol, interval='5m', limit=200):
-        """Obtener velas (datos de mercado) - CON MEJOR MANEJO DE ERRORES"""
+        """Obtener velas (datos de mercado) - ROBUSTO"""
         try:
             logger.debug(f"Obteniendo klines: {symbol} {interval} {limit}")
             
@@ -573,64 +702,105 @@ class BitgetClient:
             }
             bitget_interval = interval_map.get(interval, '5m')
             request_path = f'/api/v2/mix/market/candles'
-            params = {
-                'symbol': symbol,
-                'productType': 'USDT-FUTURES',
-                'granularity': bitget_interval,
-                'limit': limit
-            }
             
-            # CORRECCIÓN: Mejor manejo de timeouts y reintentos
+            # CORRECCIÓN: Probar ambos productType con reintentos
+            product_types = ['USDT-FUTURES', 'USDT-MIX']
             max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    response = self.session.get(
-                        self.base_url + request_path,
-                        params=params,
-                        timeout=30  # Aumentado timeout
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        if data.get('code') == '00000':
-                            candles = data.get('data', [])
-                            logger.debug(f"✅ Klines obtenidos: {len(candles)}")
-                            return candles
-                        else:
-                            logger.warning(f"⚠️ Error con USDT-FUTURES, intentando con USDT-MIX")
-                            # Intentar con USDT-MIX
-                            params['productType'] = 'USDT-MIX'
-                            response = self.session.get(
-                                self.base_url + request_path,
-                                params=params,
-                                timeout=30
-                            )
-                            if response.status_code == 200:
-                                data = response.json()
-                                if data.get('code') == '00000':
-                                    candles = data.get('data', [])
-                                    logger.debug(f"✅ Klines obtenidos con USDT-MIX: {len(candles)}")
-                                    return candles
-                    break  # Si llegamos aquí, salir del loop de reintentos
-                    
-                except requests.exceptions.ConnectionError as e:
-                    logger.warning(f"⚠️ Intento {attempt + 1} fallido para {symbol}: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)  # Backoff exponencial
-                        continue
-                    else:
-                        raise e
-                except Exception as e:
-                    logger.error(f"❌ Error en get_klines: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(1)
-                        continue
-                    break
             
-            logger.error(f"❌ No se pudieron obtener klines para {symbol}")
+            for product_type in product_types:
+                params = {
+                    'symbol': symbol,
+                    'productType': product_type,
+                    'granularity': bitget_interval,
+                    'limit': limit
+                }
+                
+                for attempt in range(max_retries):
+                    try:
+                        response = self.session.get(
+                            self.base_url + request_path,
+                            params=params,
+                            timeout=(10, 90)  # (connect, read)
+                        )
+                        
+                        if response.status_code == 200:
+                            data = response.json()
+                            if data.get('code') == '00000':
+                                candles = data.get('data', [])
+                                logger.debug(f"✅ Klines obtenidos con {product_type}: {len(candles)}")
+                                return candles
+                            else:
+                                logger.warning(f"⚠️ Error con {product_type}: {data.get('msg', 'Unknown error')}")
+                                break  # Probar siguiente productType
+                        
+                        elif response.status_code == 429:
+                            logger.warning(f"⚠️ Rate limit con {product_type}, esperando...")
+                            time.sleep(3 ** attempt)
+                            continue
+                        else:
+                            logger.warning(f"⚠️ HTTP {response.status_code} con {product_type}")
+                            break  # Probar siguiente productType
+                            
+                    except requests.exceptions.Timeout as e:
+                        logger.warning(f"⚠️ Timeout {product_type} intento {attempt + 1}: {e}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        else:
+                            break  # Probar siguiente productType
+                            
+                    except requests.exceptions.ConnectionError as e:
+                        logger.warning(f"⚠️ Conexión fallida {product_type} intento {attempt + 1}: {e}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        else:
+                            break  # Probar siguiente productType
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Error inesperado {product_type} intento {attempt + 1}: {e}")
+                        if attempt < max_retries - 1:
+                            time.sleep(1)
+                            continue
+                        else:
+                            break  # Probar siguiente productType
+            
+            logger.error(f"❌ No se pudieron obtener klines para {symbol} con ningún productType")
+            
+            # CORRECCIÓN: Fallback a Binance como último recurso
+            try:
+                logger.info(f"🔄 Intentando fallback a Binance para {symbol}...")
+                binance_url = "https://api.binance.com/api/v3/klines"
+                binance_params = {
+                    'symbol': symbol,
+                    'interval': interval,
+                    'limit': limit
+                }
+                
+                response = requests.get(binance_url, params=binance_params, timeout=30)
+                if response.status_code == 200:
+                    klines = response.json()
+                    logger.info(f"✅ Klines obtenidos de Binance: {len(klines)}")
+                    # Convertir formato de Binance a formato de Bitget
+                    converted_klines = []
+                    for kline in klines:
+                        converted_klines.append([
+                            str(int(float(kline[0]))),  # timestamp
+                            kline[1],  # open
+                            kline[2],  # high
+                            kline[3],  # low
+                            kline[4],  # close
+                            kline[5],  # volume
+                        ])
+                    return converted_klines
+                    
+            except Exception as e:
+                logger.error(f"❌ Fallback a Binance también falló: {e}")
+            
             return None
+            
         except Exception as e:
-            logger.error(f"❌ Error en get_klines: {e}")
+            logger.error(f"❌ Error crítico en get_klines: {e}")
             return None
 
 # ---------------------------
@@ -638,21 +808,51 @@ class BitgetClient:
 # ---------------------------
 def probar_operacion_bitget(bitget_client, simbolo='BTCUSDT'):
     """
-    Función para probar que las operaciones en Bitget funcionen correctamente
+    Función para probar que las operaciones en Bitget funcionen correctamente - ROBUSTA
     """
     logger.info("🧪 INICIANDO PRUEBA DE OPERACIÓN BITGET")
     logger.info(f"📊 Símbolo de prueba: {simbolo}")
     
     try:
-        # 1. Verificar credenciales
+        # 1. Verificar credenciales con reintentos
         logger.info("1️⃣ Verificando credenciales...")
-        if not bitget_client.verificar_credenciales():
-            logger.error("❌ Credenciales no válidas")
+        max_intentos = 3
+        credenciales_validas = False
+        
+        for intento in range(max_intentos):
+            try:
+                if bitget_client.verificar_credenciales():
+                    credenciales_validas = True
+                    break
+                else:
+                    logger.warning(f"⚠️ Intento {intento + 1} fallido")
+                    if intento < max_intentos - 1:
+                        time.sleep(2 ** intento)
+            except Exception as e:
+                logger.error(f"❌ Error en intento {intento + 1}: {e}")
+                if intento < max_intentos - 1:
+                    time.sleep(2 ** intento)
+                    
+        if not credenciales_validas:
+            logger.error("❌ Credenciales no válidas después de múltiples intentos")
             return False
         
         # 2. Obtener información del símbolo
         logger.info("2️⃣ Obteniendo información del símbolo...")
-        symbol_info = bitget_client.get_symbol_info(simbolo)
+        symbol_info = None
+        for intento in range(3):
+            try:
+                symbol_info = bitget_client.get_symbol_info(simbolo)
+                if symbol_info:
+                    break
+                else:
+                    logger.warning(f"⚠️ Intento {intento + 1} fallido")
+                    time.sleep(2 ** intento)
+            except Exception as e:
+                logger.error(f"❌ Error obteniendo info {intento + 1}: {e}")
+                if intento < 2:
+                    time.sleep(2 ** intento)
+                    
         if not symbol_info:
             logger.error(f"❌ No se pudo obtener info de {simbolo}")
             return False
@@ -661,7 +861,20 @@ def probar_operacion_bitget(bitget_client, simbolo='BTCUSDT'):
         
         # 3. Obtener precio actual
         logger.info("3️⃣ Obteniendo precio actual...")
-        klines = bitget_client.get_klines(simbolo, '1m', 1)
+        klines = None
+        for intento in range(3):
+            try:
+                klines = bitget_client.get_klines(simbolo, '1m', 1)
+                if klines and len(klines) > 0:
+                    break
+                else:
+                    logger.warning(f"⚠️ Intento {intento + 1} fallido")
+                    time.sleep(2 ** intento)
+            except Exception as e:
+                logger.error(f"❌ Error obteniendo klines {intento + 1}: {e}")
+                if intento < 2:
+                    time.sleep(2 ** intento)
+                    
         if not klines or len(klines) == 0:
             logger.error(f"❌ No se pudo obtener precio de {simbolo}")
             return False
@@ -672,7 +885,20 @@ def probar_operacion_bitget(bitget_client, simbolo='BTCUSDT'):
         
         # 4. Configurar apalancamiento
         logger.info("4️⃣ Configurando apalancamiento...")
-        leverage_ok = bitget_client.set_leverage(simbolo, 10, 'long')
+        leverage_ok = False
+        for intento in range(3):
+            try:
+                leverage_ok = bitget_client.set_leverage(simbolo, 10, 'long')
+                if leverage_ok:
+                    break
+                else:
+                    logger.warning(f"⚠️ Intento {intento + 1} fallido")
+                    time.sleep(3 ** intento)
+            except Exception as e:
+                logger.error(f"❌ Error configurando leverage {intento + 1}: {e}")
+                if intento < 2:
+                    time.sleep(3 ** intento)
+                    
         if not leverage_ok:
             logger.error("❌ Error configurando apalancamiento")
             return False
@@ -681,23 +907,29 @@ def probar_operacion_bitget(bitget_client, simbolo='BTCUSDT'):
         
         # 5. Verificar posiciones actuales
         logger.info("5️⃣ Verificando posiciones actuales...")
-        positions = bitget_client.get_positions(simbolo)
-        logger.info(f"📊 Posiciones abiertas: {len(positions)}")
+        try:
+            positions = bitget_client.get_positions(simbolo)
+            logger.info(f"📊 Posiciones abiertas: {len(positions)}")
+        except Exception as e:
+            logger.warning(f"⚠️ Error obteniendo posiciones: {e}")
         
         # 6. Obtener balance de cuenta
         logger.info("6️⃣ Verificando balance...")
-        accounts = bitget_client.get_account_info()
-        if accounts:
-            for account in accounts:
-                if account.get('marginCoin') == 'USDT':
-                    available = float(account.get('available', 0))
-                    logger.info(f"💰 Balance disponible: {available:.2f} USDT")
+        try:
+            accounts = bitget_client.get_account_info()
+            if accounts:
+                for account in accounts:
+                    if account.get('marginCoin') == 'USDT':
+                        available = float(account.get('available', 0))
+                        logger.info(f"💰 Balance disponible: {available:.2f} USDT")
+        except Exception as e:
+            logger.warning(f"⚠️ Error obteniendo balance: {e}")
         
         logger.info("✅ TODAS LAS PRUEBAS EXITOSAS - BITGET CONECTADO CORRECTAMENTE")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Error en prueba de operación: {e}")
+        logger.error(f"❌ Error crítico en prueba de operación: {e}")
         return False
 
 # ---------------------------
@@ -878,19 +1110,51 @@ class TradingBot:
         # NUEVO: Inicializar cliente Bitget si están las credenciales
         self.bitget_client = None
         if config.get('bitget_api_key') and config.get('bitget_api_secret') and config.get('bitget_passphrase'):
-            self.bitget_client = BitgetClient(
-                api_key=config['bitget_api_key'],
-                api_secret=config['bitget_api_secret'],
-                passphrase=config['bitget_passphrase']
-            )
-            logger.info("🤖 Cliente Bitget inicializado, verificando credenciales...")
-            if self.bitget_client.verificar_credenciales():
-                logger.info("✅ Cliente Bitget inicializado y verificado")
-                # EJECUTAR PRUEBA AUTOMÁTICA
-                logger.info("🧪 Ejecutando prueba de conexión...")
-                probar_operacion_bitget(self.bitget_client, 'BTCUSDT')
-            else:
-                logger.error("❌ No se pudieron verificar las credenciales de Bitget")
+            try:
+                self.bitget_client = BitgetClient(
+                    api_key=config['bitget_api_key'],
+                    api_secret=config['bitget_api_secret'],
+                    passphrase=config['bitget_passphrase']
+                )
+                logger.info("🤖 Cliente Bitget inicializado, verificando credenciales...")
+                
+                # CORRECCIÓN: Verificación más robusta con reintentos
+                max_verificacion_attempts = 3
+                verificacion_exitosa = False
+                
+                for attempt in range(max_verificacion_attempts):
+                    try:
+                        if self.bitget_client.verificar_credenciales():
+                            logger.info("✅ Cliente Bitget inicializado y verificado")
+                            verificacion_exitosa = True
+                            break
+                        else:
+                            logger.warning(f"⚠️ Verificación fallida en intento {attempt + 1}")
+                            if attempt < max_verificacion_attempts - 1:
+                                time.sleep(2 ** attempt)
+                                
+                    except Exception as e:
+                        logger.error(f"❌ Error en verificación {attempt + 1}: {e}")
+                        if attempt < max_verificacion_attempts - 1:
+                            time.sleep(2 ** attempt)
+                            
+                if verificacion_exitosa:
+                    # EJECUTAR PRUEBA AUTOMÁTICA
+                    logger.info("🧪 Ejecutando prueba de conexión...")
+                    try:
+                        if probar_operacion_bitget(self.bitget_client, 'BTCUSDT'):
+                            logger.info("✅ Prueba de conexión exitosa")
+                        else:
+                            logger.warning("⚠️ Prueba de conexión fallida")
+                    except Exception as e:
+                        logger.error(f"❌ Error en prueba de conexión: {e}")
+                else:
+                    logger.error("❌ No se pudieron verificar las credenciales de Bitget después de múltiples intentos")
+                    self.bitget_client = None
+                    
+            except Exception as e:
+                logger.error(f"❌ Error inicializando cliente Bitget: {e}")
+                self.bitget_client = None
         
         # NUEVO: Configuración de operaciones automáticas
         self.ejecutar_operaciones_automaticas = config.get('ejecutar_operaciones_automaticas', False)
