@@ -2518,7 +2518,7 @@ def crear_config_desde_entorno():
         'bitget_api_secret': os.environ.get('BITGET_SECRET_KEY'),
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '2')),
+        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '10')),
         'leverage_por_defecto': int(os.environ.get('LEVERAGE_POR_DEFECTO', '10'))
     }
 
