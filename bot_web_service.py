@@ -26,10 +26,9 @@ import threading
 import logging
 import traceback
 
-# Configurar logging mejorado
+# Configurar logging mejorado (Compatible con Python 3.13)
 logging.basicConfig(
-    level=logging.INFO, 
-    stream=sys.stdout, 
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
