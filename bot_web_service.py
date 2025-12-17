@@ -143,7 +143,7 @@ class BitgetClient:
         self.api_secret = api_secret
         self.passphrase = passphrase
         self.base_url = "https://api.bitget.com"
-        self.product_type = "umcbl"  # USDT-MIX perpetual futures
+        self.product_type = "USDT-MIX"  # USDT-MIX perpetual futures
         logger.info(f"Cliente Bitget inicializado con API Key: {api_key[:10]}...")
 
     def _generate_signature(self, timestamp, method, request_path, body=''):
@@ -207,7 +207,7 @@ class BitgetClient:
                 logger.error("❌ Credenciales incompletas")
                 return False
             
-            product_types = ['umcbl', 'cmcbl', 'USDT-FUTURES', 'USDT-MIX', 'CMCBL', 'SUSDT-FUTURES']
+            product_types = ['USDT-FUTURES', 'USDT-MIX', 'CMCBL', 'usdt-futures', 'usdt-mix', 'cmcbl']
             
             for product_type in product_types:
                 logger.info(f"🔍 Probando productType: {product_type}")
@@ -277,7 +277,7 @@ class BitgetClient:
                     logger.error(f"❌ Error API Bitget: {error_code} - {error_msg}")
                     
                     if error_code == '40020':
-                        logger.info(f"🔄 Error 40020 con productType {product_type}, intentando alternativo...")
+                        logger.info(f"🔄 Error 40020 con productType {product_type}, intentando siguiente...")
                         return None
             else:
                 logger.error(f"❌ Error HTTP: {response.status_code} - {response.text}")
@@ -569,9 +569,9 @@ class BitgetClient:
                     error_code = data.get('code', 'Unknown')
                     logger.error(f"❌ Error API en get_klines: {error_code} - {error_msg}")
                     
-                    if error_code == '40020' and self.product_type != 'umcbl':
-                        logger.info("🔄 Intentando con productType='umcbl' para klines...")
-                        params['productType'] = 'umcbl'
+                    if error_code == '40020' and self.product_type != 'USDT-MIX':
+                        logger.info("🔄 Intentando con productType='USDT-MIX' para klines...")
+                        params['productType'] = 'USDT-MIX'
                         response2 = requests.get(
                             self.base_url + request_path,
                             params=params,
@@ -1084,339 +1084,138 @@ class TradingBot:
         return {
             'resistencia': resistencia_superior,
             'soporte': soporte_inferior,
-            'resistencia_media': resistencia_media,
-            'soporte_media': soporte_media,
-            'linea_tendencia': pendiente_cierre * tiempo_actual + intercepto_cierre,
-            'pendiente_tendencia': pendiente_cierre,
-            'precio_actual': precio_actual,
+            'pendiente_resistencia': pendiente_max,
+            'pendiente_soporte': pendiente_min,
             'ancho_canal': ancho_canal_absoluto,
             'ancho_canal_porcentual': ancho_canal_porcentual,
-            'angulo_tendencia': angulo_tendencia,
             'coeficiente_pearson': pearson,
+            'angulo_tendencia': angulo_tendencia,
             'fuerza_texto': fuerza_texto,
             'nivel_fuerza': nivel_fuerza,
             'direccion': direccion,
             'r2_score': self.calcular_r2(cierres, tiempos_reg, pendiente_cierre, intercepto_cierre),
-            'pendiente_resistencia': pendiente_max,
-            'pendiente_soporte': pendiente_min,
             'stoch_k': stoch_k,
-            'stoch_d': stoch_d,
-            'timeframe': datos_mercado.get('timeframe', 'N/A'),
-            'num_velas': candle_period
+            'stoch_d': stoch_d
         }
 
-    def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
-        """Envía alerta de BREAKOUT detectado a Telegram con gráfico"""
-        precio_cierre = datos_mercado['cierres'][-1]
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        direccion_canal = info_canal['direccion']
-        
-        if tipo_breakout == "BREAKOUT_LONG":
-            emoji_principal = "🚀"
-            tipo_texto = "RUPTURA de SOPORTE"
-            nivel_roto = f"Soporte: {soporte:.8f}"
-            direccion_emoji = "⬇️"
-            contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
-            expectativa = "posible entrada en long si el precio reingresa al canal"
-        else:
-            emoji_principal = "📉"
-            tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
-            nivel_roto = f"Resistencia: {resistencia:.8f}"
-            direccion_emoji = "⬆️"
-            contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
-            expectativa = "posible entrada en short si el precio reingresa al canal"
-        
-        mensaje = f"""
-{emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
-⚠️ <b>{tipo_texto}</b> {direccion_emoji}
-⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-⏳ <b>ESPERANDO REINGRESO...</b>
-👁️ Máximo 30 minutos para confirmación
-📍 {expectativa}
-        """
-        
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        
-        if token and chat_ids:
-            try:
-                logger.info(f"     📊 Generando gráfico de breakout para {simbolo}...")
-                buf = self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
-                
-                if buf:
-                    logger.info(f"     📨 Enviando alerta de breakout por Telegram...")
-                    self.enviar_grafico_telegram(buf, token, chat_ids)
-                    time.sleep(0.5)
-                    self._enviar_telegram_simple(mensaje, token, chat_ids)
-                    logger.info(f"     ✅ Alerta de breakout enviada para {simbolo}")
-                else:
-                    self._enviar_telegram_simple(mensaje, token, chat_ids)
-                    logger.warning(f"     ⚠️ Alerta enviada sin gráfico")
-            except Exception as e:
-                logger.error(f"     ❌ Error enviando alerta de breakout: {e}")
-        else:
-            logger.info(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
-
-    def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
-        """Genera gráfico especial para el momento del BREAKOUT"""
-        try:
-            import matplotlib.font_manager as fm
-            plt.rcParams['font.family'] = ['DejaVu Sans', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji']
-            
-            url = "https://api.binance.com/api/v3/klines"
-            params = {
-                'symbol': simbolo,
-                'interval': config_optima['timeframe'],
-                'limit': config_optima['num_velas']
-            }
-            respuesta = requests.get(url, params=params, timeout=10)
-            klines = respuesta.json()
-            
-            df_data = []
-            for kline in klines:
-                df_data.append({
-                    'Date': pd.to_datetime(kline[0], unit='ms'),
-                    'Open': float(kline[1]),
-                    'High': float(kline[2]),
-                    'Low': float(kline[3]),
-                    'Close': float(kline[4]),
-                    'Volume': float(kline[5])
-                })
-            df = pd.DataFrame(df_data)
-            df.set_index('Date', inplace=True)
-            
-            tiempos_reg = list(range(len(df)))
-            resistencia_values = []
-            soporte_values = []
-            
-            for i, t in enumerate(tiempos_reg):
-                resist = info_canal['pendiente_resistencia'] * t + \
-                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
-                sop = info_canal['pendiente_soporte'] * t + \
-                     (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
-                resistencia_values.append(resist)
-                soporte_values.append(sop)
-            
-            df['Resistencia'] = resistencia_values
-            df['Soporte'] = soporte_values
-            
-            period = 14
-            k_period = 3
-            d_period = 3
-            stoch_k_values = []
-            
-            for i in range(len(df)):
-                if i < period - 1:
-                    stoch_k_values.append(50)
-                else:
-                    highest_high = df['High'].iloc[i-period+1:i+1].max()
-                    lowest_low = df['Low'].iloc[i-period+1:i+1].min()
-                    if highest_high == lowest_low:
-                        k = 50
-                    else:
-                        k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
-                    stoch_k_values.append(k)
-            
-            k_smoothed = []
-            for i in range(len(stoch_k_values)):
-                if i < k_period - 1:
-                    k_smoothed.append(stoch_k_values[i])
-                else:
-                    k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
-                    k_smoothed.append(k_avg)
-            
-            stoch_d_values = []
-            for i in range(len(k_smoothed)):
-                if i < d_period - 1:
-                    stoch_d_values.append(k_smoothed[i])
-                else:
-                    d = sum(k_smoothed[i-d_period+1:i+1]) / d_period
-                    stoch_d_values.append(d)
-            
-            df['Stoch_K'] = k_smoothed
-            df['Stoch_D'] = stoch_d_values
-            
-            apds = [
-                mpf.make_addplot(df['Resistencia'], color='#5444ff', linestyle='--', width=2, panel=0),
-                mpf.make_addplot(df['Soporte'], color="#5444ff", linestyle='--', width=2, panel=0),
-            ]
-            
-            precio_breakout = datos_mercado['precio_actual']
-            breakout_line = [precio_breakout] * len(df)
-            
-            if tipo_breakout == "BREAKOUT_LONG":
-                color_breakout = "#D68F01"
-                titulo_extra = "🚀 RUPTURA ALCISTA"
-            else:
-                color_breakout = '#D68F01'
-                titulo_extra = "📉 RUPTURA BAJISTA"
-            
-            apds.append(mpf.make_addplot(breakout_line, color=color_breakout, linestyle='-', width=3, panel=0, alpha=0.8))
-            
-            apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
-            apds.append(mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1))
-            
-            overbought = [80] * len(df)
-            oversold = [20] * len(df)
-            apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
-            
-            fig, axes = mpf.plot(df, type='candle', style='nightclouds',
-                               title=f'{simbolo} | {titulo_extra} | {config_optima["timeframe"]} | ⏳ ESPERANDO REENTRY',
-                               ylabel='Precio',
-                               addplot=apds,
-                               volume=False,
-                               returnfig=True,
-                               figsize=(14, 10),
-                               panel_ratios=(3, 1))
-            
-            axes[2].set_ylim([0, 100])
-            axes[2].grid(True, alpha=0.3)
-            
-            buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
-            buf.seek(0)
-            plt.close(fig)
-            
-            return buf
-        except Exception as e:
-            logger.error(f"⚠️ Error generando gráfico de breakout: {e}")
-            return None
-
     def detectar_breakout(self, simbolo, info_canal, datos_mercado):
-        """Detecta si el precio ha ROTO el canal"""
-        if not info_canal:
-            return None
-        
-        if info_canal['ancho_canal_porcentual'] < self.config.get('min_channel_width_percent', 4.0):
-            return None
-        
-        precio_cierre = datos_mercado['cierres'][-1]
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        angulo = info_canal['angulo_tendencia']
-        direccion = info_canal['direccion']
-        nivel_fuerza = info_canal['nivel_fuerza']
-        r2 = info_canal['r2_score']
-        pearson = info_canal['coeficiente_pearson']
-        
-        if abs(angulo) < self.config.get('min_trend_strength_degrees', 16):
-            return None
-        
-        if abs(pearson) < 0.4 or r2 < 0.4:
-            return None
-        
-        if simbolo in self.breakouts_detectados:
-            ultimo_breakout = self.breakouts_detectados[simbolo]
-            tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
+        """Detecta breakouts del canal de regresión"""
+        try:
+            precio_actual = datos_mercado['precio_actual']
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
             
-            if tiempo_desde_ultimo < 115:
-                logger.info(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
+            # Configuración para detección de breakouts
+            buffer_breakout = self.config.get('breakout_buffer_percent', 0.1)
+            buffer_porcentual = buffer_breakout / 100
+            
+            if precio_actual > resistencia * (1 + buffer_porcentual):
+                return "LONG"
+            elif precio_actual < soporte * (1 - buffer_porcentual):
+                return "SHORT"
+            else:
                 return None
-        
-        margen_breakout = precio_cierre
-        
-        if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
-            if precio_cierre < soporte:
-                logger.info(f"     🚀 {simbolo} - BREAKOUT: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
-                return "BREAKOUT_LONG"
-        elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
-            if precio_cierre > resistencia:
-                logger.info(f"     📉 {simbolo} - BREAKOUT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
-                return "BREAKOUT_SHORT"
-        
-        return None
+                
+        except Exception as e:
+            logger.error(f"⚠️ Error detectando breakout para {simbolo}: {e}")
+            return None
 
     def detectar_reentry(self, simbolo, info_canal, datos_mercado):
-        """Detecta si el precio ha REINGRESADO al canal"""
-        if simbolo not in self.esperando_reentry:
-            return None
-        
-        breakout_info = self.esperando_reentry[simbolo]
-        tipo_breakout = breakout_info['tipo']
-        timestamp_breakout = breakout_info['timestamp']
-        tiempo_desde_breakout = (datetime.now() - timestamp_breakout).total_seconds() / 60
-        
-        if tiempo_desde_breakout > 120:
-            logger.info(f"     ⏰ {simbolo} - Timeout de reentry (>120 min), cancelando espera")
-            del self.esperando_reentry[simbolo]
+        """Detecta oportunidades de reentry"""
+        try:
+            precio_actual = datos_mercado['precio_actual']
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
             
-            if simbolo in self.breakouts_detectados:
-                del self.breakouts_detectados[simbolo]
+            # Configuración para detección de reentry
+            entry_margin = self.config.get('entry_margin', 0.001)
+            buffer_porcentual = entry_margin / 100
+            
+            # Lógica de reentry con confirmación stochastic
+            stoch_k = info_canal['stoch_k']
+            
+            # Reentry alcista: precio vuelve desde resistencia con oversold
+            if precio_actual < resistencia * (1 + buffer_porcentual) and stoch_k <= 30:
+                return "LONG"
+            
+            # Reentry bajista: precio vuelve desde soporte con overbought  
+            elif precio_actual > soporte * (1 - buffer_porcentual) and stoch_k >= 70:
+                return "SHORT"
             
             return None
-        
-        precio_actual = datos_mercado['precio_actual']
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        stoch_k = info_canal['stoch_k']
-        stoch_d = info_canal['stoch_d']
-        tolerancia = 0.001 * precio_actual
-        
-        if tipo_breakout == "BREAKOUT_LONG":
-            if soporte <= precio_actual <= resistencia:
-                distancia_soporte = abs(precio_actual - soporte)
-                if distancia_soporte <= tolerancia and stoch_k <= 30 and stoch_d <= 30:
-                    logger.info(f"     ✅ {simbolo} - REENTRY LONG confirmado! Entrada en soporte con Stoch oversold")
-                    if simbolo in self.breakouts_detectados:
-                        del self.breakouts_detectados[simbolo]
-                    return "LONG"
-        elif tipo_breakout == "BREAKOUT_SHORT":
-            if soporte <= precio_actual <= resistencia:
-                distancia_resistencia = abs(precio_actual - resistencia)
-                if distancia_resistencia <= tolerancia and stoch_k >= 70 and stoch_d >= 70:
-                    logger.info(f"     ✅ {simbolo} - REENTRY SHORT confirmado! Entrada en resistencia con Stoch overbought")
-                    if simbolo in self.breakouts_detectados:
-                        del self.breakouts_detectados[simbolo]
-                    return "SHORT"
-        
-        return None
+                
+        except Exception as e:
+            logger.error(f"⚠️ Error detectando reentry para {simbolo}: {e}")
+            return None
 
     def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual):
-        if not info_canal:
-            return None, None, None
-        
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        ancho_canal = resistencia - soporte
-        sl_porcentaje = 0.02
-        
-        if tipo_operacion == "LONG":
-            precio_entrada = precio_actual
-            stop_loss = precio_entrada * (1 - sl_porcentaje)
-            take_profit = precio_entrada + ancho_canal 
-        else:
-            precio_entrada = precio_actual
-            stop_loss = resistencia * (1 + sl_porcentaje)
-            take_profit = precio_entrada - ancho_canal
-        
-        riesgo = abs(precio_entrada - stop_loss)
-        beneficio = abs(take_profit - precio_entrada)
-        ratio_rr = beneficio / riesgo if riesgo > 0 else 0
-        
-        if ratio_rr < self.config.get('min_rr_ratio', 1.2):
+        """Calcula niveles de entrada, TP y SL"""
+        try:
+            resistencia = info_canal['resistencia']
+            soporte = info_canal['soporte']
+            entry_margin = self.config.get('entry_margin', 0.001)
+            
             if tipo_operacion == "LONG":
-                take_profit = precio_entrada + (riesgo * self.config['min_rr_ratio'])
-            else:
-                take_profit = precio_entrada - (riesgo * self.config['min_rr_ratio'])
-        
-        return precio_entrada, take_profit, stop_loss
+                # Entrada: en soporte + margen
+                precio_entrada = soporte * (1 + entry_margin)
+                # TP: en resistencia
+                take_profit = resistencia * 0.99  # Un poco antes de resistencia
+                # SL: 2% abajo del precio de entrada
+                stop_loss = precio_entrada * 0.98
+                
+            else:  # SHORT
+                # Entrada: en resistencia - margen
+                precio_entrada = resistencia * (1 - entry_margin)
+                # TP: en soporte
+                take_profit = soporte * 1.01  # Un poco después de soporte
+                # SL: 2% arriba del precio de entrada
+                stop_loss = precio_entrada * 1.02
+            
+            return precio_entrada, take_profit, stop_loss
+            
+        except Exception as e:
+            logger.error(f"⚠️ Error calculando niveles para {tipo_operacion}: {e}")
+            return None, None, None
+
+    def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
+        """Envía alerta de breakout detectado"""
+        try:
+            mensaje = f"""
+🚀 <b>BREAKOUT DETECTADO - {simbolo}</b>
+📊 <b>Tipo:</b> {tipo_breakout}
+💰 <b>Precio actual:</b> {datos_mercado['precio_actual']:.8f}
+📈 <b>Canal:</b> {info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}°)
+📏 <b>Ancho:</b> {info_canal['ancho_canal_porcentual']:.1f}%
+⏱️ <b>Config:</b> {config_optima['timeframe']} - {config_optima['num_velas']}v
+⏰ <b>Hora:</b> {datetime.now().strftime('%H:%M:%S')}
+💡 <b>Estrategia:</b> Esperando reentry para confirmar entrada
+            """
+            
+            token = self.config.get('telegram_token')
+            chat_ids = self.config.get('telegram_chat_ids', [])
+            
+            if token and chat_ids:
+                self._enviar_telegram_simple(mensaje, token, chat_ids)
+                logger.info(f"📢 Alerta de breakout enviada para {simbolo}")
+                
+        except Exception as e:
+            logger.error(f"⚠️ Error enviando alerta breakout: {e}")
 
     def escanear_mercado(self):
-        """Escanea el mercado con estrategia Breakout + Reentry"""
-        logger.info(f"🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
+        """Escanea el mercado en busca de oportunidades"""
+        logger.info(f"\n🔍 INICIANDO ESCANEO DE MERCADO - {datetime.now().strftime('%H:%M:%S')}")
+        
+        simbolos = self.config.get('symbols', [])
         senales_encontradas = 0
         
-        for simbolo in self.config.get('symbols', []):
+        for simbolo in simbolos:
             try:
-                if simbolo in self.operaciones_activas:
-                    logger.info(f"   ⚡ {simbolo} - Operación activa, omitiendo...")
+                if simbolo in self.senales_enviadas:
                     continue
                 
                 config_optima = self.buscar_configuracion_optima_simbolo(simbolo)
                 if not config_optima:
-                    logger.warning(f"   ❌ {simbolo} - No se encontró configuración válida")
+                    logger.debug(f"   ⚠️ {simbolo} - No se encontró configuración óptima")
                     continue
                 
                 datos_mercado = self.obtener_datos_mercado_config(
@@ -2396,7 +2195,7 @@ def crear_config_desde_entorno():
         'bitget_api_secret': os.environ.get('BITGET_SECRET_KEY'),
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '10')),
+        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '2')),
         'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '10')), 10)
     }
 
