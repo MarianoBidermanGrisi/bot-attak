@@ -1,74 +1,40 @@
-# bot_trading_fusionado.py
-# Fusión del servidor web Flask y el bot completo de trading
-# Estrategia Breakout + Reentry con integración Bitget Futures
+# bot_web_service_unificado.py
+# Servidor web unificado para ejecución local y Render.com
+# Estrategia: Breakout + Reentry con integración Bitget FUTUROS
 
 import os
 import sys
 import json
-import requests
-import threading
 import time
 import hmac
 import hashlib
 import base64
-from datetime import datetime, timedelta
-import numpy as np
-import math
 import csv
-import itertools
-import statistics
+import math
 import random
+import statistics
+import itertools
+import threading
+import logging
+from datetime import datetime, timedelta
+from io import BytesIO
+
+import numpy as np
+import pandas as pd
+import requests
 import matplotlib
-matplotlib.use('Agg')  # Backend sin GUI
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
-import pandas as pd
-from io import BytesIO
 from flask import Flask, request, jsonify
-import logging
 
 # Configurar logging básico
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
-
-# ---------------------------
-# FLASK APP
-# ---------------------------
-app = Flask(__name__)
-
-# Variables de entorno para configuración (para Render.com)
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '-1002272872445')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
-PORT = int(os.environ.get('PORT', 5000))
-
-def crear_config():
-    """Configuración básica del bot desde variables de entorno (para Render.com)"""
-    telegram_chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_ID.split(',') if cid.strip()]
-    return {
-        'min_channel_width_percent': 4.0,
-        'trend_threshold_degrees': 16.0,
-        'min_trend_strength_degrees': 16.0,
-        'entry_margin': 0.001,
-        'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 1,
-        'timeframes': ['5m', '15m', '30m', '1h', '4h'],
-        'velas_options': [80, 100, 120, 150, 200],
-        'symbols': [
-            'BTCUSDT','ETHUSDT','DOTUSDT','LINKUSDT','BNBUSDT','XRPUSDT','SOLUSDT','AVAXUSDT',
-            'DOGEUSDT','LTCUSDT','ATOMUSDT','XLMUSDT','ALGOUSDT','VETUSDT','ICPUSDT','FILUSDT',
-            'BCHUSDT','EOSUSDT','TRXUSDT','XTZUSDT','SUSHIUSDT','COMPUSDT','YFIUSDT','ETCUSDT',
-            'SNXUSDT','RENUSDT','1INCHUSDT','NEOUSDT','ZILUSDT','HOTUSDT','ENJUSDT','ZECUSDT'
-        ],
-        'telegram_token': TELEGRAM_TOKEN,
-        'telegram_chat_ids': telegram_chat_ids,
-        'auto_optimize': True,
-        'min_samples_optimizacion': 30,
-        'reevaluacion_horas': 24,
-        'log_path': 'operaciones_log_v24.csv',
-        'estado_file': 'estado_bot_v24.json'
-    }
 
 # ---------------------------
 # OPTIMIZADOR IA
@@ -172,7 +138,6 @@ class OptimizadorIA:
 # ---------------------------
 class BitgetClient:
     def __init__(self, api_key, api_secret, passphrase):
-        # CREDENCIALES REALES DE BITGET FUTUROS (desde automatico.py)
         self.api_key = api_key
         self.api_secret = api_secret
         self.passphrase = passphrase
@@ -182,26 +147,20 @@ class BitgetClient:
     def _generate_signature(self, timestamp, method, request_path, body=''):
         """Generar firma HMAC-SHA256 para Bitget V2 - VERSIÓN CORREGIDA"""
         try:
-            # Convertir body a string ordenada
             if isinstance(body, dict):
-                # Ordenar claves para consistencia
                 sorted_body = dict(sorted(body.items()))
                 body_str = json.dumps(sorted_body, separators=(',', ':')) if sorted_body else ''
             else:
                 body_str = str(body) if body else ''
             
-            # CORRECCIÓN: Usar el orden correcto según documentación Bitget
-            # Método correcto: timestamp + method + request_path + body
             message = timestamp + method.upper() + request_path + body_str
             
-            # Generar HMAC-SHA256
             mac = hmac.new(
                 bytes(self.api_secret, 'utf-8'),
                 bytes(message, 'utf-8'),
                 digestmod=hashlib.sha256
             )
             
-            # Codificar en base64
             signature = base64.b64encode(mac.digest()).decode()
             
             logger.debug(f"Firma generada: {signature}")
@@ -216,10 +175,7 @@ class BitgetClient:
     def _get_headers(self, method, request_path, body=''):
         """Obtener headers con firma para Bitget V2 - VERSIÓN CORREGIDA"""
         try:
-            # Usar timestamp en milisegundos como string
             timestamp = str(int(time.time() * 1000))
-            
-            # Generar firma con la función corregida
             sign = self._generate_signature(timestamp, method, request_path, body)
             
             headers = {
@@ -381,7 +337,6 @@ class BitgetClient:
             
             headers = self._get_headers('POST', request_path, body)
             
-            # Convertir body a JSON string con claves ordenadas para consistencia
             sorted_body = dict(sorted(body.items()))
             body_json = json.dumps(sorted_body, separators=(',', ':'))
             
@@ -436,7 +391,6 @@ class BitgetClient:
             
             headers = self._get_headers('POST', request_path, body)
             
-            # Convertir body a JSON string con claves ordenadas para consistencia
             sorted_body = dict(sorted(body.items()))
             body_json = json.dumps(sorted_body, separators=(',', ':'))
             
@@ -479,7 +433,6 @@ class BitgetClient:
             
             headers = self._get_headers('POST', request_path, body)
             
-            # Convertir body a JSON string con claves ordenadas para consistencia
             sorted_body = dict(sorted(body.items()))
             body_json = json.dumps(sorted_body, separators=(',', ':'))
             
@@ -593,16 +546,6 @@ class BitgetClient:
 def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_usd, leverage=20):
     """
     Ejecutar una operación completa en BITGET FUTUROS (posición + TP/SL)
-    
-    Args:
-        bitget_client: Instancia de BitgetClient
-        simbolo: Símbolo de trading (ej: 'BTCUSDT')
-        tipo_operacion: 'LONG' o 'SHORT'
-        capital_usd: Capital a usar en USD
-        leverage: Apalancamiento (default: 20)
-    
-    Returns:
-        dict con información de la operación ejecutada
     """
     
     logger.info(f"🚀 EJECUTANDO OPERACIÓN REAL EN BITGET FUTUROS")
@@ -612,13 +555,11 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
     logger.info(f"Capital: ${capital_usd}")
     
     try:
-        # 1. Obtener información del símbolo primero
         symbol_info = bitget_client.get_symbol_info(simbolo)
         if not symbol_info:
             logger.error(f"No se pudo obtener info de {simbolo} en BITGET FUTUROS")
             return None
         
-        # 2. Configurar apalancamiento ANTES de obtener precio
         hold_side = 'long' if tipo_operacion == 'LONG' else 'short'
         
         logger.info(f"Configurando apalancamiento {leverage}x para {simbolo} ({hold_side})")
@@ -629,35 +570,27 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         else:
             logger.info("✓ Apalancamiento configurado exitosamente")
             
-        time.sleep(1)  # Esperar un poco más para asegurar que se aplique
+        time.sleep(1)
         
-        # 3. Obtener precio actual
         klines = bitget_client.get_klines(simbolo, '1m', 1)
         if not klines or len(klines) == 0:
             logger.error(f"No se pudo obtener precio de {simbolo} en BITGET FUTUROS")
             return None
         
-        klines.reverse()  # Bitget devuelve en orden descendente
-        precio_actual = float(klines[0][4])  # Precio de cierre de la última vela
+        klines.reverse()
+        precio_actual = float(klines[0][4])
         
         logger.info(f"Precio actual: {precio_actual:.8f}")
         
-        # 4. Calcular tamaño de la posición CORRECTAMENTE
         size_multiplier = float(symbol_info.get('sizeMultiplier', 1))
         min_trade_num = float(symbol_info.get('minTradeNum', 1))
-        deliveryMode = symbol_info.get('deliveryMode', 0)
         
-        # Para Bitget FUTUROS, usar el valor nocional directamente
-        # Aumentar capital para asegurar que supera mínimos de Bitget
-        quantity_usd = max(capital_usd, 6.0)  # Mínimo $6 para estar seguro
-        # Calcular cantidad de contratos basándose en el precio
+        quantity_usd = max(capital_usd, 6.0)
         cantidad_contratos = round(quantity_usd / precio_actual, 6)
         
-        # Aplicar multiplicador si existe
         if size_multiplier > 1:
             cantidad_contratos = round(cantidad_contratos / size_multiplier) * size_multiplier
         
-        # Verificar mínimo
         if cantidad_contratos < min_trade_num:
             cantidad_contratos = min_trade_num
         
@@ -666,22 +599,20 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         logger.info(f"Size multiplier: {size_multiplier}")
         logger.info(f"Min trade num: {min_trade_num}")
         
-        # 5. Calcular TP y SL (2% SL, 10% TP para mejor RR)
         if tipo_operacion == "LONG":
-            sl_porcentaje = 0.02  # 2% Stop Loss
-            tp_porcentaje = 0.10  # 10% Take Profit (RR 5:1)
+            sl_porcentaje = 0.02
+            tp_porcentaje = 0.10
             stop_loss = precio_actual * (1 - sl_porcentaje)
             take_profit = precio_actual * (1 + tp_porcentaje)
         else:
-            sl_porcentaje = 0.02  # 2% Stop Loss
-            tp_porcentaje = 0.10  # 10% Take Profit (RR 5:1)
+            sl_porcentaje = 0.02
+            tp_porcentaje = 0.10
             stop_loss = precio_actual * (1 + sl_porcentaje)
             take_profit = precio_actual * (1 - tp_porcentaje)
         
         logger.info(f"SL: {stop_loss:.8f} ({sl_porcentaje*100}%)")
         logger.info(f"TP: {take_profit:.8f} ({tp_porcentaje*100}%)")
         
-        # 6. Abrir posición con side CORRECTO para Bitget API
         if tipo_operacion == "LONG":
             side = 'buy'
         else:
@@ -701,13 +632,12 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             return None
         
         logger.info(f"✓ Posición abierta en BITGET FUTUROS: {orden_entrada}")
-        time.sleep(2)  # Esperar más tiempo para que se procese
+        time.sleep(2)
         
-        # 7. Colocar Stop Loss - CORREGIR el side para Bitget API
         if tipo_operacion == "LONG":
-            sl_side = 'sell'  # Corregido: era 'close_long'
+            sl_side = 'sell'
         else:
-            sl_side = 'buy'   # Corregido: era 'close_short'
+            sl_side = 'buy'
             
         logger.info(f"Colocando Stop Loss {sl_side} en {stop_loss:.8f}")
         
@@ -727,7 +657,6 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         
         time.sleep(1)
         
-        # 8. Colocar Take Profit - CORREGIR el side
         logger.info(f"Colocando Take Profit {sl_side} en {take_profit:.8f}")
         
         orden_tp = bitget_client.place_plan_order(
@@ -744,7 +673,6 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         else:
             logger.warning("Error configurando Take Profit en BITGET FUTUROS")
         
-        # 9. Retornar información de la operación
         operacion_data = {
             'orden_entrada': orden_entrada,
             'orden_sl': orden_sl,
@@ -789,13 +717,11 @@ class TradingBot:
         self.breakout_history = {}
         self.config_optima_por_simbolo = {}
         self.ultima_busqueda_config = {}
-        # Tracking de breakouts y reingresos
         self.breakouts_detectados = {}
         self.esperando_reentry = {}
         self.estado_file = config.get('estado_file', 'estado_bot.json')
         self.cargar_estado()
         
-        # Inicializar cliente Bitget FUTUROS con credenciales REALES
         self.bitget_client = None
         if config.get('bitget_api_key') and config.get('bitget_api_secret') and config.get('bitget_passphrase'):
             self.bitget_client = BitgetClient(
@@ -808,10 +734,9 @@ class TradingBot:
             else:
                 logger.warning("⚠️ No se pudieron verificar las credenciales de BITGET FUTUROS")
         
-        # Configuración de operaciones automáticas
         self.ejecutar_operaciones_automaticas = config.get('ejecutar_operaciones_automaticas', False)
-        self.capital_por_operacion = config.get('capital_por_operacion', 6)  # $6 por operación (mínimo seguro)
-        self.leverage_por_defecto = config.get('leverage_por_defecto', 20)  # 20x apalancamiento
+        self.capital_por_operacion = config.get('capital_por_operacion', 6)
+        self.leverage_por_defecto = config.get('leverage_por_defecto', 20)
         
         parametros_optimizados = None
         if self.auto_optimize:
@@ -848,7 +773,6 @@ class TradingBot:
                 if 'breakout_history' in estado:
                     for simbolo, fecha_str in estado['breakout_history'].items():
                         estado['breakout_history'][simbolo] = datetime.fromisoformat(fecha_str)
-                # Cargar breakouts y reingresos esperados
                 if 'esperando_reentry' in estado:
                     for simbolo, info in estado['esperando_reentry'].items():
                         info['timestamp'] = datetime.fromisoformat(info['timestamp'])
@@ -986,24 +910,21 @@ class TradingBot:
 
     def obtener_datos_mercado_config(self, simbolo, timeframe, num_velas):
         """Obtiene datos con configuración específica usando API de Bitget FUTUROS"""
-        # Usar API de Bitget FUTUROS
         if self.bitget_client:
             try:
                 candles = self.bitget_client.get_klines(simbolo, timeframe, num_velas + 14)
                 if not candles or len(candles) == 0:
                     return None
                 
-                # Procesar datos de Bitget
                 maximos = []
                 minimos = []
                 cierres = []
                 tiempos = []
                 
                 for i, candle in enumerate(candles):
-                    # Formato Bitget: [timestamp, open, high, low, close, volume, ...]
-                    maximos.append(float(candle[2]))  # high
-                    minimos.append(float(candle[3]))  # low
-                    cierres.append(float(candle[4]))  # close
+                    maximos.append(float(candle[2]))
+                    minimos.append(float(candle[3]))
+                    cierres.append(float(candle[4]))
                     tiempos.append(i)
                 
                 return {
@@ -1017,10 +938,7 @@ class TradingBot:
                 }
             except Exception as e:
                 print(f"   ⚠️ Error obteniendo datos de BITGET FUTUROS para {simbolo}: {e}")
-                # Fallback a Binance si falla Bitget
-                pass
         
-        # Fallback a Binance API (código original)
         try:
             url = "https://api.binance.com/api/v3/klines"
             params = {'symbol': simbolo, 'interval': timeframe, 'limit': num_velas + 14}
@@ -1091,41 +1009,204 @@ class TradingBot:
             'ancho_canal_porcentual': ancho_canal_porcentual,
             'angulo_tendencia': angulo_tendencia,
             'coeficiente_pearson': pearson,
-            'r2_score': self.calcular_r2(cierres, tiempos_reg, pendiente_cierre, intercepto_cierre),
             'fuerza_texto': fuerza_texto,
             'nivel_fuerza': nivel_fuerza,
             'direccion': direccion,
-            'stoch_k': stoch_k,
-            'stoch_d': stoch_d,
+            'r2_score': self.calcular_r2(cierres, tiempos_reg, pendiente_cierre, intercepto_cierre),
             'pendiente_resistencia': pendiente_max,
             'pendiente_soporte': pendiente_min,
-            'tiempo_actual': tiempo_actual
+            'stoch_k': stoch_k,
+            'stoch_d': stoch_d,
+            'timeframe': datos_mercado.get('timeframe', 'N/A'),
+            'num_velas': candle_period
         }
 
     def enviar_alerta_breakout(self, simbolo, tipo_breakout, info_canal, datos_mercado, config_optima):
-        """Envía alerta cuando se detecta un breakout"""
-        if not self.config.get('telegram_token') or not self.config.get('telegram_chat_ids'):
-            return
+        """
+        Envía alerta de BREAKOUT detectado a Telegram con gráfico
+        """
+        if tipo_breakout == "BREAKOUT_LONG":
+            emoji_principal = "🚀"
+            tipo_texto = "RUPTURA de SOPORTE"
+        else:
+            emoji_principal = "📉"
+            tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
         
         mensaje = f"""
-🚀 <b>BREAKOUT DETECTADO - {simbolo}</b>
-📊 <b>Tipo:</b> {tipo_breakout}
-💰 <b>Precio breakout:</b> {datos_mercado['precio_actual']:.8f}
-📏 <b>Ancho canal:</b> {info_canal['ancho_canal_porcentual']:.1f}%
-📈 <b>Tendencia:</b> {info_canal['direccion']}
-💪 <b>Fuerza:</b> {info_canal['fuerza_texto']}
-📊 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
-🎯 <b>R² Score:</b> {info_canal['r2_score']:.3f}
-⏱️ <b>Config:</b> {config_optima['timeframe']} - {config_optima['num_velas']} velas
+{emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
+⚠️ <b>{tipo_texto}</b>
 ⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-💡 <b>Estrategia:</b> Esperando reentry con confirmación Stochastic
+⏳ <b>ESPERANDO REINGRESO...</b>
+👁️ Máximo 30 minutos para confirmación
         """
-        
+        token = self.config.get('telegram_token')
+        chat_ids = self.config.get('telegram_chat_ids', [])
+        if token and chat_ids:
+            try:
+                print(f"     📊 Generando gráfico de breakout para {simbolo}...")
+                buf = self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
+                if buf:
+                    print(f"     📨 Enviando alerta de breakout por Telegram...")
+                    self.enviar_grafico_telegram(buf, token, chat_ids)
+                    time.sleep(0.5)
+                    self._enviar_telegram_simple(mensaje, token, chat_ids)
+                    print(f"     ✅ Alerta de breakout enviada para {simbolo}")
+                else:
+                    self._enviar_telegram_simple(mensaje, token, chat_ids)
+                    print(f"     ⚠️ Alerta enviada sin gráfico")
+            except Exception as e:
+                print(f"     ❌ Error enviando alerta de breakout: {e}")
+        else:
+            print(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
+
+    def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
+        """
+        Genera gráfico especial para el momento del BREAKOUT
+        """
         try:
-            self._enviar_telegram_simple(mensaje, self.config['telegram_token'], self.config['telegram_chat_ids'])
-            print(f"     📨 Alerta de breakout enviada para {simbolo}")
+            if self.bitget_client:
+                klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
+                if klines:
+                    df_data = []
+                    for kline in klines:
+                        df_data.append({
+                            'Date': pd.to_datetime(int(kline[0]), unit='ms'),
+                            'Open': float(kline[1]),
+                            'High': float(kline[2]),
+                            'Low': float(kline[3]),
+                            'Close': float(kline[4]),
+                            'Volume': float(kline[5])
+                        })
+                    df = pd.DataFrame(df_data)
+                    df.set_index('Date', inplace=True)
+                else:
+                    url = "https://api.binance.com/api/v3/klines"
+                    params = {
+                        'symbol': simbolo,
+                        'interval': config_optima['timeframe'],
+                        'limit': config_optima['num_velas']
+                    }
+                    respuesta = requests.get(url, params=params, timeout=10)
+                    klines = respuesta.json()
+                    df_data = []
+                    for kline in klines:
+                        df_data.append({
+                            'Date': pd.to_datetime(kline[0], unit='ms'),
+                            'Open': float(kline[1]),
+                            'High': float(kline[2]),
+                            'Low': float(kline[3]),
+                            'Close': float(kline[4]),
+                            'Volume': float(kline[5])
+                        })
+                    df = pd.DataFrame(df_data)
+                    df.set_index('Date', inplace=True)
+            else:
+                url = "https://api.binance.com/api/v3/klines"
+                params = {
+                    'symbol': simbolo,
+                    'interval': config_optima['timeframe'],
+                    'limit': config_optima['num_velas']
+                }
+                respuesta = requests.get(url, params=params, timeout=10)
+                klines = respuesta.json()
+                df_data = []
+                for kline in klines:
+                    df_data.append({
+                        'Date': pd.to_datetime(kline[0], unit='ms'),
+                        'Open': float(kline[1]),
+                        'High': float(kline[2]),
+                        'Low': float(kline[3]),
+                        'Close': float(kline[4]),
+                        'Volume': float(kline[5])
+                    })
+                df = pd.DataFrame(df_data)
+                df.set_index('Date', inplace=True)
+            
+            tiempos_reg = list(range(len(df)))
+            resistencia_values = []
+            soporte_values = []
+            for i, t in enumerate(tiempos_reg):
+                resist = info_canal['pendiente_resistencia'] * t + \
+                        (info_canal['resistencia'] - info_canal['pendiente_resistencia'] * tiempos_reg[-1])
+                sop = info_canal['pendiente_soporte'] * t + \
+                     (info_canal['soporte'] - info_canal['pendiente_soporte'] * tiempos_reg[-1])
+                resistencia_values.append(resist)
+                soporte_values.append(sop)
+            df['Resistencia'] = resistencia_values
+            df['Soporte'] = soporte_values
+            
+            period = 14
+            k_period = 3
+            d_period = 3
+            stoch_k_values = []
+            for i in range(len(df)):
+                if i < period - 1:
+                    stoch_k_values.append(50)
+                else:
+                    highest_high = df['High'].iloc[i-period+1:i+1].max()
+                    lowest_low = df['Low'].iloc[i-period+1:i+1].min()
+                    if highest_high == lowest_low:
+                        k = 50
+                    else:
+                        k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
+                    stoch_k_values.append(k)
+            k_smoothed = []
+            for i in range(len(stoch_k_values)):
+                if i < k_period - 1:
+                    k_smoothed.append(stoch_k_values[i])
+                else:
+                    k_avg = sum(stoch_k_values[i-k_period+1:i+1]) / k_period
+                    k_smoothed.append(k_avg)
+            stoch_d_values = []
+            for i in range(len(k_smoothed)):
+                if i < d_period - 1:
+                    stoch_d_values.append(k_smoothed[i])
+                else:
+                    d = sum(k_smoothed[i-d_period+1:i+1]) / d_period
+                    stoch_d_values.append(d)
+            df['Stoch_K'] = k_smoothed
+            df['Stoch_D'] = stoch_d_values
+            
+            apds = [
+                mpf.make_addplot(df['Resistencia'], color='#5444ff', linestyle='--', width=2, panel=0),
+                mpf.make_addplot(df['Soporte'], color="#5444ff", linestyle='--', width=2, panel=0),
+            ]
+            
+            precio_breakout = datos_mercado['precio_actual']
+            breakout_line = [precio_breakout] * len(df)
+            if tipo_breakout == "BREAKOUT_LONG":
+                color_breakout = "#D68F01"
+                titulo_extra = "🚀 RUPTURA ALCISTA"
+            else:
+                color_breakout = '#D68F01'
+                titulo_extra = "📉 RUPTURA BAJISTA"
+            apds.append(mpf.make_addplot(breakout_line, color=color_breakout, linestyle='-', width=3, panel=0, alpha=0.8))
+            
+            apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
+            apds.append(mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1))
+            overbought = [80] * len(df)
+            oversold = [20] * len(df)
+            apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
+            apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
+            
+            fig, axes = mpf.plot(df, type='candle', style='nightclouds',
+                               title=f'{simbolo} | {titulo_extra} | {config_optima["timeframe"]} | ⏳ ESPERANDO REENTRY',
+                               ylabel='Precio',
+                               addplot=apds,
+                               volume=False,
+                               returnfig=True,
+                               figsize=(14, 10),
+                               panel_ratios=(3, 1))
+            axes[2].set_ylim([0, 100])
+            axes[2].grid(True, alpha=0.3)
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+            buf.seek(0)
+            plt.close(fig)
+            return buf
         except Exception as e:
-            print(f"     ❌ Error enviando alerta de breakout: {e}")
+            print(f"⚠️ Error generando gráfico de breakout: {e}")
+            return None
 
     def detectar_breakout(self, simbolo, info_canal, datos_mercado):
         """Detecta si el precio ha ROTO el canal"""
@@ -1145,20 +1226,20 @@ class TradingBot:
             return None
         if abs(pearson) < 0.4 or r2 < 0.4:
             return None
-        # Verificar si ya hubo un breakout reciente (menos de 25 minutos)
+        
         if simbolo in self.breakouts_detectados:
             ultimo_breakout = self.breakouts_detectados[simbolo]
             tiempo_desde_ultimo = (datetime.now() - ultimo_breakout['timestamp']).total_seconds() / 60
             if tiempo_desde_ultimo < 115:
                 print(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
                 return None
-        # CORREGIR LÓGICA DE DETECCIÓN DE BREAKOUT
+        
         if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
-            if precio_cierre < soporte:  # Precio rompió hacia abajo el soporte
+            if precio_cierre < soporte:
                 print(f"     🚀 {simbolo} - BREAKOUT LONG: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
                 return "BREAKOUT_LONG"
         elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
-            if precio_cierre > resistencia:  # Precio rompió hacia arriba la resistencia
+            if precio_cierre > resistencia:
                 print(f"     📉 {simbolo} - BREAKOUT SHORT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
                 return "BREAKOUT_SHORT"
         return None
@@ -1379,7 +1460,7 @@ class TradingBot:
 🎰 <b>Stochástico:</b> {stoch_estado}
 📊 <b>Stoch K:</b> {info_canal['stoch_k']:.1f}
 📈 <b>Stoch D:</b> {info_canal['stoch_d']:.1f}
-⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-d %H:%M:%S')}
 💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic
         """
         token = self.config.get('telegram_token')
@@ -1398,7 +1479,6 @@ class TradingBot:
             except Exception as e:
                 print(f"     ❌ Error enviando señal: {e}")
         
-        # Ejecutar operación automáticamente si está habilitado y tenemos cliente BITGET FUTUROS
         if self.ejecutar_operaciones_automaticas and self.bitget_client:
             print(f"     🤖 Ejecutando operación automática en BITGET FUTUROS...")
             try:
@@ -1411,7 +1491,6 @@ class TradingBot:
                 )
                 if operacion_bitget:
                     print(f"     ✅ Operación ejecutada en BITGET FUTUROS para {simbolo}")
-                    # Enviar confirmación de ejecución
                     mensaje_confirmacion = f"""
 🤖 <b>OPERACIÓN AUTOMÁTICA EJECUTADA - {simbolo}</b>
 ✅ <b>Status:</b> EJECUTADA EN BITGET FUTUROS
@@ -1702,7 +1781,6 @@ class TradingBot:
             if not config_optima:
                 return None
             
-            # Usar API de Bitget FUTUROS si está disponible
             if self.bitget_client:
                 klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
                 if klines:
@@ -1719,7 +1797,6 @@ class TradingBot:
                     df = pd.DataFrame(df_data)
                     df.set_index('Date', inplace=True)
                 else:
-                    # Fallback a Binance
                     url = "https://api.binance.com/api/v3/klines"
                     params = {
                         'symbol': simbolo,
@@ -1741,7 +1818,6 @@ class TradingBot:
                     df = pd.DataFrame(df_data)
                     df.set_index('Date', inplace=True)
             else:
-                # Fallback a Binance
                 url = "https://api.binance.com/api/v3/klines"
                 params = {
                     'symbol': simbolo,
@@ -1775,6 +1851,7 @@ class TradingBot:
                 soporte_values.append(sop)
             df['Resistencia'] = resistencia_values
             df['Soporte'] = soporte_values
+            
             period = 14
             k_period = 3
             d_period = 3
@@ -1806,6 +1883,7 @@ class TradingBot:
                     stoch_d_values.append(d)
             df['Stoch_K'] = k_smoothed
             df['Stoch_D'] = stoch_d_values
+            
             apds = [
                 mpf.make_addplot(df['Resistencia'], color='#5444ff', linestyle='--', width=2, panel=0),
                 mpf.make_addplot(df['Soporte'], color="#5444ff", linestyle='--', width=2, panel=0),
@@ -1817,12 +1895,14 @@ class TradingBot:
                 apds.append(mpf.make_addplot(entry_line, color='#FFD700', linestyle='-', width=2, panel=0))
                 apds.append(mpf.make_addplot(tp_line, color='#00FF00', linestyle='-', width=2, panel=0))
                 apds.append(mpf.make_addplot(sl_line, color='#FF0000', linestyle='-', width=2, panel=0))
+            
             apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
             apds.append(mpf.make_addplot(df['Stoch_D'], color='#FF6347', width=1.5, panel=1))
             overbought = [80] * len(df)
             oversold = [20] * len(df)
             apds.append(mpf.make_addplot(overbought, color="#E7E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
             apds.append(mpf.make_addplot(oversold, color="#E9E4E4", linestyle='--', width=0.8, panel=1, alpha=0.5))
+            
             fig, axes = mpf.plot(df, type='candle', style='nightclouds',
                                title=f'{simbolo} | {tipo_operacion} | {config_optima["timeframe"]} | BITGET FUTUROS + Breakout+Reentry',
                                ylabel='Precio',
@@ -1988,21 +2068,26 @@ class TradingBot:
                 pass
 
 # ---------------------------
-# CONFIGURACIÓN COMPLETA CON CREDENCIALES REALES DE BITGET FUTUROS
+# CONFIGURACIÓN Y SERVIDOR WEB
 # ---------------------------
+
+app = Flask(__name__)
+
+# Variables de entorno para configuración
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8406173543:AAFIuYlFd3jtAF1Q6SNntUGn1PopgkZ7S0k')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '2108159591')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
+PORT = int(os.environ.get('PORT', 5000))
+
+BITGET_API_KEY = os.environ.get('BITGET_API_KEY', 'bg_0e9c732f2ed08d90c986a7fd9a4cdedd')
+BITGET_SECRET_KEY = os.environ.get('BITGET_SECRET_KEY', '52582b11761d83bce4e4475182b1510617081dd4e56051e787178a2a06a5bd3b')
+BITGET_PASSPHRASE = os.environ.get('BITGET_PASSPHRASE', 'Rasputino977')
+
 def crear_config_completa():
-    """Configuración completa con credenciales REALES de Bitget Futures y Telegram"""
+    """Configuración completa con variables de entorno"""
+    telegram_chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_ID.split(',') if cid.strip()]
     
-    # CREDENCIALES REALES DE BITGET FUTUROS (tomadas de automatico.py)
-    BITGET_API_KEY = 'bg_0e9c732f2ed08d90c986a7fd9a4cdedd'
-    BITGET_SECRET_KEY = '52582b11761d83bce4e4475182b1510617081dd4e56051e787178a2a06a5bd3b'
-    BITGET_PASSPHRASE = 'Rasputino977'
-    
-    # CREDENCIALES REALES DE TELEGRAM (tomadas de automatico.py)
-    TELEGRAM_TOKEN = '8406173543:AAFIuYlFd3jtAF1Q6SNntUGn1PopgkZ7S0k'
-    TELEGRAM_CHAT_ID = '2108159591'
-    
-    # Directorio actual para archivos
     directorio_actual = os.path.dirname(os.path.abspath(__file__))
     
     return {
@@ -2011,44 +2096,51 @@ def crear_config_completa():
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 2,  # Escaneo cada 2 minutos
+        'scan_interval_minutes': 2,
         'timeframes': ['5m', '15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
-            # PARES ORIGINALES (24)
             'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT',
             'ADAUSDT', 'DOTUSDT', 'AVAXUSDT', 'LTCUSDT', 'ATOMUSDT',
             'NEARUSDT', 'TRXUSDT', 'ETCUSDT', 'XLMUSDT', 'BCHUSDT',
             'LINKUSDT', 'UNIUSDT', 'LIGHTUSDT', 'HYPEUSDT',
             'WLDUSDT', 'METAUSDT', 'TAOUSDT', 'PENGUUSDT', 'KASUSDT',
-            # PARES AÑADIDOS - LAYER 2 & ALTCOINS POPULARES (20)
             'DOGEUSDT', 'AAVEUSDT', 'SUSHIUSDT',
             'CRVUSDT', 'COMPUSDT', 'SNXUSDT', '1INCHUSDT',
             'SANDUSDT', 'MANAUSDT', 'AXSUSDT', 'OPUSDT',
             'ARBUSDT', 'INJUSDT', 'RUNEUSDT', 'VETUSDT', 'FILUSDT',
-            # NUEVOS PARES AÑADIDOS (8)
             'PEPEUSDT', 'PIPPINUSDT', 'HUSDT', 'MOVEUSDT',
             'ASTERUSDT', 'ENAUSDT', 'AXLUSDT', 'CYSUDT'
         ],
         'telegram_token': TELEGRAM_TOKEN,
-        'telegram_chat_ids': [TELEGRAM_CHAT_ID],
+        'telegram_chat_ids': telegram_chat_ids,
         'auto_optimize': True,
         'min_samples_optimizacion': 15,
         'reevaluacion_horas': 24,
         'log_path': os.path.join(directorio_actual, 'operaciones_log_v23_real.csv'),
         'estado_file': os.path.join(directorio_actual, 'estado_bot_v23_real.json'),
-        # CREDENCIALES REALES DE BITGET FUTUROS
         'bitget_api_key': BITGET_API_KEY,
         'bitget_api_secret': BITGET_SECRET_KEY,
         'bitget_passphrase': BITGET_PASSPHRASE,
-        'ejecutar_operaciones_automaticas': True,  # ACTIVADO para operar con dinero REAL
-        'capital_por_operacion': 6,  # $6 por operación (mínimo seguro)
-        'leverage_por_defecto': 20  # 20x apalancamiento
+        'ejecutar_operaciones_automaticas': False,  # Por defecto desactivado para seguridad
+        'capital_por_operacion': 6,
+        'leverage_por_defecto': 20
     }
 
-# ---------------------------
-# FUNCIONES AUXILIARES DE FLASK
-# ---------------------------
+# Crear bot con configuración
+config = crear_config_completa()
+bot = TradingBot(config)
+
+def run_bot_loop():
+    """Ejecuta el bot en un hilo separado"""
+    while True:
+        try:
+            bot.ejecutar_analisis()
+            time.sleep(bot.config.get('scan_interval_minutes', 2) * 60)
+        except Exception as e:
+            logger.error(f"Error en el hilo del bot: {e}")
+            time.sleep(60)
+
 def setup_telegram_webhook():
     """Configurar webhook de Telegram"""
     if not TELEGRAM_TOKEN:
@@ -2075,38 +2167,120 @@ def setup_telegram_webhook():
     except Exception as e:
         logger.error(f"❌ Error configurando webhook: {e}")
 
-def run_bot_loop():
-    """Hilo principal del bot - Ejecuta el bot de trading"""
-    logger.info("🚀 Iniciando hilo del bot de trading...")
-    
-    # Crear bot con configuración completa
-    config = crear_config_completa()
-    bot = TradingBot(config)
-    
-    while True:
-        try:
-            # Ejecutar análisis del bot
-            nuevas_senales = bot.ejecutar_analisis()
-            bot.mostrar_resumen_operaciones()
-            
-            # Esperar el intervalo configurado
-            interval_minutes = bot.config.get('scan_interval_minutes', 2)
-            logger.info(f"✅ Análisis completado. Señales nuevas: {nuevas_senales}")
-            logger.info(f"⏳ Próximo análisis en {interval_minutes} minutos...")
-            
-            time.sleep(interval_minutes * 60)
-            
-        except Exception as e:
-            logger.error(f"Error en el hilo del bot: {e}")
-            time.sleep(60)
+# ---------------------------
+# ENDPOINTS FLASK
+# ---------------------------
 
-def initialize_bot():
-    """Inicializar el bot y sus componentes"""
+@app.route('/')
+def index():
+    return jsonify({
+        "status": "online",
+        "message": "Bot Breakout + Reentry con integración Bitget FUTUROS está en línea",
+        "version": "2.0.0",
+        "timestamp": time.time()
+    }), 200
+
+@app.route('/health')
+def health_check():
+    """Health check para monitoreo"""
+    return jsonify({
+        "status": "healthy",
+        "service": "trading_bot_breakout_reentry",
+        "timestamp": time.time()
+    }), 200
+
+@app.route('/config')
+def get_config():
+    """Endpoint para verificar configuración"""
+    return jsonify({
+        "config": {
+            "symbols_count": len(config.get('symbols', [])),
+            "timeframes": config.get('timeframes', []),
+            "telegram_configured": bool(config.get('telegram_token')),
+            "auto_optimize": config.get('auto_optimize', False),
+            "scan_interval": config.get('scan_interval_minutes', 2),
+            "bitget_configured": bool(config.get('bitget_api_key')),
+            "auto_trading": config.get('ejecutar_operaciones_automaticas', False)
+        }
+    }), 200
+
+@app.route('/webhook', methods=['POST'])
+def telegram_webhook():
+    """Webhook para recibir actualizaciones de Telegram"""
+    if request.is_json:
+        try:
+            update = request.get_json()
+            logger.info(f"📨 Update recibido: {json.dumps(update, indent=2)}")
+            return jsonify({"status": "ok", "message": "Update procesado"}), 200
+        except Exception as e:
+            logger.error(f"❌ Error procesando webhook: {e}")
+            return jsonify({"error": "Error procesando update"}), 500
+    else:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    """Endpoint para obtener estado detallado del bot"""
+    return jsonify({
+        "bot_status": "running",
+        "config": {
+            "symbols": len(config.get('symbols', [])),
+            "timeframes": config.get('timeframes', []),
+            "telegram_enabled": bool(config.get('telegram_token')),
+            "bitget_enabled": bool(config.get('bitget_api_key')),
+            "auto_trading": config.get('ejecutar_operaciones_automaticas', False),
+            "auto_optimize": config.get('auto_optimize', False)
+        },
+        "operations": {
+            "activas": len(bot.operaciones_activas),
+            "esperando_reentry": len(bot.esperando_reentry),
+            "total_ejecutadas": bot.total_operaciones
+        },
+        "server": {
+            "port": PORT,
+            "environment": "production" if os.environ.get('RENDER_EXTERNAL_URL') else "development"
+        },
+        "timestamp": time.time()
+    }), 200
+
+@app.route('/bot/start', methods=['POST'])
+def start_bot():
+    """Endpoint para iniciar el bot manualmente"""
+    try:
+        bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
+        bot_thread.start()
+        return jsonify({"status": "started", "message": "Bot iniciado correctamente"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ---------------------------
+# FUNCIONES DE EJECUCIÓN
+# ---------------------------
+
+def ejecutar_bot_directamente():
+    """Ejecuta el bot directamente sin Flask"""
+    print("="*70)
+    print("🚨 BOT BREAKOUT+REENTRY COMPLETO - BITGET FUTUROS")
+    print("🔧 Características completas:")
+    print("   1. ✅ Estrategia Breakout+Reentry con confirmación Stochastic")
+    print("   2. ✅ Gráficos profesionales con mplfinance")
+    print("   3. ✅ Conexión REAL a Bitget Futures (Dinero REAL)")
+    print("   4. ✅ Trading automático REAL con SL/TP")
+    print("   5. ✅ Optimizador IA automático")
+    print("   6. ✅ Alertas Telegram con gráficos")
+    print("   7. ✅ Persistencia de estado")
+    print("="*70)
+    
+    bot.iniciar()
+
+def initialize_bot_server():
+    """Inicializar el servidor web del bot"""
     try:
         logger.info("🚀 Inicializando servidor web del bot...")
         
-        # Configurar webhook de Telegram
-        setup_telegram_webhook()
+        # Configurar webhook de Telegram si es necesario
+        if WEBHOOK_URL or RENDER_EXTERNAL_URL:
+            setup_telegram_webhook()
         
         # Iniciar hilo del bot
         bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
@@ -2119,110 +2293,52 @@ def initialize_bot():
         return False
 
 # ---------------------------
-# ENDPOINTS FUSIONADOS
-# ---------------------------
-
-@app.route('/')
-def index():
-    """Endpoint principal - Verificar estado del servicio"""
-    return jsonify({
-        "status": "online",
-        "message": "Bot Breakout + Reentry + KVO está en línea",
-        "version": "2.0.0 (FUSIONADO)",
-        "features": [
-            "Estrategia Breakout + Reentry",
-            "Integración Bitget Futures",
-            "Optimizador IA",
-            "Trading automático",
-            "Gráficos profesionales"
-        ],
-        "timestamp": time.time()
-    }), 200
-
-@app.route('/health')
-def health_check():
-    """Health check para monitoreo"""
-    return jsonify({
-        "status": "healthy",
-        "service": "trading_bot_web_server_fusionado",
-        "timestamp": time.time()
-    }), 200
-
-@app.route('/config')
-def get_config():
-    """Endpoint para verificar configuración"""
-    config = crear_config_completa()
-    return jsonify({
-        "config": {
-            "symbols_count": len(config.get('symbols', [])),
-            "timeframes": config.get('timeframes', []),
-            "telegram_configured": bool(config.get('telegram_token')),
-            "auto_optimize": config.get('auto_optimize', False),
-            "scan_interval": config.get('scan_interval_minutes', 2),
-            "bitget_configured": bool(config.get('bitget_api_key')),
-            "auto_trading": config.get('ejecutar_operaciones_automaticas', False),
-            "leverage": config.get('leverage_por_defecto', 20),
-            "capital_per_operation": config.get('capital_por_operacion', 6)
-        }
-    }), 200
-
-@app.route('/webhook', methods=['POST'])
-def telegram_webhook():
-    """Webhook para recibir actualizaciones de Telegram"""
-    if request.is_json:
-        try:
-            update = request.get_json()
-            logger.info(f"📨 Update recibido: {json.dumps(update, indent=2)}")
-            
-            # Procesar update aquí según necesidad
-            # En una implementación completa, aquí se manejarían comandos de Telegram
-            
-            return jsonify({"status": "ok", "message": "Update procesado"}), 200
-        except Exception as e:
-            logger.error(f"❌ Error procesando webhook: {e}")
-            return jsonify({"error": "Error procesando update"}), 500
-    else:
-        return jsonify({"error": "Request must be JSON"}), 400
-
-@app.route('/status', methods=['GET'])
-def get_status():
-    """Endpoint para obtener estado detallado del bot"""
-    config = crear_config_completa()
-    return jsonify({
-        "bot_status": "running",
-        "config": {
-            "symbols": len(config.get('symbols', [])),
-            "timeframes": config.get('timeframes', []),
-            "telegram_enabled": bool(config.get('telegram_token')),
-            "auto_optimize": config.get('auto_optimize', False),
-            "bitget_enabled": bool(config.get('bitget_api_key')),
-            "auto_trading": config.get('ejecutar_operaciones_automaticas', False)
-        },
-        "server": {
-            "port": PORT,
-            "environment": "production" if os.environ.get('RENDER_EXTERNAL_URL') else "development",
-            "version": "2.0.0 - FUSIONADO"
-        },
-        "timestamp": time.time()
-    }), 200
-
-# ---------------------------
-# INICIALIZACIÓN PRINCIPAL
+# EJECUCIÓN PRINCIPAL
 # ---------------------------
 
 if __name__ == '__main__':
-    logger.info("🚀 Iniciando servidor web para Render.com...")
+    import argparse
     
-    # Inicializar componentes
-    if initialize_bot():
-        logger.info(f"🌐 Iniciando servidor en puerto {PORT}")
-        # Ejecutar servidor Flask
-        app.run(
-            debug=False,
-            host='0.0.0.0',
-            port=PORT,
-            threaded=True
+    parser = argparse.ArgumentParser(description='Bot de Trading Breakout+Reentry')
+    parser.add_argument('--mode', type=str, default='web', 
+                       choices=['web', 'direct', 'both'],
+                       help='Modo de ejecución: web (Flask), direct (consola), both (ambos)')
+    
+    args = parser.parse_args()
+    
+    if args.mode == 'direct':
+        # Ejecutar solo el bot en consola
+        ejecutar_bot_directamente()
+    elif args.mode == 'web':
+        # Ejecutar solo el servidor web
+        logger.info("🚀 Iniciando servidor web para Render.com...")
+        if initialize_bot_server():
+            logger.info(f"🌐 Iniciando servidor en puerto {PORT}")
+            app.run(
+                debug=False,
+                host='0.0.0.0',
+                port=PORT,
+                threaded=True
+            )
+        else:
+            logger.error("❌ Error en la inicialización del servidor")
+            sys.exit(1)
+    else:  # both
+        # Ejecutar ambos en hilos separados
+        logger.info("🚀 Iniciando modo combinado (bot + servidor web)...")
+        
+        # Iniciar servidor web en un hilo
+        web_thread = threading.Thread(
+            target=lambda: app.run(
+                debug=False,
+                host='0.0.0.0',
+                port=PORT,
+                threaded=True
+            ),
+            daemon=True
         )
-    else:
-        logger.error("❌ Error en la inicialización del servidor")
-        sys.exit(1)
+        web_thread.start()
+        
+        # Iniciar bot directamente
+        time.sleep(2)  # Esperar a que el servidor web inicie
+        ejecutar_bot_directamente()
