@@ -368,6 +368,7 @@ class BitgetClient:
             body = {
                 'symbol': symbol,
                 'productType': self.product_type,
+                'marginMode': 'isolated',  # CORREGIDO: Requerido para modo one-way
                 'marginCoin': 'USDT',
                 'side': side,
                 'orderType': order_type,
@@ -425,10 +426,11 @@ class BitgetClient:
             body = {
                 'symbol': symbol,
                 'productType': self.product_type,
+                'marginMode': 'isolated',  # CORREGIDO: Requerido para modo one-way
                 'marginCoin': 'USDT',
                 'side': side,
                 'orderType': order_type,
-                'triggerPrice': str(trigger_price),
+                'triggerPrice': str(round(float(trigger_price), 1)),  # CORREGIDO: Múltiplo de 0.1
                 'size': str(size),
                 'planType': plan_type,
                 'triggerType': 'market_price'
