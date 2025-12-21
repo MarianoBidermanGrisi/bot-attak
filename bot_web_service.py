@@ -2792,3 +2792,6 @@ if __name__ == '__main__':
     setup_telegram_webhook()
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
+
+import test_real_order
+test_real_order.run_test()
