@@ -25,7 +25,7 @@ SYMBOL = "DOTUSDT"          # Par a operar
 MARGIN_COIN = "USDT"        # Moneda de margen
 SIZE = "0.001"              # Tamaño mínimo (ajustar según el par)
 SIDE = "open_long"          # open_long, open_short, close_long, close_short
-LEVERAGE = "5"              # Apalancamiento
+LEVERAGE = "10"              # Apalancamiento
 
 
 def get_timestamp():
