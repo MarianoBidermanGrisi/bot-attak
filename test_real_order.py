@@ -21,11 +21,11 @@ PASSPHRASE = os.environ.get('BITGET_PASSPHRASE', '')
 BASE_URL = "https://api.bitget.com"
 
 # Configuración de la operación de prueba
-SYMBOL = "DOTUSDT"          # Par a operar
+SYMBOL = "BTCUSDT"          # Par a operar
 MARGIN_COIN = "USDT"        # Moneda de margen
-SIZE = "6"              # Tamaño mínimo (ajustar según el par)
+SIZE = "0.001"              # Tamaño mínimo (ajustar según el par)
 SIDE = "open_long"          # open_long, open_short, close_long, close_short
-LEVERAGE = "10"              # Apalancamiento
+LEVERAGE = "5"              # Apalancamiento
 
 
 def get_timestamp():
@@ -131,9 +131,10 @@ def open_test_order():
     print(f"💰 Precio actual: {current_price} USDT")
     
     # Calcular SL y TP (ejemplo: 1% SL, 2% TP para long)
-    # Redondear a 1 decimal (múltiplo de 0.1 requerido por Bitget)
-    sl_price = round(current_price * 0.99, 1)   # -1% Stop Loss
-    tp_price = round(current_price * 1.02, 1)   # +2% Take Profit
+    # Decimales según el precio (BTC=1, altcoins bajas=3)
+    decimals = 1 if current_price > 100 else 3
+    sl_price = round(current_price * 0.99, decimals)   # -1% Stop Loss
+    tp_price = round(current_price * 1.02, decimals)   # +2% Take Profit
     
     print(f"🛡️ Stop Loss: {sl_price} USDT (-1%)")
     print(f"🎯 Take Profit: {tp_price} USDT (+2%)")
