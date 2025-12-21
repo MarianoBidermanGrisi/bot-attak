@@ -1,6 +1,7 @@
 # bot_web_service.py
 # Adaptación para Render del bot Breakout + Reentry con correcciones Bitget
 # CORRECCIÓN: Eliminados warnings de matplotlib para emojis
+# ACTUALIZACIÓN: Configuración de mínimos de Bitget 2025
 import requests
 import time
 import json
@@ -17,6 +18,14 @@ import itertools
 import statistics
 import random
 import warnings
+# Importar configuración de mínimos de Bitget
+try:
+    from config.bitget_config import get_minimum_size, get_recommended_leverage, get_price_precision
+    BITGET_CONFIG_AVAILABLE = True
+except ImportError:
+    BITGET_CONFIG_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("⚠️ config/bitget_config.py no disponible, usando valores por defecto")
 import matplotlib
 matplotlib.use('Agg')  # Backend sin GUI
 import matplotlib.pyplot as plt
@@ -640,10 +649,23 @@ class BitgetClient:
             symbol_info = self.get_symbol_info(symbol)
             if not symbol_info:
                 logger.warning(f"No se pudo obtener info de {symbol}, usando valores por defecto")
+                
+                # Usar configuración centralizada si está disponible
+                if BITGET_CONFIG_AVAILABLE:
+                    default_min_trade = get_minimum_size(symbol)
+                    logger.info(f"📋 Usando configuración centralizada para {symbol}: {default_min_trade}")
+                else:
+                    # Fallback a valores por defecto
+                    default_min_trade = 0.001
+                    if 'BTC' in symbol:
+                        default_min_trade = 0.001  # BTC/USDT: 0.001 BTC
+                    elif 'ETH' in symbol:
+                        default_min_trade = 0.01   # ETH/USDT: 0.01 ETH
+                
                 return {
                     'size_scale': 0,
                     'quantity_scale': 0,
-                    'min_trade_num': 1,
+                    'min_trade_num': default_min_trade,
                     'size_multiplier': 1,
                     'delivery_mode': 0
                 }
@@ -666,10 +688,17 @@ class BitgetClient:
             
         except Exception as e:
             logger.error(f"Error obteniendo reglas de {symbol}: {e}")
+            # Valores por defecto actualizados según mínimos de Bitget 2025
+            default_min_trade = 0.001
+            if 'BTC' in symbol:
+                default_min_trade = 0.001  # BTC/USDT: 0.001 BTC
+            elif 'ETH' in symbol:
+                default_min_trade = 0.01   # ETH/USDT: 0.01 ETH
+                
             return {
                 'size_scale': 0,
                 'quantity_scale': 0,
-                'min_trade_num': 1,
+                'min_trade_num': default_min_trade,
                 'size_multiplier': 1,
                 'delivery_mode': 0
             }
@@ -941,8 +970,20 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         if not symbol_info:
             logger.warning(f"⚠️ No se pudo obtener info de {simbolo} de Bitget, usando valores por defecto")
             size_multiplier = 1
-            min_trade_num = 0.001
-            price_place = 8
+            
+            # Usar configuración centralizada si está disponible
+            if BITGET_CONFIG_AVAILABLE:
+                min_trade_num = get_minimum_size(simbolo)
+                price_place = get_price_precision(simbolo)
+                logger.info(f"📋 Usando configuración centralizada para {simbolo}: min={min_trade_num}, prec={price_place}")
+            else:
+                # Fallback a valores por defecto
+                min_trade_num = 0.001  # Por defecto para la mayoría de símbolos
+                if 'BTC' in simbolo:
+                    min_trade_num = 0.001  # BTC/USDT: 0.001 BTC
+                elif 'ETH' in simbolo:
+                    min_trade_num = 0.01   # ETH/USDT: 0.01 ETH
+                price_place = 8
         else:
             size_multiplier = float(symbol_info.get('sizeMultiplier', 1))
             min_trade_num = float(symbol_info.get('minTradeNum', 0.001))
@@ -952,8 +993,11 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         cantidad_contratos = cantidad_usd / precio_actual
         cantidad_contratos = round(cantidad_contratos / size_multiplier) * size_multiplier
         
+        # Validación final: asegurar que cumple con los mínimos de Bitget
         if cantidad_contratos < min_trade_num:
+            logger.warning(f"⚠️ Cantidad calculada ({cantidad_contratos}) menor al mínimo ({min_trade_num}) - ajustando")
             cantidad_contratos = min_trade_num
+            logger.info(f"✅ Cantidad ajustada al mínimo permitido: {cantidad_contratos}")
         
         cantidad_contratos = round(cantidad_contratos, 8)
         
