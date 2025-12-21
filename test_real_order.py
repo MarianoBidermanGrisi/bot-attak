@@ -131,8 +131,9 @@ def open_test_order():
     print(f"💰 Precio actual: {current_price} USDT")
     
     # Calcular SL y TP (ejemplo: 1% SL, 2% TP para long)
-    sl_price = round(current_price * 0.99, 2)   # -1% Stop Loss
-    tp_price = round(current_price * 1.02, 2)   # +2% Take Profit
+    # Redondear a 1 decimal (múltiplo de 0.1 requerido por Bitget)
+    sl_price = round(current_price * 0.99, 1)   # -1% Stop Loss
+    tp_price = round(current_price * 1.02, 1)   # +2% Take Profit
     
     print(f"🛡️ Stop Loss: {sl_price} USDT (-1%)")
     print(f"🎯 Take Profit: {tp_price} USDT (+2%)")
