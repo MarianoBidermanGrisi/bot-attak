@@ -147,7 +147,7 @@ def open_test_order():
     order_body = {
         "symbol": SYMBOL,
         "productType": "USDT-FUTURES",
-        "marginMode": "crossed",
+        "marginMode": "isolated",
         "marginCoin": MARGIN_COIN,
         "size": SIZE,
         "side": "buy",
