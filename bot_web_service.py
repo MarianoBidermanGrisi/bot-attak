@@ -1,5 +1,6 @@
 # bot_web_service.py
 # Adaptación para Render del bot Breakout + Reentry con correcciones Bitget
+# CORRECCIÓN: Eliminados warnings de matplotlib para emojis
 import requests
 import time
 import json
@@ -15,6 +16,7 @@ import csv
 import itertools
 import statistics
 import random
+import warnings
 import matplotlib
 matplotlib.use('Agg')  # Backend sin GUI
 import matplotlib.pyplot as plt
@@ -24,6 +26,37 @@ from io import BytesIO
 from flask import Flask, request, jsonify
 import threading
 import logging
+
+# Configuración mejorada de matplotlib para evitar warnings de emojis
+def configurar_matplotlib():
+    """Configura matplotlib para manejar emojis correctamente"""
+    # Suprimir warnings de fuentes de manera más agresiva
+    warnings.filterwarnings('ignore', category=UserWarning)
+    warnings.filterwarnings('ignore', message='.*Glyph.*missing.*font.*')
+    warnings.filterwarnings('ignore', message='.*font.*warning.*')
+    
+    # Configurar fuentes con soporte para emojis y caracteres especiales
+    plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial Unicode MS', 'Noto Sans CJK SC', 'sans-serif']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams['font.size'] = 10
+    plt.rcParams['figure.facecolor'] = '#1a1a1a'
+    plt.rcParams['axes.facecolor'] = '#1a1a1a'
+    
+    # Configurar parámetros adicionales para evitar warnings
+    matplotlib.rcParams['savefig.dpi'] = 100
+    matplotlib.rcParams['savefig.bbox'] = 'tight'
+    matplotlib.rcParams['savefig.facecolor'] = '#1a1a1a'
+    
+    # Configurar el logger de matplotlib para suprimir warnings
+    logging.getLogger('matplotlib').setLevel(logging.ERROR)
+
+# Configurar matplotlib al inicio
+configurar_matplotlib()
+
+# Suprimir todos los warnings de matplotlib de forma global
+warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib.*')
+warnings.filterwarnings('ignore', message='.*Glyph.*missing.*')
+warnings.filterwarnings('ignore', message='.*font.*')
 
 # Configurar logging detallado
 logging.basicConfig(
@@ -1419,8 +1452,9 @@ class TradingBot:
     def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
         """Genera gráfico especial para el momento del BREAKOUT"""
         try:
-            import matplotlib.font_manager as fm
-            plt.rcParams['font.family'] = ['DejaVu Sans', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji']
+            # Configuración específica para este gráfico
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
             
             url = "https://api.binance.com/api/v3/klines"
             params = {
@@ -1533,7 +1567,9 @@ class TradingBot:
             axes[2].grid(True, alpha=0.3)
             
             buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
             buf.seek(0)
             plt.close(fig)
             
@@ -2341,6 +2377,10 @@ class TradingBot:
             if not config_optima:
                 return None
             
+            # Configuración específica para este gráfico
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+            
             url = "https://api.binance.com/api/v3/klines"
             params = {
                 'symbol': simbolo,
@@ -2448,7 +2488,9 @@ class TradingBot:
             axes[2].grid(True, alpha=0.3)
             
             buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                plt.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a')
             buf.seek(0)
             plt.close(fig)
             
