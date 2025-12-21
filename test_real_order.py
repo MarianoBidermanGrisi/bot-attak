@@ -151,7 +151,6 @@ def open_test_order():
         "marginCoin": MARGIN_COIN,
         "size": SIZE,
         "side": "buy",
-        "tradeSide": "open",
         "orderType": "market",
         "presetStopSurplusPrice": str(tp_price),  # Take Profit
         "presetStopLossPrice": str(sl_price),      # Stop Loss
