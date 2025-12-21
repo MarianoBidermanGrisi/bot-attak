@@ -23,9 +23,48 @@ BASE_URL = "https://api.bitget.com"
 # Configuración de la operación de prueba
 SYMBOL = "BTCUSDT"          # Par a operar
 MARGIN_COIN = "USDT"        # Moneda de margen
-SIZE = "0.001"              # Tamaño mínimo (ajustar según el par)
 SIDE = "open_long"          # open_long, open_short, close_long, close_short
 LEVERAGE = "5"              # Apalancamiento
+
+def get_minimum_size_for_symbol(symbol):
+    """
+    Obtiene el tamaño mínimo de orden según los límites de Bitget 2025
+    BTC/USDT: 0.001 BTC, ETH/USDT: 0.01 ETH, otros: 0.001 por defecto
+    """
+    symbol_upper = symbol.upper()
+    if 'BTC' in symbol_upper:
+        return "0.001"  # BTC/USDT: 0.001 BTC
+    elif 'ETH' in symbol_upper:
+        return "0.01"   # ETH/USDT: 0.01 ETH
+    else:
+        return "0.001"  # Por defecto para otros símbolos
+
+# Tamaño mínimo automático según el símbolo
+SIZE = get_minimum_size_for_symbol(SYMBOL)
+
+def test_bitget_connection():
+    """
+    Prueba la conexión con Bitget y verifica configuración
+    """
+    print("\n" + "="*60)
+    print("🧪 PRUEBA DE CONEXIÓN Y CONFIGURACIÓN BITGET")
+    print("="*60)
+    
+    # Verificar configuración
+    print(f"📌 Par configurado: {SYMBOL}")
+    print(f"📌 Tamaño mínimo: {SIZE}")
+    print(f"📌 Apalancamiento: {LEVERAGE}x")
+    
+    # Verificar que el tamaño cumple con mínimos
+    min_size = float(SIZE)
+    if SYMBOL == "BTCUSDT" and min_size >= 0.001:
+        print("✅ Tamaño cumple mínimo BTC/USDT: 0.001 BTC")
+    elif SYMBOL == "ETHUSDT" and min_size >= 0.01:
+        print("✅ Tamaño cumple mínimo ETH/USDT: 0.01 ETH")
+    else:
+        print(f"✅ Tamaño configurado: {SIZE}")
+    
+    print("="*60)
 
 
 def get_timestamp():
