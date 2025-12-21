@@ -439,6 +439,264 @@ class BitgetClient:
             return None
 
     def set_leverage(self, symbol, leverage, hold_side='long'):
+        """Configurar apalancamiento en BITGET"""
+        try:
+            logger.info(f"⚡ Configurando leverage {leverage}x para {symbol} ({hold_side})")
+            
+            request_path = '/api/v2/mix/account/set-leverage'
+            body = {
+                'symbol': symbol,
+                'productType': self.product_type,
+                'marginCoin': 'USDT',
+                'leverage': str(leverage),
+                'holdSide': hold_side
+            }
+            
+            headers = self._get_headers('POST', request_path, body)
+            
+            if not headers:
+                logger.error("❌ No se pudieron generar headers para leverage")
+                return False
+            
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                json=body,
+                timeout=10
+            )
+            
+            logger.info(f"📥 Respuesta leverage - Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    logger.info(f"✅ Apalancamiento {leverage}x configurado exitosamente")
+                    return True
+                else:
+                    logger.error(f"❌ Error configurando leverage: {data.get('code')} - {data.get('msg')}")
+            else:
+                logger.error(f"❌ Error HTTP configurando leverage: {response.status_code} - {response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Error en set_leverage: {e}")
+            return False
+
+    def get_positions(self, symbol=None, product_type=None):
+        """Obtener posiciones abiertas"""
+        try:
+            if product_type is None:
+                product_type = self.product_type
+                
+            request_path = '/api/v2/mix/position/all-position'
+            params = {'productType': product_type, 'marginCoin': 'USDT'}
+            if symbol:
+                params['symbol'] = symbol
+            
+            query_string = f"?productType={product_type}&marginCoin=USDT"
+            if symbol:
+                query_string += f"&symbol={symbol}"
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            if not headers:
+                return []
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    return data.get('data', [])
+            
+            return []
+        except Exception as e:
+            logger.error(f"❌ Error obteniendo posiciones: {e}")
+            return []
+
+    def obtener_saldo_cuenta(self):
+        """Obtiene el saldo actual de la cuenta"""
+        try:
+            accounts = self.get_account_info()
+            if accounts:
+                for account in accounts:
+                    if account.get('marginCoin') == 'USDT':
+                        balance_usdt = float(account.get('available', 0))
+                        logger.info(f"💰 Saldo disponible USDT: ${balance_usdt:.2f}")
+                        return balance_usdt
+            logger.warning("⚠️ No se pudo obtener saldo de la cuenta")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error obteniendo saldo de cuenta: {e}")
+            return None
+
+    def get_klines(self, symbol, interval='5m', limit=200):
+        """Obtener velas (datos de mercado)"""
+        try:
+            interval_map = {
+                '1m': '1m', '3m': '3m', '5m': '5m',
+                '15m': '15m', '30m': '30m', '1h': '1H',
+                '4h': '4H', '1d': '1D'
+            }
+            bitget_interval = interval_map.get(interval, '5m')
+            request_path = f'/api/v2/mix/market/candles'
+            params = {
+                'symbol': symbol,
+                'productType': self.product_type,
+                'granularity': bitget_interval,
+                'limit': limit
+            }
+            
+            headers = self._get_headers('GET', request_path, '')
+            
+            if not headers:
+                return None
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    return data.get('data', [])
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error en get_klines: {e}")
+            return None
+
+    def obtener_precision_precio(self, symbol):
+        """Obtiene la precisión de precio para un símbolo específico"""
+        try:
+            symbol_info = self.get_symbol_info(symbol)
+            if symbol_info:
+                price_scale = symbol_info.get('priceScale', 4)
+                logger.info(f"📋 {symbol}: priceScale = {price_scale}")
+                return price_scale
+            else:
+                logger.warning(f"No se pudo obtener info de {symbol}, usando 4 decimales por defecto")
+                return 4
+        except Exception as e:
+            logger.error(f"Error obteniendo precisión de {symbol}: {e}")
+            return 4
+
+    def redondear_precio_precision(self, price, symbol):
+        """Redondea el precio a la precisión correcta para el símbolo"""
+        try:
+            precision = self.obtener_precision_precio(symbol)
+            precio_redondeado = round(float(price), precision)
+            logger.info(f"🔢 {symbol}: {price} → {precio_redondeado} (precisión: {precision} decimales)")
+            return precio_redondeado
+        except Exception as e:
+            logger.error(f"Error redondeando precio para {symbol}: {e}")
+            return float(price)
+
+    def obtener_reglas_simbolo(self, symbol):
+        """Obtiene las reglas específicas de tamaño para un símbolo"""
+        try:
+            symbol_info = self.get_symbol_info(symbol)
+            if not symbol_info:
+                logger.warning(f"No se pudo obtener info de {symbol}, usando valores por defecto")
+                return {
+                    'size_scale': 0,
+                    'quantity_scale': 0,
+                    'min_trade_num': 1,
+                    'size_multiplier': 1,
+                    'delivery_mode': 0
+                }
+            
+            reglas = {
+                'size_scale': int(symbol_info.get('sizeScale', 0)),
+                'quantity_scale': int(symbol_info.get('quantityScale', 0)),
+                'min_trade_num': float(symbol_info.get('minTradeNum', 1)),
+                'size_multiplier': float(symbol_info.get('sizeMultiplier', 1)),
+                'delivery_mode': symbol_info.get('deliveryMode', 0)
+            }
+            
+            logger.info(f"📋 Reglas de {symbol}:")
+            logger.info(f"  - sizeScale: {reglas['size_scale']}")
+            logger.info(f"  - quantityScale: {reglas['quantity_scale']}")
+            logger.info(f"  - minTradeNum: {reglas['min_trade_num']}")
+            logger.info(f"  - sizeMultiplier: {reglas['size_multiplier']}")
+            
+            return reglas
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo reglas de {symbol}: {e}")
+            return {
+                'size_scale': 0,
+                'quantity_scale': 0,
+                'min_trade_num': 1,
+                'size_multiplier': 1,
+                'delivery_mode': 0
+            }
+
+    def ajustar_tamaño_orden(self, symbol, cantidad_contratos, reglas):
+        """Ajusta el tamaño de la orden según las reglas del símbolo"""
+        try:
+            size_scale = reglas['size_scale']
+            quantity_scale = reglas['quantity_scale']
+            min_trade_num = reglas['min_trade_num']
+            size_multiplier = reglas['size_multiplier']
+            
+            # Determinar la escala a usar (prioridad: quantityScale > sizeScale)
+            escala_actual = quantity_scale if quantity_scale > 0 else size_scale
+            
+            # Ajustar según la escala
+            if escala_actual == 0:
+                # Requiere entero
+                cantidad_contratos = round(cantidad_contratos)
+                logger.info(f"🔢 {symbol}: ajustado a entero = {cantidad_contratos}")
+            elif escala_actual == 1:
+                # 1 decimal permitido
+                cantidad_contratos = round(cantidad_contratos, 1)
+                logger.info(f"🔢 {symbol}: ajustado a 1 decimal = {cantidad_contratos}")
+            elif escala_actual == 2:
+                # 2 decimales permitidos
+                cantidad_contratos = round(cantidad_contratos, 2)
+                logger.info(f"🔢 {symbol}: ajustado a 2 decimales = {cantidad_contratos}")
+            else:
+                # Otros casos
+                cantidad_contratos = round(cantidad_contratos, escala_actual)
+                logger.info(f"🔢 {symbol}: ajustado a {escala_actual} decimales = {cantidad_contratos}")
+            
+            # Aplicar multiplicador si existe
+            if size_multiplier > 1:
+                cantidad_contratos = round(cantidad_contratos / size_multiplier) * size_multiplier
+                logger.info(f"🔢 {symbol}: aplicado multiplicador {size_multiplier}x = {cantidad_contratos}")
+            
+            # Verificar mínimo
+            if cantidad_contratos < min_trade_num:
+                cantidad_contratos = min_trade_num
+                logger.info(f"⚠️ {symbol}: ajustado a mínimo = {min_trade_num}")
+            
+            # Validación final
+            if escala_actual == 0:
+                if min_trade_num < 1 and min_trade_num > 0:
+                    cantidad_contratos = max(1, int(round(cantidad_contratos)))
+                    logger.info(f"🔢 {symbol}: caso especial - min decimal pero requiere entero = {cantidad_contratos}")
+                else:
+                    cantidad_contratos = int(round(cantidad_contratos))
+                logger.info(f"✅ {symbol} final: {cantidad_contratos} (entero)")
+            else:
+                cantidad_contratos = round(cantidad_contratos, escala_actual)
+                logger.info(f"✅ {symbol} final: {cantidad_contratos} ({escala_actual} decimales)")
+            
+            return cantidad_contratos
+            
+        except Exception as e:
+            logger.error(f"Error ajustando tamaño para {symbol}: {e}")
+            return int(round(cantidad_contratos))
+
+    def set_leverage(self, symbol, leverage, hold_side='long'):
         """Configurar apalancamiento - CORREGIDO"""
         try:
             logger.info(f"⚙️ Configurando apalancamiento {leverage}x para {symbol} ({hold_side})")
@@ -684,7 +942,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         logger.info(f"🛑 Stop Loss: {stop_loss:.8f}")
         logger.info(f"🎯 Take Profit: {take_profit:.8f}")
         
-        side = 'open_long' if tipo_operacion == 'LONG' else 'open_short'
+        side = 'buy' if tipo_operacion == 'LONG' else 'sell'
         orden_entrada = bitget_client.place_order(
             symbol=simbolo,
             side=side,
@@ -699,7 +957,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         logger.info(f"✅ Posición abierta exitosamente")
         time.sleep(1)
         
-        sl_side = 'close_long' if tipo_operacion == 'LONG' else 'close_short'
+        sl_side = 'sell' if tipo_operacion == 'LONG' else 'buy'
         orden_sl = bitget_client.place_plan_order(
             symbol=simbolo,
             side=sl_side,
@@ -2395,6 +2653,7 @@ def crear_config_desde_entorno():
         'bitget_api_key': os.environ.get('BITGET_API_KEY'),
         'bitget_api_secret': os.environ.get('BITGET_SECRET_KEY'),
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
+        'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
         'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '2')),
         'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '10')), 10)
