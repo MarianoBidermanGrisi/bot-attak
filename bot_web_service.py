@@ -176,7 +176,7 @@ class BitgetClient:
         self.api_secret = api_secret
         self.passphrase = passphrase
         self.base_url = "https://api.bitget.com"
-        self.product_type = "umcbl"  # USDT-MIX perpetual futures
+        self.product_type = "USDT-FUTURES"  # USDT-FUTURES perpetual futures (CORREGIDO: umcbl obsoleto)
         logger.info(f"Cliente Bitget inicializado con API Key: {api_key[:10]}...")
 
     def _generate_signature(self, timestamp, method, request_path, body=''):
@@ -240,7 +240,7 @@ class BitgetClient:
                 logger.error("❌ Credenciales incompletas")
                 return False
             
-            product_types = ['umcbl', 'cmcbl', 'USDT-FUTURES', 'USDT-MIX', 'CMCBL', 'SUSDT-FUTURES']
+            product_types = ['USDT-FUTURES', 'USDT-MIX', 'CMCBL']  # CORREGIDO: umcbl y cmcbl obsoletos
             
             for product_type in product_types:
                 logger.info(f"🔍 Probando productType: {product_type}")
@@ -860,9 +860,9 @@ class BitgetClient:
                     error_code = data.get('code', 'Unknown')
                     logger.error(f"❌ Error API en get_klines: {error_code} - {error_msg}")
                     
-                    if error_code == '40020' and self.product_type != 'umcbl':
-                        logger.info("🔄 Intentando con productType='umcbl' para klines...")
-                        params['productType'] = 'umcbl'
+                    if error_code == '40020' and self.product_type != 'USDT-FUTURES':
+                        logger.info("🔄 Intentando con productType='USDT-FUTURES' para klines...")  # CORREGIDO: umcbl obsoleto
+                        params['productType'] = 'USDT-FUTURES'  # CORREGIDO: umcbl obsoleto
                         response2 = requests.get(
                             self.base_url + request_path,
                             params=params,
