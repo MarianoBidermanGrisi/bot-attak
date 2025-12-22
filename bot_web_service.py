@@ -188,13 +188,30 @@ class BitgetClient:
         self.product_type = "USDT-FUTURES"  # USDT-FUTURES perpetual futures (CORREGIDO: umcbl obsoleto)
         logger.info(f"Cliente Bitget inicializado con API Key: {api_key[:10]}...")
 
+    def _normalize_body(self, body):
+        """
+        Normaliza el body a string JSON sin espacios para la firma.
+        CORRECCIÓN: Evita errores de firma 40009 por diferencias en JSON.
+        """
+        if body is None or body == '':
+            return ''
+        
+        if isinstance(body, dict):
+            # Convertir dict a JSON con separadores compactos (sin espacios)
+            return json.dumps(body, separators=(',', ':'))
+        
+        # Si ya es string, parsearlo y volver a serializar para normalizar
+        try:
+            parsed = json.loads(body)
+            return json.dumps(parsed, separators=(',', ':'))
+        except (json.JSONDecodeError, TypeError):
+            return body
+
     def _generate_signature(self, timestamp, method, request_path, body=''):
         """Generar firma HMAC-SHA256 para Bitget V2 - CORREGIDO"""
         try:
-            if isinstance(body, dict):
-                body_str = json.dumps(body, separators=(',', ':')) if body else ''
-            else:
-                body_str = str(body) if body else ''
+            # Normalizar el body para asegurar consistencia
+            body_str = self._normalize_body(body)
             
             message = timestamp + method.upper() + request_path + body_str
             
@@ -219,7 +236,11 @@ class BitgetClient:
         """Obtener headers con firma para Bitget V2 - CORREGIDO"""
         try:
             timestamp = str(int(time.time() * 1000))
-            sign = self._generate_signature(timestamp, method, request_path, body)
+            
+            # Normalizar body ANTES de generar la firma
+            body_str = self._normalize_body(body)
+            
+            sign = self._generate_signature(timestamp, method, request_path, body_str)
             
             if not sign:
                 logger.error("❌ No se pudo generar la firma")
@@ -392,7 +413,10 @@ class BitgetClient:
             
             logger.debug(f"📦 Body de orden: {body}")
             
-            headers = self._get_headers('POST', request_path, body)
+            # Normalizar body para usar en la solicitud
+            body_str = self._normalize_body(body)
+            
+            headers = self._get_headers('POST', request_path, body_str)
             
             if not headers:
                 logger.error("❌ No se pudieron generar headers para la orden")
@@ -401,7 +425,7 @@ class BitgetClient:
             response = requests.post(
                 self.base_url + request_path,
                 headers=headers,
-                json=body,
+                data=body_str,
                 timeout=10
             )
             
@@ -450,7 +474,10 @@ class BitgetClient:
             
             logger.debug(f"📦 Body de plan order: {body}")
             
-            headers = self._get_headers('POST', request_path, body)
+            # Normalizar body para usar en la solicitud
+            body_str = self._normalize_body(body)
+            
+            headers = self._get_headers('POST', request_path, body_str)
             
             if not headers:
                 logger.error("❌ No se pudieron generar headers para plan order")
@@ -459,7 +486,7 @@ class BitgetClient:
             response = requests.post(
                 self.base_url + request_path,
                 headers=headers,
-                json=body,
+                data=body_str,
                 timeout=10
             )
             
@@ -496,7 +523,10 @@ class BitgetClient:
                 'holdSide': hold_side
             }
             
-            headers = self._get_headers('POST', request_path, body)
+            # Normalizar body para usar en la solicitud
+            body_str = self._normalize_body(body)
+            
+            headers = self._get_headers('POST', request_path, body_str)
             
             if not headers:
                 logger.error("❌ No se pudieron generar headers para leverage")
@@ -505,7 +535,7 @@ class BitgetClient:
             response = requests.post(
                 self.base_url + request_path,
                 headers=headers,
-                json=body,
+                data=body_str,
                 timeout=10
             )
             
@@ -776,7 +806,10 @@ class BitgetClient:
             
             logger.debug(f"📦 Body leverage: {body}")
             
-            headers = self._get_headers('POST', request_path, body)
+            # Normalizar body para usar en la solicitud
+            body_str = self._normalize_body(body)
+            
+            headers = self._get_headers('POST', request_path, body_str)
             
             if not headers:
                 logger.error("❌ No se pudieron generar headers para leverage")
@@ -785,7 +818,7 @@ class BitgetClient:
             response = requests.post(
                 self.base_url + request_path,
                 headers=headers,
-                json=body,
+                data=body_str,
                 timeout=10
             )
             
