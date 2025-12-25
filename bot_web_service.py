@@ -1220,15 +1220,26 @@ class TradingBot:
             
             df_data = []
             for kline in klines:
-                df_data.append({
-                    'Date': pd.to_datetime(int(kline[0]), unit='ms').to_pydatetime(),
-                    'Open': float(kline[1]),
-                    'High': float(kline[2]),
-                    'Low': float(kline[3]),
-                    'Close': float(kline[4]),
-                    'Volume': float(kline[5])
-                })
+                try:
+                    # Conversión segura del timestamp - extraer solo dígitos
+                    timestamp_str = str(kline[0])
+                    # Extraer solo los dígitos numéricos del timestamp
+                    timestamp_ms = int(''.join(filter(str.isdigit, timestamp_str)))
+                    df_data.append({
+                        'Date': pd.to_datetime(timestamp_ms, unit='ms').to_pydatetime(),
+                        'Open': float(kline[1]),
+                        'High': float(kline[2]),
+                        'Low': float(kline[3]),
+                        'Close': float(kline[4]),
+                        'Volume': float(kline[5])
+                    })
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️ Error parseando kline: {e}, saltando...")
+                    continue
             df = pd.DataFrame(df_data)
+            if df.empty:
+                logger.warning(f"⚠️ No hay datos válidos para {simbolo}")
+                return None
             df.set_index('Date', inplace=True)
             
             # Convertir el índice a datetime de forma explícita para evitar errores de matplotlib
@@ -2172,15 +2183,26 @@ class TradingBot:
             
             df_data = []
             for kline in klines:
-                df_data.append({
-                    'Date': pd.to_datetime(int(kline[0]), unit='ms').to_pydatetime(),
-                    'Open': float(kline[1]),
-                    'High': float(kline[2]),
-                    'Low': float(kline[3]),
-                    'Close': float(kline[4]),
-                    'Volume': float(kline[5])
-                })
+                try:
+                    # Conversión segura del timestamp - extraer solo dígitos
+                    timestamp_str = str(kline[0])
+                    # Extraer solo los dígitos numéricos del timestamp
+                    timestamp_ms = int(''.join(filter(str.isdigit, timestamp_str)))
+                    df_data.append({
+                        'Date': pd.to_datetime(timestamp_ms, unit='ms').to_pydatetime(),
+                        'Open': float(kline[1]),
+                        'High': float(kline[2]),
+                        'Low': float(kline[3]),
+                        'Close': float(kline[4]),
+                        'Volume': float(kline[5])
+                    })
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️ Error parseando kline: {e}, saltando...")
+                    continue
             df = pd.DataFrame(df_data)
+            if df.empty:
+                logger.warning(f"⚠️ No hay datos válidos para {simbolo}")
+                return None
             df.set_index('Date', inplace=True)
             
             # Convertir el índice a datetime de forma explícita para evitar errores de matplotlib
