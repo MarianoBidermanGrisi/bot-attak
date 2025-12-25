@@ -1896,6 +1896,26 @@ class TradingBot:
     """
         return mensaje
 
+    def verificar_envio_reporte_automatico(self):
+        """Verifica si debe enviar el reporte semanal (cada lunes a las 9:00)"""
+        ahora = datetime.now()
+        if ahora.weekday() == 0 and 9 <= ahora.hour < 10:
+            archivo_control = "ultimo_reporte.txt"
+            try:
+                if os.path.exists(archivo_control):
+                    with open(archivo_control, 'r') as f:
+                        ultima_fecha = f.read().strip()
+                        if ultima_fecha == ahora.strftime('%Y-%m-%d'):
+                            return False
+                
+                if self.enviar_reporte_semanal():
+                    with open(archivo_control, 'w') as f:
+                        f.write(ahora.strftime('%Y-%m-%d'))
+                    return True
+            except Exception as e:
+                logger.error(f"⚠️ Error en envío automático: {e}")
+        return False
+
     def verificar_cierre_operaciones(self):
         if not self.operaciones_activas:
             return []
@@ -2435,7 +2455,7 @@ def crear_config_desde_entorno():
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 6,
+        'scan_interval_minutes': 1,
         'timeframes': ['5m', '15m', '30m', '1h'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
