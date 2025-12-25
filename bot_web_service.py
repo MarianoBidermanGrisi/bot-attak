@@ -450,7 +450,7 @@ class BitgetClient:
             return None
 
     def place_plan_order(self, symbol, side, trigger_price, order_type, size, 
-                         price=None, plan_type='stop', trigger_type='mark_price'):
+                         price=None, plan_type='loss_plan', trigger_type='mark_price'):
         """
         Colocar orden de plan (TP/SL) - CORREGIDO para API Bitget V2
         
@@ -461,7 +461,7 @@ class BitgetClient:
             order_type: Tipo de orden ('market' o 'limit')
             size: Tamaño de la orden
             price: Precio de ejecución (para órdenes límite)
-            plan_type: Tipo de plan ('takeprofit' para TP, 'stop' para SL)
+            plan_type: Tipo de plan ('profit_plan' para TP, 'loss_plan' para SL)
             trigger_type: Tipo de trigger ('mark_price' o 'latest_price')
         """
         try:
@@ -473,7 +473,7 @@ class BitgetClient:
             # Redondear triggerPrice según la precisión del símbolo
             trigger_price_formatted = str(round(float(trigger_price), price_precision))
             
-            request_path = '/api/v2/mix/order/place-plan-order'
+            request_path = '/api/v2/mix/order/place-tpsl-order'
             body = {
                 'symbol': symbol,
                 'productType': self.product_type,
@@ -1093,7 +1093,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             trigger_price=stop_loss,
             order_type='market',
             size=cantidad_contratos,
-            plan_type='stop'
+            plan_type='loss_plan'
         )
         
         if orden_sl:
@@ -1109,7 +1109,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             trigger_price=take_profit,
             order_type='market',
             size=cantidad_contratos,
-            plan_type='takeprofit'
+            plan_type='profit_plan'
         )
         
         if orden_tp:
