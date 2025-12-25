@@ -632,8 +632,7 @@ class BitgetClient:
         try:
             interval_map = {
                 '5m': '5m',
-                '15m': '15m', '30m': '30m', '1h': '1h',
-                 # Normalizar body para usar en la solicitud'4h': '4H', '1d': '1D'
+                '15m': '15m', '30m': '30m', '1h': '1H','4h': '4H', '1d': '1D'
             }
             bitget_interval = interval_map.get(interval, '5m')
             request_path = f'/api/v2/mix/market/candles'
@@ -1309,11 +1308,11 @@ class TradingBot:
                 logger.info(f"   🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
         
         logger.info(f"   🔍 Buscando configuración óptima para {simbolo}...")
-        timeframes = self.config.get('timeframes', ['5m', '15m', '30m','45m','1h'])
+        timeframes = self.config.get('timeframes', ['1m','3m','5m', '15m', '30m','1h','4h'])
         velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
         mejor_config = None
         mejor_puntaje = -999999
-        prioridad_timeframe = {'5m': 200, '15m': 150, '30m': 120, '45m': 100, '1h': 80}
+        prioridad_timeframe = {'1m': 200, '3m': 150, '5m': 120, '15m': 100, '30m': 80}
        
         for timeframe in timeframes:
             for num_velas in velas_options:
