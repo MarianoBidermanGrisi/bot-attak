@@ -1168,15 +1168,16 @@ class TradingBot:
         self.archivo_log = config.get('log_path', 'operaciones_log.csv')
         self.estado_file = config.get('estado_file', 'estado_bot.json')
         
-        self.inicializar_log()
-        self.cargar_estado()
-        self.inicializar_bitget()
-        
+        # Inicializar atributos de configuración ANTES de llamar a inicializar_bitget
         self.telegram_token = config.get('telegram_token')
         self.telegram_chat_ids = config.get('telegram_chat_ids', [])
         self.ejecutar_operaciones_automaticas = config.get('ejecutar_operaciones_automaticas', False)
         self.capital_por_operacion = config.get('capital_por_operacion', 4)
         self.leverage_por_defecto = config.get('leverage_por_defecto', 10)
+        
+        self.inicializar_log()
+        self.cargar_estado()
+        self.inicializar_bitget()
         
         logger.info("🤖 Bot Breakout + Reentry inicializado")
 
