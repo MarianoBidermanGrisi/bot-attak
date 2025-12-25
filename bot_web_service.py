@@ -1292,6 +1292,7 @@ class TradingBot:
         self.operaciones_desde_optimizacion = 0
         self.log_path = config.get('log_path', 'operaciones_log.csv')
         self.archivo_estado = config.get('estado_file', 'estado_bot.json')
+        self.archivo_log = self.log_path  # Definir archivo_log antes de usarlo
         self.inicializar_log()
         self.cargar_estado()
         
@@ -2579,7 +2580,7 @@ if __name__ == '__main__':
     setup_telegram_webhook()
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
-
+    
 import test_real_order
-test_real_order.run_test()
+test_real_order.run_test()    
     
