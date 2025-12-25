@@ -1308,7 +1308,7 @@ class TradingBot:
                 logger.info(f"   🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
         
         logger.info(f"   🔍 Buscando configuración óptima para {simbolo}...")
-        timeframes = self.config.get('timeframes', ['1m','3m','5m', '15m', '30m','1h','4h'])
+        timeframes = self.config.get('timeframes', ['1m','3m','5m', '15m', '30m'])
         velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
         mejor_config = None
         mejor_puntaje = -999999
