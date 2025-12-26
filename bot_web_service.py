@@ -80,6 +80,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+tpsl_manager = create_tpsl_manager(
+    api_key=os.environ.get('BITGET_API_KEY', ''),
+    secret_key=os.environ.get('BITGET_SECRET_KEY', ''),
+    passphrase=os.environ.get('BITGET_API_PASSPHRASE', '')
+)
 # ---------------------------
 # [INICIO DEL CÓDIGO DEL BOT NUEVO]
 # ---------------------------
