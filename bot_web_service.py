@@ -18,6 +18,8 @@ import itertools
 import statistics
 import random
 import warnings
+from tp_sl_manager import BitgetTPSLManager, create_tpsl_manager
+
 # Importar configuración de mínimos de Bitget
 try:
     from config.bitget_config import get_minimum_size, get_recommended_leverage, get_price_precision
