@@ -491,7 +491,7 @@ class BitgetClient:
                 'triggerPrice': trigger_price_formatted,
                 'size': str(size),
                 'planType': plan_type,  
-                'triggerType': trigger_type 
+                'triggerType': trigger_type, 
                 'holdSide': hold_side
             }
             
