@@ -472,65 +472,65 @@ class BitgetClient:
             trigger_type: Tipo de trigger ('mark_price' o 'fill_price')
         """
         try:
-           logger.info(f"📤 Colocando orden plan: {symbol} {hold_side} TP/SL en {trigger_price}")
+            logger.info(f"📤 Colocando orden plan: {symbol} {hold_side} TP/SL en {trigger_price}")
         
-           # Obtener la precisión correcta del símbolo para formatear precios
-           price_precision = self.obtener_precision_precio(symbol)
+            # Obtener la precisión correcta del símbolo para formatear precios
+            price_precision = self.obtener_precision_precio(symbol)
         
-           # Redondear triggerPrice según la precisión del símbolo
-           trigger_price_formatted = str(round(float(trigger_price), price_precision))
+            # Redondear triggerPrice según la precisión del símbolo
+            trigger_price_formatted = str(round(float(trigger_price), price_precision))
         
-           request_path = '/api/v2/mix/order/place-tpsl-order'
-           body = {
-               'symbol': symbol,
-               'productType': self.product_type,
-               'marginCoin': 'USDT',
-               'holdSide': hold_side,  # ✅ CORREGIDO: holdSide en lugar de side
-               'triggerPrice': trigger_price_formatted,
-               'size': str(size),
-               'planType': plan_type,  
-               'triggerType': trigger_type, 
-           }
+            request_path = '/api/v2/mix/order/place-tpsl-order'
+            body = {
+                'symbol': symbol,
+                'productType': self.product_type,
+                'marginCoin': 'USDT',
+                'holdSide': hold_side,  # ✅ CORREGIDO: holdSide en lugar de side
+                'triggerPrice': trigger_price_formatted,
+                'size': str(size),
+                'planType': plan_type,  
+                'triggerType': trigger_type, 
+            }
         
-           if price:
-               body['executePrice'] = str(price)
+            if price:
+                body['executePrice'] = str(price)
         
-           logger.debug(f"📦 Body de plan order: {body}")
+            logger.debug(f"📦 Body de plan order: {body}")
         
-           # Normalizar body para usar en la solicitud
-           body_str = self._normalize_body(body)
+            # Normalizar body para usar en la solicitud
+            body_str = self._normalize_body(body)
         
-           headers = self._get_headers('POST', request_path, body_str)
+            headers = self._get_headers('POST', request_path, body_str)
         
-           if not headers:
-               logger.error("❌ No se pudieron generar headers para plan order")
-               return None
+            if not headers:
+                logger.error("❌ No se pudieron generar headers para plan order")
+                return None
         
-           response = requests.post(
-               self.base_url + request_path,
-               headers=headers,
-               data=body_str,
-               timeout=10
-           )
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                data=body_str,
+                timeout=10
+            )
         
-           logger.info(f"📥 Respuesta plan order - Status: {response.status_code}")
+            logger.info(f"📥 Respuesta plan order - Status: {response.status_code}")
         
-           if response.status_code == 200:
-               data = response.json()
-               if data.get('code') == '00000':
-                   logger.info(f"✅ Plan order colocada exitosamente")
-                   return data.get('data', {})
-               else:
-                   error_msg = data.get('msg', 'Unknown error')
-                   error_code = data.get('code', 'Unknown')
-                   logger.error(f"❌ Error en plan order Bitget: {error_code} - {error_msg}")
-                   return None
-           else:
-               logger.error(f"❌ Error HTTP en plan order: {response.status_code} - {response.text}")
-               return None
-       except Exception as e:
-           logger.error(f"❌ Error colocando plan order: {e}")
-           return None    
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    logger.info(f"✅ Plan order colocada exitosamente")
+                    return data.get('data', {})
+                else:
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    logger.error(f"❌ Error en plan order Bitget: {error_code} - {error_msg}")
+                    return None
+            else:
+                logger.error(f"❌ Error HTTP en plan order: {response.status_code} - {response.text}")
+                return None
+         except Exception as e:
+             logger.error(f"❌ Error colocando plan order: {e}")
+             return None    
     
 
     def set_leverage(self, symbol, leverage, hold_side='long'):
