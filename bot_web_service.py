@@ -470,8 +470,8 @@ class BitgetClient:
             price: Precio de ejecución (para órdenes límite)
             plan_type: Tipo de plan ('profit_plan' para TP, 'loss_plan' para SL)
             trigger_type: Tipo de trigger ('mark_price' o 'fill_price')
-       """
-       try:
+        """
+        try:
            logger.info(f"📤 Colocando orden plan: {symbol} {hold_side} TP/SL en {trigger_price}")
         
            # Obtener la precisión correcta del símbolo para formatear precios
