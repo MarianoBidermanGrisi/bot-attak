@@ -528,9 +528,9 @@ class BitgetClient:
             else:
                 logger.error(f"❌ Error HTTP en plan order: {response.status_code} - {response.text}")
                 return None
-         except Exception as e:
-             logger.error(f"❌ Error colocando plan order: {e}")
-             return None    
+        except Exception as e:
+            logger.error(f"❌ Error colocando plan order: {e}")
+            return None    
     
 
     def set_leverage(self, symbol, leverage, hold_side='long'):
