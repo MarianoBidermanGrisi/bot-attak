@@ -1109,15 +1109,16 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             logger.warning("⚠️ Error configurando Stop Loss")
         
         time.sleep(0.5)
-        
+
         orden_tp = bitget_client.place_plan_order(
             symbol=simbolo,
-            side=sl_side,
+            hold_side=sl_side,  # ✅ CAMBIADO: side -> hold_side
             trigger_price=take_profit,
             order_type='market',
             size=cantidad_contratos,
             plan_type='profit_plan'
         )
+        
         
         if orden_tp:
             logger.info(f"✅ Take Profit configurado en: {take_profit:.8f}")
