@@ -1018,6 +1018,103 @@ def calcular_stop_loss_take_profit(precio_actual, tipo_operacion, capital_usd, l
         print(f"Error calculando SL/TP: {e}")
         return None, None
 
+# ---------------------------
+# FUNCIONES AUXILIARES DE ANALISIS TECNICO
+# ---------------------------
+
+def calcular_regresion_lineal(x, y):
+    """Calcular regresion lineal simple"""
+    if len(x) != len(y) or len(x) == 0:
+        return None, None
+    try:
+        import numpy as np
+        x = np.array(x)
+        y = np.array(y)
+        n = len(x)
+        sum_x = np.sum(x)
+        sum_y = np.sum(y)
+        sum_xy = np.sum(x * y)
+        sum_x2 = np.sum(x * x)
+        denom = (n * sum_x2 - sum_x * sum_x)
+        if denom == 0:
+            pendiente = 0
+        else:
+            pendiente = (n * sum_xy - sum_x * sum_y) / denom
+        intercepto = (sum_y - pendiente * sum_x) / n if n else 0
+        return pendiente, intercepto
+    except Exception as e:
+        print(f"Error en regresion lineal: {e}")
+        return None, None
+
+def calcular_pearson_y_angulo(x, y):
+    """Calcular coeficiente de correlacion de Pearson y angulo de tendencia"""
+    if len(x) != len(y) or len(x) < 2:
+        return 0, 0
+    try:
+        import numpy as np
+        import math
+        x = np.array(x)
+        y = np.array(y)
+        n = len(x)
+        sum_x = np.sum(x)
+        sum_y = np.sum(y)
+        sum_xy = np.sum(x * y)
+        sum_x2 = np.sum(x * x)
+        sum_y2 = np.sum(y * y)
+        numerator = n * sum_xy - sum_x * sum_y
+        denominator = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        if denominator == 0:
+            return 0, 0
+        pearson = numerator / denominator
+        denom_pend = (n * sum_x2 - sum_x * sum_x)
+        pendiente = (n * sum_xy - sum_x * sum_y) / denom_pend if denom_pend != 0 else 0
+        angulo_radianes = math.atan(pendiente * len(x) / (max(y) - min(y)) if (max(y) - min(y)) != 0 else 0)
+        angulo_grados = math.degrees(angulo_radianes)
+        return pearson, angulo_grados
+    except Exception as e:
+        print(f"Error calculando Pearson: {e}")
+        return 0, 0
+
+def calcular_r2(y_real, x, pendiente, intercepto):
+    """Calcular coeficiente R2"""
+    if len(y_real) != len(x):
+        return 0
+    try:
+        import numpy as np
+        y_real = np.array(y_real)
+        y_pred = pendiente * np.array(x) + intercepto
+        ss_res = np.sum((y_real - y_pred) ** 2)
+        ss_tot = np.sum((y_real - np.mean(y_real)) ** 2)
+        if ss_tot == 0:
+            return 0
+        return 1 - (ss_res / ss_tot)
+    except Exception as e:
+        print(f"Error calculando R2: {e}")
+        return 0
+
+def clasificar_fuerza_tendencia(angulo_grados):
+    """Clasificar la fuerza de la tendencia"""
+    angulo_abs = abs(angulo_grados)
+    if angulo_abs < 3:
+        return "Muy Debil", 1
+    elif angulo_abs < 13:
+        return "Debil", 2
+    elif angulo_abs < 27:
+        return "Moderada", 3
+    elif angulo_abs < 45:
+        return "Fuerte", 4
+    else:
+        return "Muy Fuerte", 5
+
+def determinar_direccion_tendencia(angulo_grados, umbral_minimo=1):
+    """Determinar la direccion de la tendencia"""
+    if abs(angulo_grados) < umbral_minimo:
+        return "RANGO"
+    elif angulo_grados > 0:
+        return "ALCISTA"
+    else:
+        return "BAJISTA"
+
 def calcular_niveles_canales(datos_mercado, num_velas=80):
     """
     Calcular niveles de soporte y resistencia del canal.
