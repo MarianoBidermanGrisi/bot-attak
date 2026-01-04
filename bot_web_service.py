@@ -396,27 +396,56 @@ class BitgetClient:
             return None
 
     def place_order(self, symbol, side, order_type, size, price=None, 
-                    client_order_id=None, time_in_force='normal'):
-        """Colocar orden de mercado o límite - CORREGIDO"""
+                    client_order_id=None, time_in_force='normal',
+                    preset_stop_loss_price=None, preset_stop_surplus_price=None):
+        """Colocar orden de mercado o límite con TP/SL integrados - CORREGIDO"""
         try:
             logger.info(f"📤 Colocando orden: {symbol} {side} {size} {order_type}")
+            
+            # Obtener precisión adaptativa para precios
+            if preset_stop_loss_price:
+                sl_precision = self._obtener_precision_adaptada(preset_stop_loss_price)
+                sl_direction = 'LONG' if side == 'buy' else 'SHORT'
+                sl_formatted = self._redondear_precio_manual(preset_stop_loss_price, sl_precision, sl_direction)
+                logger.info(f"📌 SL formateado: {preset_stop_loss_price} → {sl_formatted} (precisión: {sl_precision})")
+            else:
+                sl_formatted = None
+            
+            if preset_stop_surplus_price:
+                tp_precision = self._obtener_precision_adaptada(preset_stop_surplus_price)
+                tp_formatted = self._redondear_precio_manual(preset_stop_surplus_price, tp_precision)
+                logger.info(f"📌 TP formateado: {preset_stop_surplus_price} → {tp_formatted} (precisión: {tp_precision})")
+            else:
+                tp_formatted = None
             
             request_path = '/api/v2/mix/order/place-order'
             body = {
                 'symbol': symbol,
                 'productType': self.product_type,
-                'marginMode': 'isolated',  # CORREGIDO: Requerido para modo one-way
+                'marginMode': 'isolated',
                 'marginCoin': 'USDT',
                 'side': side,
                 'orderType': order_type,
                 'size': str(size),
-                'timeInForce': time_in_force
+                'timeInForce': time_in_force,
+                # PARÁMETROS OBLIGATORIOS PARA API V2
+                'delegateType': '1'  # 0 = límite, 1 = mercado
             }
             
             if price:
                 body['price'] = str(price)
             if client_order_id:
                 body['clientOrderId'] = client_order_id
+            
+            # Parámetros de Stop Loss integrado
+            if sl_formatted:
+                body['presetStopLossPrice'] = sl_formatted
+                body['stopLossTriggerType'] = 'mark_price'
+            
+            # Parámetros de Take Profit integrado
+            if tp_formatted:
+                body['presetStopSurplusPrice'] = tp_formatted
+                body['stopSurplusTriggerType'] = 'mark_price'
             
             logger.debug(f"📦 Body de orden: {body}")
             
@@ -457,7 +486,8 @@ class BitgetClient:
             return None
 
     def place_plan_order(self, symbol, side, trigger_price, order_type, size, 
-                         price=None, plan_type='loss_plan', trigger_type='mark_price'):
+                         price=None, plan_type='loss_plan', trigger_type='mark_price',
+                         hold_side='long'):
         """
         Colocar orden de plan (TP/SL) - CORREGIDO para API Bitget V2
         
@@ -470,30 +500,50 @@ class BitgetClient:
             price: Precio de ejecución (para órdenes límite)
             plan_type: Tipo de plan ('profit_plan' para TP, 'loss_plan' para SL)
             trigger_type: Tipo de trigger ('mark_price' o 'latest_price')
+            hold_side: Lado de la posición ('long' o 'short')
         """
         try:
             logger.info(f"📤 Colocando orden plan: {symbol} {side} TP/SL en {trigger_price}")
             
-            # Obtener la precisión correcta del símbolo para formatear precios
-            price_precision = self.obtener_precision_precio(symbol)
+            # Determinar dirección de trading para redondeo correcto
+            trade_direction = 'LONG' if hold_side == 'long' else 'SHORT'
             
-            # Redondear triggerPrice según la precisión del símbolo
-            trigger_price_formatted = str(round(float(trigger_price), price_precision))
+            # Usar precisión adaptativa para precios muy pequeños (memecoins)
+            price_precision = self._obtener_precision_adaptada(trigger_price)
+            
+            # Redondear triggerPrice según la precisión adaptativa y dirección
+            if plan_type == 'loss_plan':
+                trigger_price_formatted = self._redondear_precio_manual(
+                    float(trigger_price), price_precision, trade_direction
+                )
+            else:
+                trigger_price_formatted = self._redondear_precio_manual(
+                    float(trigger_price), price_precision
+                )
+            
+            logger.info(f"📌 Precio formateado: {trigger_price} → {trigger_price_formatted} (precisión: {price_precision})")
             
             request_path = '/api/v2/mix/order/place-tpsl-order'
             body = {
                 'symbol': symbol,
                 'productType': self.product_type,
-                'marginMode': 'isolated',  
+                'marginMode': 'isolated',
                 'marginCoin': 'USDT',
                 'side': side,
                 'orderType': order_type,
                 'triggerPrice': trigger_price_formatted,
                 'size': str(size),
-                'planType': plan_type,  
-                'triggerType': trigger_type, 
-                'holdSide': hold_side
+                'planType': plan_type,
+                'triggerType': trigger_type,
+                'holdSide': hold_side,
+                # PARÁMETROS OBLIGATORIOS PARA API V2
+                'delegateType': '1'  # 0 = límite, 1 = mercado
             }
+            
+            if plan_type == 'loss_plan':
+                body['stopLossTriggerType'] = 'mark_price'
+            else:
+                body['stopSurplusTriggerType'] = 'mark_price'
             
             if price:
                 body['executePrice'] = str(price)
@@ -697,6 +747,80 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"Error redondeando precio para {symbol}: {e}")
             return float(price)
+
+    def _obtener_precision_adaptada(self, price):
+        """
+        Obtiene la precisión adaptativa basada en el precio para evitar redondeo a cero.
+        Para símbolos con precios muy pequeños (SHIBUSDT, PEPE, ENS, XLM, etc.), la precisión
+        de priceScale no es suficiente. Este método calcula la precisión necesaria
+        para mantener al menos 4-6 dígitos significativos.
+        """
+        try:
+            price = float(price)
+            
+            # Para precios < 1, siempre usar alta precisión para evitar redondeo a cero
+            if price < 1:
+                if price < 0.00001:
+                    return 12  # Para PEPE, SHIB y similares
+                elif price < 0.0001:
+                    return 10  # Para memecoins extremos
+                elif price < 0.001:
+                    return 8   # Para memecoins y precios muy pequeños
+                elif price < 0.01:
+                    return 7   # Para precios como ENS (~0.008)
+                elif price < 0.1:
+                    return 6   # Para precios como PHA (~0.1)
+                elif price < 1:
+                    return 5   # Para precios como XLM (~0.2)
+            else:
+                # Para precios >= 1, usar 4 decimales como mínimo
+                return 4
+        except Exception as e:
+            logger.error(f"Error calculando precisión adaptativa: {e}")
+            return 8  # Fallback seguro
+
+    def _redondear_precio_manual(self, price, precision, trade_direction=None):
+        """
+        Redondea el precio con una precisión específica, asegurando que sea un múltiplo válido.
+        IMPORTANTE: Para la API de Bitget, el precio debe ser un múltiplo del priceStep.
+        
+        Para Stop Loss:
+        - LONG: El SL debe redondearse hacia ABAJO (menor que el precio de entrada)
+        - SHORT: El SL debe redondearse hacia ARRIBA (mayor que el precio de entrada)
+        """
+        try:
+            price = float(price)
+            if price == 0:
+                return "0.0"
+            
+            tick_size = 10 ** (-precision)
+            precio_redondeado = round(price / tick_size) * tick_size
+            
+            # AJUSTE INTELIGENTE PARA STOP LOSS
+            if trade_direction and trade_direction in ['LONG', 'SHORT']:
+                precio_redondeado = float(f"{precio_redondeado:.{precision}f}")
+                
+                if trade_direction == 'LONG':
+                    # Para LONG: SL debe ser menor que precio de entrada
+                    if precio_redondeado >= price:
+                        precio_redondeado = math.floor(price / tick_size) * tick_size
+                elif trade_direction == 'SHORT':
+                    # Para SHORT: SL debe ser mayor que precio de entrada
+                    if precio_redondeado <= price:
+                        precio_redondeado = math.ceil(price / tick_size) * tick_size
+            
+            # Formatear para evitar errores de punto flotante
+            precio_formateado = f"{precio_redondeado:.{precision}f}"
+            
+            # Verificar que no sea cero
+            if float(precio_formateado) == 0.0 and price > 0:
+                nueva_precision = precision + 4
+                return self._redondear_precio_manual(price, nueva_precision, trade_direction)
+            
+            return precio_formateado
+        except Exception as e:
+            logger.error(f"Error redondeando precio manualmente: {e}")
+            return str(price)
 
     def obtener_reglas_simbolo(self, symbol):
         """Obtiene las reglas específicas de tamaño para un símbolo"""
@@ -977,7 +1101,9 @@ class BitgetClient:
 # ---------------------------
 def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_usd, leverage=10):
     """
-    Ejecutar una operación completa en Bitget (posición + TP/SL) - CORREGIDO
+    Ejecutar una operación completa en Bitget (posición + TP/SL integrados)
+    Usa placement integrado con presetStopLossPrice y presetStopSurplusPrice
+    para mayor precisión y menos latencia.
     """
     
     logger.info("🚀 EJECUTANDO OPERACIÓN REAL EN BITGET")
@@ -1073,62 +1199,98 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             stop_loss = precio_actual * (1 + sl_porcentaje)
             take_profit = precio_actual * (1 - tp_porcentaje)
         
-        stop_loss = round(stop_loss, price_place)
-        take_profit = round(take_profit, price_place)
+        logger.info(f"🛑 Stop Loss (raw): {stop_loss:.10f}")
+        logger.info(f"🎯 Take Profit (raw): {take_profit:.10f}")
         
-        logger.info(f"🛑 Stop Loss: {stop_loss:.8f}")
-        logger.info(f"🎯 Take Profit: {take_profit:.8f}")
-        
+        # USAR ÓRDENES INTEGRADAS CON TP/SL
         side = 'buy' if tipo_operacion == 'LONG' else 'sell'
+        
+        # Colocar orden de entrada CON TP/SL integrados
         orden_entrada = bitget_client.place_order(
             symbol=simbolo,
             side=side,
             order_type='market',
-            size=cantidad_contratos
+            size=cantidad_contratos,
+            preset_stop_loss_price=stop_loss,
+            preset_stop_surplus_price=take_profit
         )
         
         if not orden_entrada:
-            logger.error("❌ Error abriendo posición")
-            return None
+            logger.error("❌ Error abriendo posición con TP/SL integrados")
+            logger.info("🔄 Intentando abrir posición SIN TP/SL integrados...")
+            
+            # Fallback: abrir posición sin TP/SL y colocarlos por separado
+            orden_entrada = bitget_client.place_order(
+                symbol=simbolo,
+                side=side,
+                order_type='market',
+                size=cantidad_contratos
+            )
+            
+            if not orden_entrada:
+                logger.error("❌ Error abriendo posición incluso sin TP/SL")
+                return None
+            
+            logger.info(f"✅ Posición abierta exitosamente (sin TP/SL integrados)")
+            time.sleep(1)
+            
+            # Colocar SL y TP por separado
+            sl_side = 'sell' if tipo_operacion == 'LONG' else 'buy'
+            
+            orden_sl = bitget_client.place_plan_order(
+                symbol=simbolo,
+                side=sl_side,
+                trigger_price=stop_loss,
+                order_type='market',
+                size=cantidad_contratos,
+                plan_type='loss_plan',
+                hold_side=hold_side
+            )
+            
+            if orden_sl:
+                logger.info(f"✅ Stop Loss configurado en: {stop_loss:.8f}")
+            else:
+                logger.warning("⚠️ Error configurando Stop Loss")
+            
+            time.sleep(0.5)
+            
+            orden_tp = bitget_client.place_plan_order(
+                symbol=simbolo,
+                side=sl_side,
+                trigger_price=take_profit,
+                order_type='market',
+                size=cantidad_contratos,
+                plan_type='profit_plan',
+                hold_side=hold_side
+            )
+            
+            if orden_tp:
+                logger.info(f"✅ Take Profit configurado en: {take_profit:.8f}")
+            else:
+                logger.warning("⚠️ Error configurando Take Profit")
+            
+            return {
+                'orden_entrada': orden_entrada,
+                'orden_sl': orden_sl,
+                'orden_tp': orden_tp,
+                'cantidad_contratos': cantidad_contratos,
+                'precio_entrada': precio_actual,
+                'take_profit': take_profit,
+                'stop_loss': stop_loss,
+                'leverage': leverage,
+                'capital_usado': capital_usd,
+                'tipo': tipo_operacion,
+                'timestamp_entrada': datetime.now().isoformat(),
+                'symbol': simbolo,
+                'tp_sl_integrado': False
+            }
         
-        logger.info(f"✅ Posición abierta exitosamente")
-        time.sleep(1)
-        
-        sl_side = 'sell' if tipo_operacion == 'LONG' else 'buy'
-        orden_sl = bitget_client.place_plan_order(
-            symbol=simbolo,
-            side=sl_side,
-            trigger_price=stop_loss,
-            order_type='market',
-            size=cantidad_contratos,
-            plan_type='loss_plan'
-        )
-        
-        if orden_sl:
-            logger.info(f"✅ Stop Loss configurado en: {stop_loss:.8f}")
-        else:
-            logger.warning("⚠️ Error configurando Stop Loss")
-        
-        time.sleep(0.5)
-        
-        orden_tp = bitget_client.place_plan_order(
-            symbol=simbolo,
-            side=sl_side,
-            trigger_price=take_profit,
-            order_type='market',
-            size=cantidad_contratos,
-            plan_type='profit_plan'
-        )
-        
-        if orden_tp:
-            logger.info(f"✅ Take Profit configurado en: {take_profit:.8f}")
-        else:
-            logger.warning("⚠️ Error configurando Take Profit")
+        logger.info(f"✅ Posición abierta con TP/SL integrados")
         
         operacion_data = {
             'orden_entrada': orden_entrada,
-            'orden_sl': orden_sl,
-            'orden_tp': orden_tp,
+            'orden_sl': None,  # Integrado en la orden de entrada
+            'orden_tp': None,  # Integrado en la orden de entrada
             'cantidad_contratos': cantidad_contratos,
             'precio_entrada': precio_actual,
             'take_profit': take_profit,
@@ -1137,7 +1299,8 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             'capital_usado': capital_usd,
             'tipo': tipo_operacion,
             'timestamp_entrada': datetime.now().isoformat(),
-            'symbol': simbolo
+            'symbol': simbolo,
+            'tp_sl_integrado': True
         }
         
         logger.info("✅ OPERACIÓN EJECUTADA EXITOSAMENTE")
@@ -1146,6 +1309,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         logger.info(f"💰 Entrada: {precio_actual:.8f}")
         logger.info(f"🛑 SL: {stop_loss:.8f} (-2%)")
         logger.info(f"🎯 TP: {take_profit:.8f} (+4%)")
+        logger.info(f"💵 PnL potencial: ${(take_profit - precio_actual) * cantidad_contratos:.2f} (TP) / ${(precio_actual - stop_loss) * cantidad_contratos:.2f} (SL)")
         
         return operacion_data
         
