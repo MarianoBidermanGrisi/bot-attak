@@ -754,30 +754,31 @@ class BitgetClient:
         Para símbolos con precios muy pequeños (SHIBUSDT, PEPE, ENS, XLM, etc.), la precisión
         de priceScale no es suficiente. Este método calcula la precisión necesaria
         para mantener al menos 4-6 dígitos significativos.
+        
+        CORRECCIÓN: Para cumplir con requisitos de Bitget API (checkScale=3), se fuerza
+        precisión máxima de 3 decimales para precios >= 0.001.
         """
         try:
             price = float(price)
             
-            # Para precios < 1, siempre usar alta precisión para evitar redondeo a cero
-            if price < 1:
+            # Para precios muy pequeños, usar alta precisión
+            if price < 0.001:
                 if price < 0.00001:
                     return 12  # Para PEPE, SHIB y similares
                 elif price < 0.0001:
                     return 10  # Para memecoins extremos
-                elif price < 0.001:
+                else:
                     return 8   # Para memecoins y precios muy pequeños
-                elif price < 0.01:
-                    return 7   # Para precios como ENS (~0.008)
-                elif price < 0.1:
-                    return 6   # Para precios como PHA (~0.1)
-                elif price < 1:
-                    return 5   # Para precios como XLM (~0.2)
+            elif price < 1:
+                # Para precios entre 0.001 y 1, usar 5 decimales
+                return 5
             else:
-                # Para precios >= 1, usar 4 decimales como mínimo
-                return 4
+                # Para precios >= 1, usar 3 decimales MÁXIMO para cumplir con Bitget API
+                # Esto evita errores "checkScale error" y "multiple of 0.001"
+                return 3
         except Exception as e:
             logger.error(f"Error calculando precisión adaptativa: {e}")
-            return 8  # Fallback seguro
+            return 3  # Fallback seguro (3 decimales para Bitget)
 
     def _redondear_precio_manual(self, price, precision, trade_direction=None):
         """
@@ -787,11 +788,13 @@ class BitgetClient:
         Para Stop Loss:
         - LONG: El SL debe redondearse hacia ABAJO (menor que el precio de entrada)
         - SHORT: El SL debe redondearse hacia ARRIBA (mayor que el precio de entrada)
+        
+        CORRECCIÓN: Retorna float en lugar de string para compatibilidad con API Bitget.
         """
         try:
             price = float(price)
             if price == 0:
-                return "0.0"
+                return 0.0
             
             tick_size = 10 ** (-precision)
             precio_redondeado = round(price / tick_size) * tick_size
@@ -809,18 +812,18 @@ class BitgetClient:
                     if precio_redondeado <= price:
                         precio_redondeado = math.ceil(price / tick_size) * tick_size
             
-            # Formatear para evitar errores de punto flotante
-            precio_formateado = f"{precio_redondeado:.{precision}f}"
+            # Formatear a float con la precisión correcta
+            precio_formateado = float(f"{precio_redondeado:.{precision}f}")
             
             # Verificar que no sea cero
-            if float(precio_formateado) == 0.0 and price > 0:
-                nueva_precision = precision + 4
+            if precio_formateado == 0.0 and price > 0:
+                nueva_precision = min(precision + 4, 12)
                 return self._redondear_precio_manual(price, nueva_precision, trade_direction)
             
             return precio_formateado
         except Exception as e:
             logger.error(f"Error redondeando precio manualmente: {e}")
-            return str(price)
+            return float(price)
 
     def obtener_reglas_simbolo(self, symbol):
         """Obtiene las reglas específicas de tamaño para un símbolo"""
@@ -2941,7 +2944,7 @@ def crear_config_desde_entorno():
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
         'scan_interval_minutes': 6,
-        'timeframes': ['5m', '15m', '30m', '1h'],
+        'timeframes': ['5m', '15m', '30m', '1h','4h'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
             'XMRUSDT','AAVEUSDT','DOTUSDT','LINKUSDT',
@@ -2973,7 +2976,7 @@ def crear_config_desde_entorno():
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '4')),
+        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '2')),
         'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '10')), 10)
     }
 
@@ -3069,5 +3072,4 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
 
-import test_real_order
-test_real_order.run_test()
+
