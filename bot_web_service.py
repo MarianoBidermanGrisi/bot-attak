@@ -402,9 +402,9 @@ class BitgetClient:
         try:
             logger.info(f"📤 Colocando orden: {symbol} {side} {size} {order_type}")
             
-            # Obtener precisión adaptativa para precios
+            # Obtener precisión adaptativa para precios (usando symbol para consultar API)
             if preset_stop_loss_price:
-                sl_precision = self._obtener_precision_adaptada(preset_stop_loss_price)
+                sl_precision = self._obtener_precision_adaptada(preset_stop_loss_price, symbol)
                 sl_direction = 'LONG' if side == 'buy' else 'SHORT'
                 sl_formatted = self._redondear_precio_manual(preset_stop_loss_price, sl_precision, sl_direction)
                 logger.info(f"📌 SL formateado: {preset_stop_loss_price} → {sl_formatted} (precisión: {sl_precision})")
@@ -412,7 +412,7 @@ class BitgetClient:
                 sl_formatted = None
             
             if preset_stop_surplus_price:
-                tp_precision = self._obtener_precision_adaptada(preset_stop_surplus_price)
+                tp_precision = self._obtener_precision_adaptada(preset_stop_surplus_price, symbol)
                 tp_formatted = self._redondear_precio_manual(preset_stop_surplus_price, tp_precision)
                 logger.info(f"📌 TP formateado: {preset_stop_surplus_price} → {tp_formatted} (precisión: {tp_precision})")
             else:
@@ -499,7 +499,7 @@ class BitgetClient:
             size: Tamaño de la orden
             price: Precio de ejecución (para órdenes límite)
             plan_type: Tipo de plan ('profit_plan' para TP, 'loss_plan' para SL)
-            trigger_type: Tipo de trigger ('mark_price' o 'latest_price')
+            trigger_type: Tipo de trigger ('mark_price' o 'last_price')
             hold_side: Lado de la posición ('long' o 'short')
         """
         try:
@@ -508,8 +508,8 @@ class BitgetClient:
             # Determinar dirección de trading para redondeo correcto
             trade_direction = 'LONG' if hold_side == 'long' else 'SHORT'
             
-            # Usar precisión adaptativa para precios muy pequeños (memecoins)
-            price_precision = self._obtener_precision_adaptada(trigger_price)
+            # Usar precisión adaptativa consultando la API del símbolo
+            price_precision = self._obtener_precision_adaptada(trigger_price, symbol)
             
             # Redondear triggerPrice según la precisión adaptativa y dirección
             if plan_type == 'loss_plan':
@@ -523,27 +523,21 @@ class BitgetClient:
             
             logger.info(f"📌 Precio formateado: {trigger_price} → {trigger_price_formatted} (precisión: {price_precision})")
             
-            request_path = '/api/v2/mix/order/place-tpsl-order'
+            # Usar endpoint place-plan-order para órdenes TP/SL separadas
+            request_path = '/api/v2/mix/order/place-plan-order'
             body = {
                 'symbol': symbol,
                 'productType': self.product_type,
                 'marginMode': 'isolated',
                 'marginCoin': 'USDT',
+                'size': str(size),
+                'triggerPrice': str(trigger_price_formatted),
+                'triggerType': trigger_type,
                 'side': side,
                 'orderType': order_type,
-                'triggerPrice': trigger_price_formatted,
-                'size': str(size),
-                'planType': plan_type,
-                'triggerType': trigger_type,
-                'holdSide': hold_side,
-                # PARÁMETROS OBLIGATORIOS PARA API V2
-                'delegateType': '1'  # 0 = límite, 1 = mercado
+                'tradeSide': 'close',  # Cerrar posición existente
+                'reduceOnly': 'YES'    # Solo reducir posición
             }
-            
-            if plan_type == 'loss_plan':
-                body['stopLossTriggerType'] = 'mark_price'
-            else:
-                body['stopSurplusTriggerType'] = 'mark_price'
             
             if price:
                 body['executePrice'] = str(price)
@@ -748,20 +742,27 @@ class BitgetClient:
             logger.error(f"Error redondeando precio para {symbol}: {e}")
             return float(price)
 
-    def _obtener_precision_adaptada(self, price):
+    def _obtener_precision_adaptada(self, price, symbol=None):
         """
         Obtiene la precisión adaptativa basada en el precio para evitar redondeo a cero.
         Para símbolos con precios muy pequeños (SHIBUSDT, PEPE, ENS, XLM, etc.), la precisión
         de priceScale no es suficiente. Este método calcula la precisión necesaria
         para mantener al menos 4-6 dígitos significativos.
         
-        CORRECCIÓN: Para cumplir con requisitos de Bitget API (checkScale=3), se fuerza
-        precisión máxima de 3 decimales para precios >= 0.001.
+        CORRECCIÓN: Consulta priceScale de la API cuando symbol está disponible.
         """
         try:
             price = float(price)
             
-            # Para precios muy pequeños, usar alta precisión
+            # Si tenemos el símbolo, obtener priceScale de la API
+            if symbol:
+                symbol_info = self.get_symbol_info(symbol)
+                if symbol_info and 'priceScale' in symbol_info:
+                    api_precision = int(symbol_info.get('priceScale', 2))
+                    logger.debug(f"📋 {symbol}: usando priceScale de API = {api_precision}")
+                    return api_precision
+            
+            # Fallback: calcular precisión basada en el precio
             if price < 0.001:
                 if price < 0.00001:
                     return 12  # Para PEPE, SHIB y similares
@@ -772,13 +773,18 @@ class BitgetClient:
             elif price < 1:
                 # Para precios entre 0.001 y 1, usar 5 decimales
                 return 5
-            else:
-                # Para precios >= 1, usar 3 decimales MÁXIMO para cumplir con Bitget API
-                # Esto evita errores "checkScale error" y "multiple of 0.001"
+            elif price < 10:
+                # Para precios entre 1 y 10, usar 4 decimales
+                return 4
+            elif price < 100:
+                # Para precios entre 10 y 100, usar 3 decimales
                 return 3
+            else:
+                # Para precios >= 100, usar 2 decimales (común en Bitget)
+                return 2
         except Exception as e:
             logger.error(f"Error calculando precisión adaptativa: {e}")
-            return 3  # Fallback seguro (3 decimales para Bitget)
+            return 2  # Fallback seguro (2 decimales para Bitget)
 
     def _redondear_precio_manual(self, price, precision, trade_direction=None):
         """
