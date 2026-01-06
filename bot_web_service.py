@@ -508,17 +508,26 @@ class BitgetClient:
             # Determinar dirección de trading para redondeo correcto
             trade_direction = 'LONG' if hold_side == 'long' else 'SHORT'
             
-            # Usar precisión adaptativa consultando la API del símbolo
-            price_precision = self._obtener_precision_adaptada(trigger_price, symbol)
+            # CORRECCIÓN ERROR 45115: Usar precisión del símbolo obtenida de la API
+            # Esto evita errores de precio no múltiplo del tick size
+            symbol_info = self.get_symbol_info(symbol)
+            if symbol_info and 'priceScale' in symbol_info:
+                price_precision = int(symbol_info.get('priceScale', 4))
+            else:
+                price_precision = self._obtener_precision_adaptada(trigger_price, symbol)
             
             # Redondear triggerPrice según la precisión adaptativa y dirección
+            # Para SL (loss): redondear hacia abajo para LONG, hacia arriba para SHORT
+            # Para TP (profit): redondear hacia arriba para LONG, hacia abajo para SHORT
             if plan_type == 'loss_plan':
                 trigger_price_formatted = self._redondear_precio_manual(
                     float(trigger_price), price_precision, trade_direction
                 )
-            else:
+            else:  # profit_plan
+                # Para TP, invertir la dirección para redondear hacia el lado correcto
+                inverse_direction = 'SHORT' if trade_direction == 'LONG' else 'LONG'
                 trigger_price_formatted = self._redondear_precio_manual(
-                    float(trigger_price), price_precision
+                    float(trigger_price), price_precision, inverse_direction
                 )
             
             logger.info(f"📌 Precio formateado: {trigger_price} → {trigger_price_formatted} → {self._formatear_precio_bitget(trigger_price_formatted)} (precisión: {price_precision})")
