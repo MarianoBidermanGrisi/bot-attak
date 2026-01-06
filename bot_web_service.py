@@ -407,14 +407,14 @@ class BitgetClient:
                 sl_precision = self._obtener_precision_adaptada(preset_stop_loss_price, symbol)
                 sl_direction = 'LONG' if side == 'buy' else 'SHORT'
                 sl_formatted = self._redondear_precio_manual(preset_stop_loss_price, sl_precision, sl_direction)
-                logger.info(f"📌 SL formateado: {preset_stop_loss_price} → {sl_formatted} (precisión: {sl_precision})")
+                logger.info(f"📌 SL formateado: {preset_stop_loss_price} → {sl_formatted} → {self._formatear_precio_bitget(sl_formatted)} (precisión: {sl_precision})")
             else:
                 sl_formatted = None
             
             if preset_stop_surplus_price:
                 tp_precision = self._obtener_precision_adaptada(preset_stop_surplus_price, symbol)
                 tp_formatted = self._redondear_precio_manual(preset_stop_surplus_price, tp_precision)
-                logger.info(f"📌 TP formateado: {preset_stop_surplus_price} → {tp_formatted} (precisión: {tp_precision})")
+                logger.info(f"📌 TP formateado: {preset_stop_surplus_price} → {tp_formatted} → {self._formatear_precio_bitget(tp_formatted)} (precisión: {tp_precision})")
             else:
                 tp_formatted = None
             
@@ -439,12 +439,12 @@ class BitgetClient:
             
             # Parámetros de Stop Loss integrado
             if sl_formatted:
-                body['presetStopLossPrice'] = sl_formatted
+                body['presetStopLossPrice'] = self._formatear_precio_bitget(sl_formatted)
                 body['stopLossTriggerType'] = 'mark_price'
             
             # Parámetros de Take Profit integrado
             if tp_formatted:
-                body['presetStopSurplusPrice'] = tp_formatted
+                body['presetStopSurplusPrice'] = self._formatear_precio_bitget(tp_formatted)
                 body['stopSurplusTriggerType'] = 'mark_price'
             
             logger.debug(f"📦 Body de orden: {body}")
@@ -521,7 +521,7 @@ class BitgetClient:
                     float(trigger_price), price_precision
                 )
             
-            logger.info(f"📌 Precio formateado: {trigger_price} → {trigger_price_formatted} (precisión: {price_precision})")
+            logger.info(f"📌 Precio formateado: {trigger_price} → {trigger_price_formatted} → {self._formatear_precio_bitget(trigger_price_formatted)} (precisión: {price_precision})")
             
             # Usar endpoint place-plan-order para órdenes TP/SL separadas
             request_path = '/api/v2/mix/order/place-plan-order'
@@ -531,10 +531,11 @@ class BitgetClient:
                 'marginMode': 'isolated',
                 'marginCoin': 'USDT',
                 'size': str(size),
-                'triggerPrice': str(trigger_price_formatted),
+                'triggerPrice': self._formatear_precio_bitget(trigger_price_formatted),
                 'triggerType': trigger_type,
                 'side': side,
                 'orderType': order_type,
+                'planType': plan_type,  # OBLIGATORIO para API v2
                 'tradeSide': 'close',  # Cerrar posición existente
                 'reduceOnly': 'YES'    # Solo reducir posición
             }
@@ -578,6 +579,36 @@ class BitgetClient:
         except Exception as e:
             logger.error(f"❌ Error colocando plan order: {e}")
             return None
+
+    def _formatear_precio_bitget(self, precio):
+        """
+        Formatea el precio para la API de Bitget evitando notación científica.
+        Para símbolos con precios muy pequeños (SHIB, PEPE, etc.), usa 9 decimales.
+        """
+        try:
+            precio_float = float(precio)
+            if precio_float == 0:
+                return '0'
+            
+            # Determinar el número de decimales basado en el valor
+            if precio_float < 0.00001:
+                # Para memecoins extremos como SHIB, usar 9 decimales
+                return f"{precio_float:.9f}".rstrip('0').rstrip('.')
+            elif precio_float < 0.001:
+                return f"{precio_float:.8f}".rstrip('0').rstrip('.')
+            elif precio_float < 0.01:
+                return f"{precio_float:.7f}".rstrip('0').rstrip('.')
+            elif precio_float < 0.1:
+                return f"{precio_float:.6f}".rstrip('0').rstrip('.')
+            elif precio_float < 1:
+                return f"{precio_float:.5f}".rstrip('0').rstrip('.')
+            elif precio_float < 10:
+                return f"{precio_float:.4f}".rstrip('0').rstrip('.')
+            else:
+                return f"{precio_float:.2f}".rstrip('0').rstrip('.')
+        except Exception as e:
+            logger.error(f"Error formateando precio para Bitget: {e}")
+            return str(precio)
 
     def set_leverage(self, symbol, leverage, hold_side='long'):
         """Configurar apalancamiento en BITGET"""
