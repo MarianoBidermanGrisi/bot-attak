@@ -2989,8 +2989,8 @@ def crear_config_desde_entorno():
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 6,
-        'timeframes': ['5m', '15m', '30m', '1h','4h'],
+        'scan_interval_minutes': 2,
+        'timeframes': ['1m', '3m','5m', '15m'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
             'XMRUSDT','AAVEUSDT','DOTUSDT','LINKUSDT',
@@ -3013,8 +3013,8 @@ def crear_config_desde_entorno():
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
         'telegram_chat_ids': telegram_chat_ids,
         'auto_optimize': True,
-        'min_samples_optimizacion': 30,
-        'reevaluacion_horas': 24,
+        'min_samples_optimizacion': 5,
+        'reevaluacion_horas': 1,
         'log_path': os.path.join(directorio_actual, 'operaciones_log_v23.csv'),
         'estado_file': os.path.join(directorio_actual, 'estado_bot_v23.json'),
         'bitget_api_key': os.environ.get('BITGET_API_KEY'),
@@ -3022,8 +3022,8 @@ def crear_config_desde_entorno():
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '2')),
-        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '10')), 10)
+        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '1')),
+        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '40')), 40)
     }
 
 # ---------------------------
