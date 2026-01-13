@@ -3023,7 +3023,7 @@ def crear_config_desde_entorno():
         'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
         'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '1')),
-        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '40')), 40)
+        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '25')), 25)
     }
 
 # ---------------------------
