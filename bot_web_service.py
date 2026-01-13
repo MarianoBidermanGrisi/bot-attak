@@ -2573,7 +2573,7 @@ class TradingBot:
         """
         return mensaje
 
-    def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
+    def calcular_stochastic(self, datos_mercado, period=14, k_period=2, d_period=2):
         if len(datos_mercado['cierres']) < period:
             return 50, 50
         
@@ -2984,14 +2984,14 @@ def crear_config_desde_entorno():
     telegram_chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
     
     return {
-        'min_channel_width_percent': 2.0,
-        'trend_threshold_degrees': 8.0,
-        'min_trend_strength_degrees': 8.0,
-        'entry_margin': 0.001,
-        'min_rr_ratio': 1.1,
+        'min_channel_width_percent': 3.0,
+        'trend_threshold_degrees': 6.0,
+        'min_trend_strength_degrees': 11.0,
+        'entry_margin': 0.0015,
+        'min_rr_ratio': 1.2,
         'scan_interval_minutes': 3,
         'timeframes': ['1m', '3m','5m', '15m'],
-        'velas_options': [80, 100, 120, 150, 200],
+        'velas_options': [50, 80, 100, 120],
         'symbols': [
             'XMRUSDT','AAVEUSDT','DOTUSDT','LINKUSDT',
             'BNBUSDT','XRPUSDT','SOLUSDT','AVAXUSDT',
@@ -3022,8 +3022,8 @@ def crear_config_desde_entorno():
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '1')),
-        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '25')), 25)
+        'capital_por_operacion': float(os.environ.get('CAPITAL_POR_OPERACION', '2')),
+        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '20')), 20)
     }
 
 # ---------------------------
