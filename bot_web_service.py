@@ -619,51 +619,6 @@ class BitgetClient:
             logger.error(f"Error formateando precio para Bitget: {e}")
             return str(precio)
 
-    def set_leverage(self, symbol, leverage, hold_side='long'):
-        """Configurar apalancamiento en BITGET"""
-        try:
-            logger.info(f"⚡ Configurando leverage {leverage}x para {symbol} ({hold_side})")
-            
-            request_path = '/api/v2/mix/account/set-leverage'
-            body = {
-                'symbol': symbol,
-                'productType': self.product_type,
-                'marginCoin': 'USDT',
-                'leverage': str(leverage),
-                'holdSide': hold_side
-            }
-            
-            # Normalizar body para usar en la solicitud
-            body_str = self._normalize_body(body)
-            
-            headers = self._get_headers('POST', request_path, body_str)
-            
-            if not headers:
-                logger.error("❌ No se pudieron generar headers para leverage")
-                return False
-            
-            response = requests.post(
-                self.base_url + request_path,
-                headers=headers,
-                data=body_str,
-                timeout=10
-            )
-            
-            logger.info(f"📥 Respuesta leverage - Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('code') == '00000':
-                    logger.info(f"✅ Apalancamiento {leverage}x configurado exitosamente")
-                    return True
-                else:
-                    logger.error(f"❌ Error configurando leverage: {data.get('code')} - {data.get('msg')}")
-            else:
-                logger.error(f"❌ Error HTTP configurando leverage: {response.status_code} - {response.text}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Error en set_leverage: {e}")
-            return False
 
     def get_positions(self, symbol=None, product_type=None):
         """Obtener posiciones abiertas"""
