@@ -2984,12 +2984,12 @@ def crear_config_desde_entorno():
     telegram_chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
     
     return {
-        'min_channel_width_percent': 4.0,
-        'trend_threshold_degrees': 16.0,
-        'min_trend_strength_degrees': 16.0,
+        'min_channel_width_percent': 2.0,
+        'trend_threshold_degrees': 8.0,
+        'min_trend_strength_degrees': 8.0,
         'entry_margin': 0.001,
-        'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 2,
+        'min_rr_ratio': 1.1,
+        'scan_interval_minutes': 3,
         'timeframes': ['1m', '3m','5m', '15m'],
         'velas_options': [80, 100, 120, 150, 200],
         'symbols': [
@@ -3014,7 +3014,7 @@ def crear_config_desde_entorno():
         'telegram_chat_ids': telegram_chat_ids,
         'auto_optimize': True,
         'min_samples_optimizacion': 5,
-        'reevaluacion_horas': 1,
+        'reevaluacion_horas': 4,
         'log_path': os.path.join(directorio_actual, 'operaciones_log_v23.csv'),
         'estado_file': os.path.join(directorio_actual, 'estado_bot_v23.json'),
         'bitget_api_key': os.environ.get('BITGET_API_KEY'),
