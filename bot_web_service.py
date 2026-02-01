@@ -1964,7 +1964,7 @@ class TradingBot:
     def actualizar_monededas(self):
         """
         Actualiza dinámicamente la lista de monedas supervisadas basándose en el volumen de negociación.
-        Elimina los símbolos por defecto y selecciona las 50 monedas con mayor volumen en USDT.
+        Elimina los símbolos por defecto y selecciona las 100 monedas con mayor volumen en USDT.
         """
         if self.bitget_client is None:
             print("[ERROR] BitgetClient no inicializado para actualizar monedas")
@@ -1986,12 +1986,12 @@ class TradingBot:
             ]
             
             # Ordenar por volumen de negociación (quoteVolume) de mayor a menor
-            # y tomar las primeras 50
+            # y tomar las primeras 100
             self.monededas = sorted(
                 filtrados, 
                 key=lambda x: tickers[x].get('quoteVolume', 0), 
                 reverse=True
-            )[:50]
+            )[:100]
             
             print(f"[SISTEMA] ✅ {len(self.monededas)} Monedas actualizadas (Top Volumen, {len(SIMBOLOS_OMITIDOS)} omitidos)")
             
@@ -4285,7 +4285,7 @@ class TradingBot:
         print("🔄 REEVALUACIÓN: CADA 2 HORAS")
         print("🏦 INTEGRACIÓN: BITGET FUTUROS API (Dinero REAL)")
         print("=" * 70)
-        print("💱 Monedas: TOP 50 por volumen (actualización dinámica)")
+        print("💱 Monedas: TOP 100 por volumen (actualización dinámica)")
         print(f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}")
         print(f"🕯️ Velas: {self.config.get('velas_options', [])}")
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
@@ -4318,7 +4318,7 @@ class TradingBot:
             self.sincronizar_con_bitget()
             print("✅ Sincronización inicial completada")
         
-        # ACTUALIZAR MONEDAS DINÁMICAMENTE (Top 50 por volumen)
+        # ACTUALIZAR MONEDAS DINÁMICAMENTE (Top 100 por volumen)
         print("\n🔄 ACTUALIZANDO LISTA DE MONEDAS POR VOLUMEN...")
         if self.actualizar_monededas():
             print(f"✅ {len(self.monededas)} monedas cargadas para escaneo")
@@ -4371,7 +4371,7 @@ def crear_config_desde_entorno():
         'timeframes': ['15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
         # La lista de symbols ahora se genera dinámicamente mediante actualizar_monededas()
-        # Esto elimina los símbolos por defecto y usa el Top 50 por volumen
+        # Esto elimina los símbolos por defecto y usa el Top 100 por volumen
         'symbols': [],
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
         'telegram_chat_ids': telegram_chat_ids,
