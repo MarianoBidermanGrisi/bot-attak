@@ -372,6 +372,26 @@ class OptimizadorIA:
         return mejores_param
 
 # ---------------------------
+# SÍMBOLOS OMITIDOS - Lista de símbolos a excluir en la generación dinámica
+# ---------------------------
+SIMBOLOS_OMITIDOS = {
+    # stablecoins y relacionados
+    'USDTUSDT', 'USDCUSDT', 'DAIUSDT', 'TUSDUSDT', 'BUSDUSDT',
+    # velas y fractional
+    'BTCVUSDT', 'ETHWUSDT',
+    # duplicados y errores comunes
+    'LUNA2USDT', 'LUNAUSDT',
+    # futuros perpetuos con sufijos especiales (ya no disponibles o renombrados)
+    'DOGEUSDTS', 'XRPUSDTS',
+    # tokens muy illiquidos o delistados
+    'SRMUSDT', 'FTTUSDT', 'FTMUSDT', 'CELRUSDT',
+    # pares con bajo volumen histórico
+    'KSMUSDT', 'DOTUSDT', 'NEARUSDT',
+    # repetir para asegurar
+    'LUNAUSDT', 'LUNA2USDT'
+}
+
+# ---------------------------
 # BITGET CLIENT - INTEGRACIÓN COMPLETA CON API BITGET FUTUROS
 # ---------------------------
 class BitgetClient:
@@ -1159,6 +1179,83 @@ class BitgetClient:
             logger.error(f"Error en set_leverage BITGET FUTUROS: {e}")
             return False
 
+    def get_tickers(self, product_type='USDT-FUTURES'):
+        """
+        Obtiene todos los tickers disponibles para un tipo de producto.
+
+        Args:
+            product_type: Tipo de producto ('USDT-FUTURES' o 'USDT-MIX')
+
+        Returns:
+            dict: Diccionario con información de todos los tickers o None si hay error
+        """
+        try:
+            request_path = '/api/v2/mix/market/tickers'
+            params = {'productType': product_type}
+
+            query_string = f"?productType={product_type}"
+            full_request_path = request_path + query_string
+
+            headers = self._get_headers('GET', full_request_path, '')
+
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+
+            logger.info(f"Respuesta tickers {product_type}: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    tickers_data = data.get('data', [])
+                    # Convertir a diccionario por símbolo para facilitar acceso
+                    tickers_dict = {}
+                    for ticker in tickers_data:
+                        symbol = ticker.get('symbol')
+                        if symbol:
+                            tickers_dict[symbol] = ticker
+                    logger.info(f"✓ {len(tickers_dict)} tickers obtenidos para {product_type}")
+                    return tickers_dict
+                else:
+                    logger.warning(f"Error obteniendo tickers {product_type}: {data.get('msg')}")
+
+            # Intentar con el otro tipo de producto
+            if product_type == 'USDT-FUTURES':
+                return self.get_tickers('USDT-MIX')
+
+            return None
+        except Exception as e:
+            logger.error(f"Error en get_tickers: {e}")
+            return None
+
+    def get_all_tickers(self):
+        """
+        Obtiene todos los tickers disponibles combinando ambos tipos de producto.
+
+        Returns:
+            dict: Diccionario con información de todos los tickers
+        """
+        all_tickers = {}
+
+        # Obtener de USDT-FUTURES
+        tickers_futures = self.get_tickers('USDT-FUTURES')
+        if tickers_futures:
+            all_tickers.update(tickers_futures)
+
+        # Obtener de USDT-MIX
+        tickers_mix = self.get_tickers('USDT-MIX')
+        if tickers_mix:
+            # Evitar duplicados
+            for symbol, ticker in tickers_mix.items():
+                if symbol not in all_tickers:
+                    all_tickers[symbol] = ticker
+
+        logger.info(f"Total tickers combinados: {len(all_tickers)}")
+        return all_tickers
+
     def get_positions(self, symbol=None, product_type='USDT-FUTURES'):
         """Obtener posiciones abiertas en BITGET FUTUROS"""
         try:
@@ -1365,47 +1462,6 @@ class BitgetClient:
             return None
         except Exception as e:
             logger.error(f"Error en get_klines BITGET FUTUROS: {e}")
-            return None
-
-    def get_all_tickers(self):
-        """
-        Obtiene todos los tickers disponibles en Bitget Futures.
-        Returns un diccionario con los símbolos como claves.
-        """
-        try:
-            request_path = '/api/v2/mix/market/contracts'
-            params = {'productType': 'USDT-FUTURES'}
-            
-            response = requests.get(
-                self.base_url + request_path,
-                params=params,
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('code') == '00000':
-                    contracts = data.get('data', [])
-                    
-                    # Convertir al formato de ticker similar a CCXT
-                    tickers = {}
-                    for contract in contracts:
-                        symbol = contract.get('symbol')
-                        if symbol:
-                            tickers[symbol] = {
-                                'symbol': symbol,
-                                'lastPrice': float(contract.get('lastPr', 0)),
-                                'quoteVolume': float(contract.get('vol24h', 0)),
-                                'high24h': float(contract.get('high24h', 0)),
-                                'low24h': float(contract.get('low24h', 0)),
-                            }
-                    
-                    logger.info(f"✅ Obtenidos {len(tickers)} tickers de Bitget Futures")
-                    return tickers
-            
-            return None
-        except Exception as e:
-            logger.error(f"Error obteniendo todos los tickers: {e}")
             return None
 
 # ---------------------------
@@ -1780,15 +1836,6 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         return None
 
 # ---------------------------
-# SÍMBOLOS OMITIDOS PARA ACTUALIZACIÓN DINÁMICA DE MONEDAS
-# ---------------------------
-SIMBOLOS_OMITIDOS = {
-    'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT',
-    'DOGEUSDT', 'TRXUSDT', 'DOTUSDT', 'LTCUSDT', 'BCHUSDT',
-    'LINKUSDT', 'XLMUSDT', 'NEOUSDT', 'ATOMUSDT', 'XMRUSDT', 'ETCUSDT'
-}
-
-# ---------------------------
 # BOT PRINCIPAL - BREAKOUT + REENTRY CON INTEGRACIÓN BITGET FUTUROS
 # ---------------------------
 class TradingBot:
@@ -1805,8 +1852,6 @@ class TradingBot:
         # Tracking de breakouts y reingresos
         self.breakouts_detectados = {}
         self.esperando_reentry = {}
-        # Monedas supervisadas (se actualizan dinámicamente con actualizar_monededas())
-        self.monededas = []
         self.estado_file = config.get('estado_file', 'estado_bot.json')
         self.cargar_estado()
         
@@ -1829,7 +1874,11 @@ class TradingBot:
         
         # LIMPIEZA INICIAL: Liberar símbolos bloquados si no hay posiciones activas
         self.limpiar_bloqueos_iniciales()
-        
+
+        #monedas - Generación dinámica de símbolos por volumen
+        self.moned = []  # Lista de símbolos generados dinámicamente
+        self.ultima_actualizacion_moned = None
+
         # Configuración de operaciones automáticas
         self.ejecutar_operaciones_automaticas = config.get('ejecutar_operaciones_automaticas', False)
         self.capital_por_operacion = config.get('capital_por_operacion', None)  # 3% del saldo (dinámico)
@@ -1940,7 +1989,10 @@ class TradingBot:
                 'order_ids_sl': getattr(self, 'order_ids_sl', {}),
                 'order_ids_tp': getattr(self, 'order_ids_tp', {}),
                 'ultima_sincronizacion_bitget': ultima_sync_str,
-                'operaciones_cerradas_registradas': getattr(self, 'operaciones_cerradas_registradas', [])
+                'operaciones_cerradas_registradas': getattr(self, 'operaciones_cerradas_registradas', []),
+                #monedas dinámicas
+                'monedas_dinamicas': getattr(self, 'moned', []),
+                'ultima_actualizacion_moned': self.ultima_actualizacion_moned.isoformat() if self.ultima_actualizacion_moned else None
             }
             
             with open(self.estado_file, 'w', encoding='utf-8') as f:
@@ -1959,50 +2011,6 @@ class TradingBot:
                 logger.error(f"Error details: {str(e)}")
             except:
                 pass
-            return False
-
-    def actualizar_monededas(self):
-        """
-        Actualiza dinámicamente la lista de monedas supervisadas basándose en el volumen de negociación.
-        Elimina los símbolos por defecto y selecciona las 100 monedas con mayor volumen en USDT.
-        """
-        if self.bitget_client is None:
-            print("[ERROR] BitgetClient no inicializado para actualizar monedas")
-            return False
-        
-        try:
-            print("🔄 Obteniendo tickers de Bitget Futures...")
-            tickers = self.bitget_client.get_all_tickers()
-            
-            if not tickers:
-                print("[ERROR] No se pudieron obtener los tickers")
-                return False
-            
-            # Filtrar símbolos que terminan en USDT y no están en la lista de omitidos
-            filtrados = [
-                s for s in tickers 
-                if s.endswith('USDT') 
-                and s not in SIMBOLOS_OMITIDOS
-            ]
-            
-            # Ordenar por volumen de negociación (quoteVolume) de mayor a menor
-            # y tomar las primeras 100
-            self.monededas = sorted(
-                filtrados, 
-                key=lambda x: tickers[x].get('quoteVolume', 0), 
-                reverse=True
-            )[:100]
-            
-            print(f"[SISTEMA] ✅ {len(self.monededas)} Monedas actualizadas (Top Volumen, {len(SIMBOLOS_OMITIDOS)} omitidos)")
-            
-            # Mostrar las primeras 10 monedas para verificación
-            if self.monededas:
-                print(f"   📊 Top 10: {', '.join(self.monededas[:10])}...")
-            
-            return True
-            
-        except Exception as e:
-            print(f"[ERROR] Error actualizando monedas: {e}")
             return False
 
     def cargar_estado(self):
@@ -2106,9 +2114,21 @@ class TradingBot:
                     logger.warning(f"⚠️ Error cargando ultima_sincronizacion_bitget: {e}")
                     self.ultima_sincronizacion_bitget = None
             
+            # Cargar monedas dinámicas
+            self.moned = estado.get('monedas_dinamicas', [])
+            ultima_moned_str = estado.get('ultima_actualizacion_moned')
+            self.ultima_actualizacion_moned = None
+            if ultima_moned_str:
+                try:
+                    self.ultima_actualizacion_moned = datetime.fromisoformat(ultima_moned_str)
+                except Exception as e:
+                    logger.warning(f"⚠️ Error cargando ultima_actualizacion_moned: {e}")
+            
             logger.info(f"✅ Estado cargado exitosamente desde {self.estado_file}")
             logger.info(f"📊 Operaciones activas restauradas: {len(self.operaciones_activas)}")
             logger.info(f"📊 Operaciones Bitget activas restauradas: {len(self.operaciones_bitget_activas)}")
+            if self.moned:
+                logger.info(f"📊 Monedas dinámicas restauradas: {len(self.moned)}")
             
             return True
             
@@ -2194,6 +2214,80 @@ class TradingBot:
                 
         except Exception as e:
             logger.error(f"Error en limpieza inicial: {e}")
+
+    def actualizar_moned(self):
+        """
+        Actualiza la lista de monedas dinámicamente basándose en el volumen de trading.
+        Selecciona los 50 símbolos con mayor volumen que terminan en ':USDT'.
+        Excluye los símbolos definidos en SIMBOLOS_OMITIDOS.
+        """
+        try:
+            # Usar el cliente Bitget para obtener todos los tickers
+            if self.bitget_client:
+                tickers = self.bitget_client.get_all_tickers()
+            else:
+                logger.warning("⚠️ No hay cliente Bitget configurado, usando fallback")
+                return False
+
+            if not tickers:
+                logger.error("❌ No se pudieron obtener los tickers")
+                return False
+
+            # Filtrar símbolos: que terminen en USDM/USDT y no estén en la lista de omitidos
+            filtrados = []
+            for simbolo in tickers:
+                # Verificar que termine en USDT y no esté en omitidos
+                if simbolo.endswith('USDT') and simbolo not in SIMBOLOS_OMITIDOS:
+                    filtrados.append(simbolo)
+
+            # Ordenar por volumen (quoteVolume) de mayor a menor
+            def get_quote_volume(s):
+                try:
+                    ticker = tickers[s]
+                    # Diferentes campos según la respuesta de Bitget
+                    volume = ticker.get('quoteVolume') or ticker.get('vol24h') or 0
+                    return float(volume)
+                except (KeyError, TypeError, ValueError):
+                    return 0
+
+            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:50]
+            self.ultima_actualizacion_moned = datetime.now()
+
+            print(f"[SISTEMA] ✅ 50 Monedas actualizadas dinámicamente (Top Volumen)")
+            print(f"   📊 Total símbolos procesados: {len(filtrados)}")
+            print(f"   🚫 Símbolos omitidos: {len(SIMBOLOS_OMITIDOS)}")
+            print(f"   💱 Monedas seleccionadas: {len(self.moned)}")
+            print(f"   📈 Top 5 por volumen: {self.moned[:5]}")
+            logger.info(f"✅ Monedas dinámicas actualizadas: {len(self.moned)} símbolos")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Error actualizando monedas: {e}")
+            return False
+
+    def obtener_simbolos_analisis(self):
+        """
+        Obtiene la lista de símbolos a analizar.
+        Si hay monedas dinámicas configuradas, las usa.
+        Si no, usa la lista de símbolos de la configuración.
+        
+        Returns:
+            list: Lista de símbolos a analizar
+        """
+        # Si tenemos monedas dinámicas y fueron actualizadas recientemente
+        if self.moned and len(self.moned) > 0:
+            # Verificar si la última actualización es reciente (menos de 1 hora)
+            if self.ultima_actualizacion_moned:
+                tiempo_desde_actualizacion = (datetime.now() - self.ultima_actualizacion_moned).total_seconds()
+                if tiempo_desde_actualizacion < 3600:  # 1 hora en segundos
+                    return self.moned
+            # Si no hay actualización reciente, actualizar
+            self.actualizar_moned()
+            if self.moned:
+                return self.moned
+        
+        # Fallback: usar símbolos de la configuración
+        return self.config.get('symbols', [])
 
     def liberar_simbolo(self, simbolo):
         """
@@ -3419,16 +3513,11 @@ class TradingBot:
 
     def escanear_mercado(self):
         """Escanea el mercado con estrategia Breakout + Reentry"""
-        # Usar monedas actualizadas dinámicamente o lista vacía si no hay
-        simbolos_a_escanear = getattr(self, 'monedas', [])
-        if not simbolos_a_escanear:
-            print("\n⚠️ No hay monedas configuradas. Llamando a actualizar_monededas()...")
-            self.actualizar_monededas()
-            simbolos_a_escanear = getattr(self, 'monedas', [])
-        
-        print(f"\n🔍 Escaneando {len(simbolos_a_escanear)} símbolos (Estrategia: Breakout + Reentry - Top Volumen)...")
+        # Usar símbolos dinámicos o fallback a configuración
+        simbolos_a_analizar = self.obtener_simbolos_analisis()
+        print(f"\n🔍 Escaneando {len(simbolos_a_analizar)} símbolos (Estrategia: Breakout + Reentry)...")
         senales_encontradas = 0
-        for simbolo in simbolos_a_escanear:
+        for simbolo in simbolos_a_analizar:
             try:
                 if simbolo in self.operaciones_activas:
                     # Verificar si es operación manual del usuario
@@ -4232,15 +4321,21 @@ class TradingBot:
             if random.random() < 0.1:
                 self.reoptimizar_periodicamente()
             
-            # 4. Verificar cierres de operaciones locales
+            # 4. Actualización periódica de monedas dinámicas (cada ~10 ciclos)
+            if random.random() < 0.1:
+                if self.config.get('simbolos_dinamicos', False) and self.bitget_client:
+                    print("\n🔄 Actualización programada de monedas dinámicas...")
+                    self.actualizar_moned()
+            
+            # 5. Verificar cierres de operaciones locales
             cierres = self.verificar_cierre_operaciones()
             if cierres:
                 print(f"     📊 Operaciones cerradas: {', '.join(cierres)}")
             
-            # 5. Guardar estado después del análisis
+            # 6. Guardar estado después del análisis
             self.guardar_estado()
             
-            # 6. Escanear mercado para nuevas señales
+            # 7. Escanear mercado para nuevas señales
             return self.escanear_mercado()
             
         except Exception as e:
@@ -4285,11 +4380,15 @@ class TradingBot:
         print("🔄 REEVALUACIÓN: CADA 2 HORAS")
         print("🏦 INTEGRACIÓN: BITGET FUTUROS API (Dinero REAL)")
         print("=" * 70)
-        print("💱 Monedas: TOP 100 por volumen (actualización dinámica)")
+        print(f"💱 Símbolos: {len(self.moned) if self.moned else 'Dinámicos (se actualizarán al iniciar)'}")
         print(f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}")
         print(f"🕯️ Velas: {self.config.get('velas_options', [])}")
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
         print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
+        if self.config.get('simbolos_dinamicos', False):
+            print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 50 por volumen)")
+        else:
+            print(f"📊 Modo: 🔴 SÍMBOLOS FIJOS")
         if self.bitget_client:
             print(f"🤖 BITGET FUTUROS: ✅ API Conectada")
             print(f"⚡ Apalancamiento: {self.leverage_por_defecto}x")
@@ -4311,19 +4410,25 @@ class TradingBot:
             print(f"🤖 BITGET FUTUROS: ❌ No configurado (solo señales)")
         print("=" * 70)
         print("\n🚀 INICIANDO BOT...")
-        
+
+        # ACTUALIZACIÓN INICIAL DE MONEDAS DINÁMICAS
+        print("\n📊 INICIALIZANDO MONEDAS DINÁMICAS POR VOLUMEN...")
+        if self.bitget_client:
+            if self.actualizar_moned():
+                print(f"✅ Monedas dinámicas inicializadas: {len(self.moned)} símbolos")
+            else:
+                print("⚠️ Error inicializando monedas dinámicas, usando fallback")
+        else:
+            print("⚠️ No hay cliente Bitget configurado para actualizar monedas")
+            # Intentar con configuración vacía
+            self.moned = self.config.get('symbols', [])
+            print(f"ℹ️ Usando símbolos de configuración: {len(self.moned)}")
+
         # SINCRONIZACIÓN INICIAL CON BITGET
         if self.bitget_client:
             print("\n🔄 REALIZANDO SINCRONIZACIÓN INICIAL CON BITGET...")
             self.sincronizar_con_bitget()
             print("✅ Sincronización inicial completada")
-        
-        # ACTUALIZAR MONEDAS DINÁMICAMENTE (Top 100 por volumen)
-        print("\n🔄 ACTUALIZANDO LISTA DE MONEDAS POR VOLUMEN...")
-        if self.actualizar_monededas():
-            print(f"✅ {len(self.monededas)} monedas cargadas para escaneo")
-        else:
-            print("⚠️ Error actualizando monedas, usando lista vacía")
         
         try:
             while True:
@@ -4370,9 +4475,9 @@ def crear_config_desde_entorno():
         'scan_interval_minutes': 5,  
         'timeframes': ['15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
-        # La lista de symbols ahora se genera dinámicamente mediante actualizar_monededas()
-        # Esto elimina los símbolos por defecto y usa el Top 100 por volumen
+        # Símbolos vacíos - Se generarán dinámicamente en actualizar_moned()
         'symbols': [],
+        'simbolos_dinamicos': True,  # Flag para indicar modo dinámico
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
         'telegram_chat_ids': telegram_chat_ids,
         'auto_optimize': True,
