@@ -4216,7 +4216,7 @@ class TradingBot:
                     highest_high = df['High'].iloc[i-period+1:i+1].max()
                     lowest_low = df['Low'].iloc[i-period+1:i+1].min()
                     if highest_high == lowest_low:
-                        k = 
+                        k = 50
                     else:
                         k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
                     stoch_k_values.append(k)
