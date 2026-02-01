@@ -4052,7 +4052,7 @@ class TradingBot:
                 d = sum(k_smoothed[-d_period:]) / d_period
                 k_final = k_smoothed[-1]
                 return k_final, d
-        return , 
+        return 50, 50 
 
     def calcular_regresion_lineal(self, x, y):
         if len(x) != len(y) or len(x) == 0:
