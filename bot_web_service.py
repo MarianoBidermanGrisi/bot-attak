@@ -1367,6 +1367,47 @@ class BitgetClient:
             logger.error(f"Error en get_klines BITGET FUTUROS: {e}")
             return None
 
+    def get_all_tickers(self):
+        """
+        Obtiene todos los tickers disponibles en Bitget Futures.
+        Returns un diccionario con los símbolos como claves.
+        """
+        try:
+            request_path = '/api/v2/mix/market/contracts'
+            params = {'productType': 'USDT-FUTURES'}
+            
+            response = requests.get(
+                self.base_url + request_path,
+                params=params,
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    contracts = data.get('data', [])
+                    
+                    # Convertir al formato de ticker similar a CCXT
+                    tickers = {}
+                    for contract in contracts:
+                        symbol = contract.get('symbol')
+                        if symbol:
+                            tickers[symbol] = {
+                                'symbol': symbol,
+                                'lastPrice': float(contract.get('lastPr', 0)),
+                                'quoteVolume': float(contract.get('vol24h', 0)),
+                                'high24h': float(contract.get('high24h', 0)),
+                                'low24h': float(contract.get('low24h', 0)),
+                            }
+                    
+                    logger.info(f"✅ Obtenidos {len(tickers)} tickers de Bitget Futures")
+                    return tickers
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error obteniendo todos los tickers: {e}")
+            return None
+
 # ---------------------------
 # FUNCIONES DE OPERACIONES BITGET FUTUROS
 # ---------------------------
@@ -1764,6 +1805,8 @@ class TradingBot:
         # Tracking de breakouts y reingresos
         self.breakouts_detectados = {}
         self.esperando_reentry = {}
+        # Monedas supervisadas (se actualizan dinámicamente con actualizar_monededas())
+        self.monededas = []
         self.estado_file = config.get('estado_file', 'estado_bot.json')
         self.cargar_estado()
         
@@ -1923,13 +1966,17 @@ class TradingBot:
         Actualiza dinámicamente la lista de monedas supervisadas basándose en el volumen de negociación.
         Elimina los símbolos por defecto y selecciona las 50 monedas con mayor volumen en USDT.
         """
-        if self.exchange is None:
-            print("[ERROR] Exchange no inicializado para actualizar monedas")
+        if self.bitget_client is None:
+            print("[ERROR] BitgetClient no inicializado para actualizar monedas")
             return False
         
         try:
-            print("🔄 Obteniendo tickers del exchange...")
-            tickers = self.exchange.fetch_tickers()
+            print("🔄 Obteniendo tickers de Bitget Futures...")
+            tickers = self.bitget_client.get_all_tickers()
+            
+            if not tickers:
+                print("[ERROR] No se pudieron obtener los tickers")
+                return False
             
             # Filtrar símbolos que terminan en USDT y no están en la lista de omitidos
             filtrados = [
@@ -3372,9 +3419,16 @@ class TradingBot:
 
     def escanear_mercado(self):
         """Escanea el mercado con estrategia Breakout + Reentry"""
-        print(f"\n🔍 Escaneando {len(self.config.get('symbols', []))} símbolos (Estrategia: Breakout + Reentry)...")
+        # Usar monedas actualizadas dinámicamente o lista vacía si no hay
+        simbolos_a_escanear = getattr(self, 'monedas', [])
+        if not simbolos_a_escanear:
+            print("\n⚠️ No hay monedas configuradas. Llamando a actualizar_monededas()...")
+            self.actualizar_monededas()
+            simbolos_a_escanear = getattr(self, 'monedas', [])
+        
+        print(f"\n🔍 Escaneando {len(simbolos_a_escanear)} símbolos (Estrategia: Breakout + Reentry - Top Volumen)...")
         senales_encontradas = 0
-        for simbolo in self.config.get('symbols', []):
+        for simbolo in simbolos_a_escanear:
             try:
                 if simbolo in self.operaciones_activas:
                     # Verificar si es operación manual del usuario
@@ -4231,7 +4285,7 @@ class TradingBot:
         print("🔄 REEVALUACIÓN: CADA 2 HORAS")
         print("🏦 INTEGRACIÓN: BITGET FUTUROS API (Dinero REAL)")
         print("=" * 70)
-        print(f"💱 Símbolos: {len(self.config.get('symbols', []))} monedas")
+        print("💱 Monedas: TOP 50 por volumen (actualización dinámica)")
         print(f"⏰ Timeframes: {', '.join(self.config.get('timeframes', []))}")
         print(f"🕯️ Velas: {self.config.get('velas_options', [])}")
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
@@ -4263,6 +4317,13 @@ class TradingBot:
             print("\n🔄 REALIZANDO SINCRONIZACIÓN INICIAL CON BITGET...")
             self.sincronizar_con_bitget()
             print("✅ Sincronización inicial completada")
+        
+        # ACTUALIZAR MONEDAS DINÁMICAMENTE (Top 50 por volumen)
+        print("\n🔄 ACTUALIZANDO LISTA DE MONEDAS POR VOLUMEN...")
+        if self.actualizar_monededas():
+            print(f"✅ {len(self.monededas)} monedas cargadas para escaneo")
+        else:
+            print("⚠️ Error actualizando monedas, usando lista vacía")
         
         try:
             while True:
@@ -4309,31 +4370,9 @@ def crear_config_desde_entorno():
         'scan_interval_minutes': 5,  
         'timeframes': ['15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
-        'symbols': [
-            # SOLO LOS QUE SÍ FUNCIONARON EN TU LOG (65)
-            'PEPEUSDT', 'WIFUSDT', 'FLOKIUSDT', 'SHIBUSDT', 'POPCATUSDT',
-            'CHILLGUYUSDT', 'PNUTUSDT', 'MEWUSDT', 'FARTCOINUSDT', 'DOGEUSDT',
-            'VINEUSDT', 'HIPPOUSDT', 'TRXUSDT', 'XLMUSDT', 'XRPUSDT',
-            'ADAUSDT', 'ATOMUSDT', 'LINKUSDT', 'UNIUSDT',
-            'SUSHIUSDT', 'CRVUSDT', 'SNXUSDT', 'SANDUSDT', 'MANAUSDT',
-            'AXSUSDT', 'LRCUSDT', 'ARBUSDT', 'OPUSDT', 'INJUSDT',
-            'FILUSDT', 'SUIUSDT', 'AAVEUSDT', 'ENSUSDT',
-            'LDOUSDT', 'POLUSDT', 'ALGOUSDT', 'QNTUSDT',
-            '1INCHUSDT', 'CVCUSDT', 'STGUSDT', 'ENJUSDT', 'GALAUSDT',
-            'MAGICUSDT', 'REZUSDT', 'BLURUSDT', 'HMSTRUSDT', 'BEATUSDT',
-            'ZEREBROUSDT', 'ZENUSDT', 'CETUSUSDT', 'DRIFTUSDT', 'PHAUSDT',
-            'API3USDT', 'ACHUSDT', 'SPELLUSDT', 'YGGUSDT',
-            'GMXUSDT', 'C98USDT',
-            # Nuevos símbolos añadidos
-            'XMRUSDT', 'DOTUSDT', 'BNBUSDT', 'SOLUSDT', 'AVAXUSDT',
-            'VETUSDT', 'BCHUSDT', 'NEOUSDT', 'TIAUSDT',
-            'TONUSDT', 'TRUMPUSDT',
-            # Símbolos adicionales añadidos por el usuario
-            'IPUSDT', 'TAOUSDT', 'XPLUSDT', 'HOLOUSDT', 'MONUSDT',
-            'OGUSDT', 'MSTRUSDT', 'VIRTUALUSDT', 
-            'TLMUSDT', 'BOMEUSDT', 'KAITOUSDT', 'APEUSDT', 'METUSDT',
-            'TUTUSDT'
-        ],
+        # La lista de symbols ahora se genera dinámicamente mediante actualizar_monededas()
+        # Esto elimina los símbolos por defecto y usa el Top 50 por volumen
+        'symbols': [],
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
         'telegram_chat_ids': telegram_chat_ids,
         'auto_optimize': True,
