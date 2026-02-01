@@ -4030,7 +4030,7 @@ class TradingBot:
 
     def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
         if len(datos_mercado['cierres']) < period:
-            return , 
+            return 50, 50 
         cierres = datos_mercado['cierres']
         maximos = datos_mercado['maximos']
         minimos = datos_mercado['minimos']
@@ -4039,7 +4039,7 @@ class TradingBot:
             highest_high = max(maximos[i-period+1:i+1])
             lowest_low = min(minimos[i-period+1:i+1])
             if highest_high == lowest_low:
-                k = 
+                k = 50
             else:
                 k = 100 * (cierres[i] - lowest_low) / (highest_high - lowest_low)
             k_values.append(k)
