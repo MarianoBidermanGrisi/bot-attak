@@ -2218,7 +2218,7 @@ class TradingBot:
     def actualizar_moned(self):
         """
         Actualiza la lista de monedas dinámicamente basándose en el volumen de trading.
-        Selecciona los 50 símbolos con mayor volumen que terminan en ':USDT'.
+        Selecciona los 100 símbolos con mayor volumen que terminan en ':USDT'.
         Excluye los símbolos definidos en SIMBOLOS_OMITIDOS.
         """
         try:
@@ -2250,10 +2250,10 @@ class TradingBot:
                 except (KeyError, TypeError, ValueError):
                     return 0
 
-            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:50]
+            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:100]
             self.ultima_actualizacion_moned = datetime.now()
 
-            print(f"[SISTEMA] ✅ 50 Monedas actualizadas dinámicamente (Top Volumen)")
+            print(f"[SISTEMA] ✅ 100 Monedas actualizadas dinámicamente (Top Volumen)")
             print(f"   📊 Total símbolos procesados: {len(filtrados)}")
             print(f"   🚫 Símbolos omitidos: {len(SIMBOLOS_OMITIDOS)}")
             print(f"   💱 Monedas seleccionadas: {len(self.moned)}")
@@ -2274,20 +2274,72 @@ class TradingBot:
         Returns:
             list: Lista de símbolos a analizar
         """
-        # Si tenemos monedas dinámicas y fueron actualizadas recientemente
+        # DEPURACIÓN
+        logger.info(f"🔍 DEBUG obtener_simbolos_analisis:")
+        logger.info(f"   - self.moned: {self.moned}")
+        logger.info(f"   - len(self.moned): {len(self.moned) if self.moned else 0}")
+        logger.info(f"   - self.ultima_actualizacion_moned: {self.ultima_actualizacion_moned}")
+        
+        # Si tenemos monedas dinámicas
         if self.moned and len(self.moned) > 0:
             # Verificar si la última actualización es reciente (menos de 1 hora)
             if self.ultima_actualizacion_moned:
                 tiempo_desde_actualizacion = (datetime.now() - self.ultima_actualizacion_moned).total_seconds()
+                logger.info(f"   - Tiempo desde última actualización: {tiempo_desde_actualizacion:.1f}s")
                 if tiempo_desde_actualizacion < 3600:  # 1 hora en segundos
+                    logger.info(f"✅ Usando {len(self.moned)} monedas dinámicas (actualizadas hace {tiempo_desde_actualizacion:.1f}s)")
                     return self.moned
-            # Si no hay actualización reciente, actualizar
-            self.actualizar_moned()
-            if self.moned:
+                else:
+                    logger.info(f"⏰ Monedas desactualizadas (más de 1 hora), actualizando...")
+            else:
+                logger.info(f"⏰ No hay fecha de actualización, actualizando...")
+            
+            # Actualizar monedas si no hay actualización reciente
+            if self.bitget_client:
+                self.actualizar_moned()
+            else:
+                logger.warning("⚠️ No hay Bitget client para actualizar monedas")
+            
+            if self.moned and len(self.moned) > 0:
+                logger.info(f"✅ Monedas actualizadas: {len(self.moned)} símbolos")
                 return self.moned
+        else:
+            logger.info(f"⚠️ No hay monedas dinámicas, actualizando...")
+            # Intentar actualizar monedas si están vacías
+            if self.bitget_client:
+                self.actualizar_moned()
+            else:
+                logger.warning("⚠️ No hay Bitget client disponible")
         
-        # Fallback: usar símbolos de la configuración
-        return self.config.get('symbols', [])
+        # DEPURACIÓN: Verificar si hay monedas después de actualizar
+        if self.moned and len(self.moned) > 0:
+            logger.info(f"✅ Monedas cargadas: {len(self.moned)} símbolos")
+            return self.moned
+        
+        # FALLBACK: Si aún no hay monedas, usar lista de emergencia
+        logger.warning("⚠️ WARNING: Usando símbolos de emergencia por fallo en actualización dinámica")
+        simbolos_emergencia = [
+            'PEPEUSDT', 'WIFUSDT', 'FLOKIUSDT', 'SHIBUSDT', 'POPCATUSDT',
+            'CHILLGUYUSDT', 'PNUTUSDT', 'MEWUSDT', 'FARTCOINUSDT', 'DOGEUSDT',
+            'VINEUSDT', 'HIPPOUSDT', 'TRXUSDT', 'XLMUSDT', 'XRPUSDT',
+            'ADAUSDT', 'ATOMUSDT', 'LINKUSDT', 'UNIUSDT',
+            'SUSHIUSDT', 'CRVUSDT', 'SNXUSDT', 'SANDUSDT', 'MANAUSDT',
+            'AXSUSDT', 'LRCUSDT', 'ARBUSDT', 'OPUSDT', 'INJUSDT',
+            'FILUSDT', 'SUIUSDT', 'AAVEUSDT', 'ENSUSDT',
+            'LDOUSDT', 'POLUSDT', 'ALGOUSDT', 'QNTUSDT',
+            '1INCHUSDT', 'CVCUSDT', 'STGUSDT', 'ENJUSDT', 'GALAUSDT',
+            'MAGICUSDT', 'REZUSDT', 'BLURUSDT', 'HMSTRUSDT', 'BEATUSDT',
+            'ZEREBROUSDT', 'ZENUSDT', 'CETUSUSDT', 'DRIFTUSDT', 'PHAUSDT',
+            'API3USDT', 'ACHUSDT', 'SPELLUSDT', 'YGGUSDT',
+            'GMXUSDT', 'C98USDT','XMRUSDT', 'DOTUSDT', 'BNBUSDT', 'SOLUSDT', 'AVAXUSDT',
+            'VETUSDT', 'BCHUSDT', 'NEOUSDT', 'TIAUSDT',
+            'TONUSDT', 'TRUMPUSDT','IPUSDT', 'TAOUSDT', 'XPLUSDT', 'HOLOUSDT', 'MONUSDT',
+            'OGUSDT', 'MSTRUSDT', 'VIRTUALUSDT', 
+            'TLMUSDT', 'BOMEUSDT', 'KAITOUSDT', 'APEUSDT', 'METUSDT',
+            'TUTUSDT'
+        ]
+        logger.info(f"🆘 Usando {len(simbolos_emergencia)} símbolos de emergencia")
+        return simbolos_emergencia
 
     def liberar_simbolo(self, simbolo):
         """
@@ -2899,10 +2951,10 @@ class TradingBot:
                 print(f"   🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
         print(f"   🔍 Buscando configuración óptima para {simbolo}...")
         timeframes = self.config.get('timeframes', ['15m', '30m', '1h', '4h'])
-        velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
+        velas_options = self.config.get('velas_options', [80, 100, 120, 1, 200])
         mejor_config = None
         mejor_puntaje = -999999
-        prioridad_timeframe = {'15m': 200, '15m': 150, '15m': 120, '15m': 100, '30m': 80}
+        prioridad_timeframe = {'15m': 200, '15m': 1, '15m': 120, '15m': 100, '30m': 80}
         for timeframe in timeframes:
             for num_velas in velas_options:
                 try:
@@ -2918,7 +2970,7 @@ class TradingBot:
                         ancho_actual = canal_info['ancho_canal_porcentual']
                         if ancho_actual >= self.config.get('min_channel_width_percent', 4.0):
                             puntaje_ancho = ancho_actual * 10
-                            puntaje_timeframe = prioridad_timeframe.get(timeframe, 50) * 100
+                            puntaje_timeframe = prioridad_timeframe.get(timeframe, ) * 100
                             puntaje_total = puntaje_timeframe + puntaje_ancho
                             if puntaje_total > mejor_puntaje:
                                 mejor_puntaje = puntaje_total
@@ -2945,7 +2997,7 @@ class TradingBot:
                             canal_info['r2_score'] >= 0.4):
                             ancho_actual = canal_info['ancho_canal_porcentual']
                             puntaje_ancho = ancho_actual * 10
-                            puntaje_timeframe = prioridad_timeframe.get(timeframe, 50) * 100
+                            puntaje_timeframe = prioridad_timeframe.get(timeframe, ) * 100
                             puntaje_total = puntaje_timeframe + puntaje_ancho
                             if puntaje_total > mejor_puntaje:
                                 mejor_puntaje = puntaje_total
@@ -3220,12 +3272,12 @@ class TradingBot:
             stoch_k_values = []
             for i in range(len(df)):
                 if i < period - 1:
-                    stoch_k_values.append(50)
+                    stoch_k_values.append()
                 else:
                     highest_high = df['High'].iloc[i-period+1:i+1].max()
                     lowest_low = df['Low'].iloc[i-period+1:i+1].min()
                     if highest_high == lowest_low:
-                        k = 50
+                        k = 
                     else:
                         k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
                     stoch_k_values.append(k)
@@ -3978,7 +4030,7 @@ class TradingBot:
 
     def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
         if len(datos_mercado['cierres']) < period:
-            return 50, 50
+            return , 
         cierres = datos_mercado['cierres']
         maximos = datos_mercado['maximos']
         minimos = datos_mercado['minimos']
@@ -3987,7 +4039,7 @@ class TradingBot:
             highest_high = max(maximos[i-period+1:i+1])
             lowest_low = min(minimos[i-period+1:i+1])
             if highest_high == lowest_low:
-                k = 50
+                k = 
             else:
                 k = 100 * (cierres[i] - lowest_low) / (highest_high - lowest_low)
             k_values.append(k)
@@ -4000,7 +4052,7 @@ class TradingBot:
                 d = sum(k_smoothed[-d_period:]) / d_period
                 k_final = k_smoothed[-1]
                 return k_final, d
-        return 50, 50
+        return , 
 
     def calcular_regresion_lineal(self, x, y):
         if len(x) != len(y) or len(x) == 0:
@@ -4159,12 +4211,12 @@ class TradingBot:
             stoch_k_values = []
             for i in range(len(df)):
                 if i < period - 1:
-                    stoch_k_values.append(50)
+                    stoch_k_values.append()
                 else:
                     highest_high = df['High'].iloc[i-period+1:i+1].max()
                     lowest_low = df['Low'].iloc[i-period+1:i+1].min()
                     if highest_high == lowest_low:
-                        k = 50
+                        k = 
                     else:
                         k = 100 * (df['Close'].iloc[i] - lowest_low) / (highest_high - lowest_low)
                     stoch_k_values.append(k)
@@ -4386,7 +4438,7 @@ class TradingBot:
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
         print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
         if self.config.get('simbolos_dinamicos', False):
-            print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 50 por volumen)")
+            print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 100 por volumen)")
         else:
             print(f"📊 Modo: 🔴 SÍMBOLOS FIJOS")
         if self.bitget_client:
