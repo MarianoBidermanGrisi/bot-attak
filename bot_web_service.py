@@ -4052,7 +4052,8 @@ class TradingBot:
         eliminados = 0
         simbolos_a_eliminar = []
     
-        for simbolo, info in self.esperando_reentry.items():tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
+        for simbolo, info in self.esperando_reentry.items():
+            tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
             if tiempo_espera > max_wait_minutes:
                 simbolos_a_eliminar.append(simbolo)
                 eliminados += 1
