@@ -151,14 +151,14 @@ def calcular_adx_di(high, low, close, length=14):
     di_plus = np.where(
         np.isnan(safe_tr),
         np.nan,
-        (smoothed_dm_plus / smoothed_true_range) * 100
+        (smoothed_dm_plus / np.where(smoothed_true_range == 0, np.nan, smoothed_true_range)) * 100
     )
     
     # DIMinus = SmoothedDirectionalMovementMinus / SmoothedTrueRange * 100
     di_minus = np.where(
         np.isnan(safe_tr),
         np.nan,
-        (smoothed_dm_minus / smoothed_true_range) * 100
+        (smoothed_dm_minus / np.where(smoothed_true_range == 0, np.nan, smoothed_true_range)) * 100
     )
     
     # DX = abs(DIPlus-DIMinus) / (DIPlus+DIMinus)*100
@@ -168,7 +168,7 @@ def calcular_adx_di(high, low, close, length=14):
     dx = np.where(
         di_sum == 0,
         0,
-        (di_diff / di_sum) * 100
+        (di_diff / np.where(di_sum == 0, np.nan, di_sum)) * 100
     )
     
     # ADX = sma(DX, length) - Media móvil simple de DX
@@ -563,29 +563,29 @@ class BitgetClient:
             product_type: Tipo de producto ('USDT-FUTURES' o 'USDT-MIX')
         
         Returns:
-            int: Apalancamiento máximo permitido, o 20 por defecto si hay error
+            int: Apalancamiento máximo permitido, o 5 por defecto si hay error
         """
         try:
             # Primero obtener la info del símbolo
             symbol_info = self.get_symbol_info(symbol)
             if not symbol_info:
-                logger.warning(f"No se pudo obtener info de {symbol}, usando leverage 20x por defecto")
-                return 20
+                logger.warning(f"No se pudo obtener info de {symbol}, usando leverage 5x por defecto")
+                return 5
             
             # Obtener el leverage máximo del exchange
             # La API de Bitget devuelve 'openMaxLeverage' en la info del contrato
-            max_leverage = symbol_info.get('openMaxLeverage', 20)
+            max_leverage = symbol_info.get('openMaxLeverage', 5)
             
             # Asegurar que sea un valor válido
             if not max_leverage or max_leverage < 1:
-                max_leverage = 20
+                max_leverage = 5
             
             logger.info(f"📊 {symbol}: Apalancamiento máximo permitido = {max_leverage}x")
             return int(max_leverage)
             
         except Exception as e:
             logger.error(f"Error obteniendo leverage máximo para {symbol}: {e}")
-            return 20  # Fallback seguro
+            return 5  # Fallback seguro
 
     def place_tpsl_order(self, symbol, hold_side, trigger_price, order_type='stop_loss', stop_loss_price=None, take_profit_price=None, trade_direction=None):
         """
@@ -1420,14 +1420,19 @@ class BitgetClient:
             logger.error(f"Error obteniendo saldo de cuenta: {e}")
             return None
 
-    def get_klines(self, symbol, interval='5m', limit=200):
+    def get_klines(self, symbol, interval='15m', limit=200):
         """Obtener velas (datos de mercado) de BITGET FUTUROS"""
         try:
             interval_map = {
                 '15m': '15m', '30m': '30m', '1h': '1H',
                 '4h': '4H'
             }
-            bitget_interval = interval_map.get(interval, '5m')
+            bitget_interval = interval_map.get(interval)
+            if bitget_interval is None:
+                logger.error(f"Intervalo '{interval}' no soportado. Timeframes válidos: {list(interval_map.keys())}")
+                return None
+
+            
             request_path = f'/api/v2/mix/market/candles'
             params = {
                 'symbol': symbol,
@@ -1448,6 +1453,7 @@ class BitgetClient:
                     candles = data.get('data', [])
                     return candles
                 else:
+                    # Retry con USDT-MIX como fallback
                     params['productType'] = 'USDT-MIX'
                     response = requests.get(
                         self.base_url + request_path,
@@ -1533,7 +1539,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         time.sleep(1)  # Esperar un poco más para asegurar que se aplique
         
         # 3. Obtener precio actual
-        klines = bitget_client.get_klines(simbolo, '1m', 1)
+        klines = bitget_client.get_klines(simbolo, '15m', 1)
         if not klines or len(klines) == 0:
             logger.error(f"No se pudo obtener precio de {simbolo} en BITGET FUTUROS")
             return None
@@ -1882,7 +1888,7 @@ class TradingBot:
         # Configuración de operaciones automáticas
         self.ejecutar_operaciones_automaticas = config.get('ejecutar_operaciones_automaticas', False)
         self.capital_por_operacion = config.get('capital_por_operacion', None)  # 3% del saldo (dinámico)
-        self.leverage_por_defecto = config.get('leverage_por_defecto', 20)  # 20x apalancamiento
+        self.leverage_por_defecto = config.get('leverage_por_defecto', 5)  # 5x apalancamiento
         
         parametros_optimizados = None
         if self.auto_optimize:
@@ -2250,10 +2256,10 @@ class TradingBot:
                 except (KeyError, TypeError, ValueError):
                     return 0
 
-            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:100]
+            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:500]
             self.ultima_actualizacion_moned = datetime.now()
 
-            print(f"[SISTEMA] ✅ 100 Monedas actualizadas dinámicamente (Top Volumen)")
+            print(f"[SISTEMA] ✅ 500 Monedas actualizadas dinámicamente (Top Volumen)")
             print(f"   📊 Total símbolos procesados: {len(filtrados)}")
             print(f"   🚫 Símbolos omitidos: {len(SIMBOLOS_OMITIDOS)}")
             print(f"   💱 Monedas seleccionadas: {len(self.moned)}")
@@ -2765,7 +2771,7 @@ class TradingBot:
                             logger.info(f"ℹ️ Órdenes TP/SL para {simbolo}: SL={'OK' if sl_activa else 'FALTA'}, TP={'OK' if tp_activa else 'FALTA'}")
                         
                         # Obtener precio actual
-                        klines = self.bitget_client.get_klines(simbolo, '1m', 1)
+                        klines = self.bitget_client.get_klines(simbolo, '15m', 1)
                         if not klines:
                             continue
                         
@@ -2855,7 +2861,7 @@ class TradingBot:
             
             # Obtener precio de salida si no se proporcionó
             if precio_salida is None and self.bitget_client:
-                klines = self.bitget_client.get_klines(simbolo, '1m', 1)
+                klines = self.bitget_client.get_klines(simbolo, '15m', 1)
                 if klines:
                     klines.reverse()
                     precio_salida = float(klines[0][4])
@@ -2951,10 +2957,10 @@ class TradingBot:
                 print(f"   🔄 Reevaluando configuración para {simbolo} (pasó 2 horas)")
         print(f"   🔍 Buscando configuración óptima para {simbolo}...")
         timeframes = self.config.get('timeframes', ['15m', '30m', '1h', '4h'])
-        velas_options = self.config.get('velas_options', [80, 100, 120, 1, 200])
+        velas_options = self.config.get('velas_options', [80, 100, 120, 150, 200])
         mejor_config = None
         mejor_puntaje = -999999
-        prioridad_timeframe = {'15m': 200, '15m': 1, '15m': 120, '15m': 100, '30m': 80}
+        prioridad_timeframe = {'15m': 4, '30m': 3, '1h': 2, '4h': 1}
         for timeframe in timeframes:
             for num_velas in velas_options:
                 try:
@@ -2970,7 +2976,7 @@ class TradingBot:
                         ancho_actual = canal_info['ancho_canal_porcentual']
                         if ancho_actual >= self.config.get('min_channel_width_percent', 4.0):
                             puntaje_ancho = ancho_actual * 10
-                            puntaje_timeframe = prioridad_timeframe.get(timeframe, ) * 100
+                            puntaje_timeframe = prioridad_timeframe.get(timeframe,0) * 100
                             puntaje_total = puntaje_timeframe + puntaje_ancho
                             if puntaje_total > mejor_puntaje:
                                 mejor_puntaje = puntaje_total
@@ -2982,6 +2988,7 @@ class TradingBot:
                                 }
                 except Exception:
                     continue
+        # Segundo bucle sin filtro de ancho de canal
         if not mejor_config:
             for timeframe in timeframes:
                 for num_velas in velas_options:
@@ -2997,7 +3004,7 @@ class TradingBot:
                             canal_info['r2_score'] >= 0.4):
                             ancho_actual = canal_info['ancho_canal_porcentual']
                             puntaje_ancho = ancho_actual * 10
-                            puntaje_timeframe = prioridad_timeframe.get(timeframe, ) * 100
+                            puntaje_timeframe = prioridad_timeframe.get(timeframe, 0) * 100
                             puntaje_total = puntaje_timeframe + puntaje_ancho
                             if puntaje_total > mejor_puntaje:
                                 mejor_puntaje = puntaje_total
@@ -3272,7 +3279,7 @@ class TradingBot:
             stoch_k_values = []
             for i in range(len(df)):
                 if i < period - 1:
-                    stoch_k_values.append()
+                    stoch_k_values.append(np.nan)
                 else:
                     highest_high = df['High'].iloc[i-period+1:i+1].max()
                     lowest_low = df['Low'].iloc[i-period+1:i+1].min()
@@ -3331,10 +3338,10 @@ class TradingBot:
             breakout_line = [precio_breakout] * len(df)
             if tipo_breakout == "BREAKOUT_LONG":
                 color_breakout = "#D68F01"
-                titulo_extra = "🚀 RUPTURA ALCISTA"
+                titulo_extra = "RUPTURA ALCISTA"
             else:
                 color_breakout = '#D68F01'
-                titulo_extra = "📉 RUPTURA BAJISTA"
+                titulo_extra = "RUPTURA BAJISTA"
             apds.append(mpf.make_addplot(breakout_line, color=color_breakout, linestyle='-', width=3, panel=0, alpha=0.8))
             # Stochastic
             apds.append(mpf.make_addplot(df['Stoch_K'], color='#00BFFF', width=1.5, panel=1, ylabel='Stochastic'))
@@ -3356,7 +3363,7 @@ class TradingBot:
             
             # Crear gráfico
             fig, axes = mpf.plot(df, type='candle', style='nightclouds',
-                               title=f'{simbolo} | {titulo_extra} | {config_optima["timeframe"]} | ⏳ ESPERANDO REENTRY',
+                               title=f'{simbolo} | {titulo_extra} | {config_optima["timeframe"]} | [ESPERANDO REENTRY]',
                                ylabel='Precio',
                                addplot=apds,
                                volume=False,
@@ -3406,11 +3413,11 @@ class TradingBot:
                 print(f"     ⏰ {simbolo} - Breakout detectado recientemente ({tiempo_desde_ultimo:.1f} min), omitiendo...")
                 return None
         # CORREGIR LÓGICA DE DETECCIÓN DE BREAKOUT
-        if direccion == "🟢 ALCISTA" and nivel_fuerza >= 2:
+        if direccion == "ALCISTA" and nivel_fuerza >= 2:
             if precio_cierre < soporte:  # Precio rompió hacia abajo el soporte
                 print(f"     🚀 {simbolo} - BREAKOUT LONG: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
                 return "BREAKOUT_LONG"
-        elif direccion == "🔴 BAJISTA" and nivel_fuerza >= 2:
+        elif direccion == "BAJISTA" and nivel_fuerza >= 2:
             if precio_cierre > resistencia:  # Precio rompió hacia arriba la resistencia
                 print(f"     📉 {simbolo} - BREAKOUT SHORT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
                 return "BREAKOUT_SHORT"
@@ -3999,7 +4006,7 @@ class TradingBot:
         return operaciones_cerradas
 
     def generar_mensaje_cierre(self, datos_operacion):
-        emoji = "🟢" if datos_operacion['resultado'] == "TP" else "🔴"
+        emoji = "OK" if datos_operacion['resultado'] == "TP" else "SL"
         color_emoji = "✅" if datos_operacion['resultado'] == "TP" else "❌"
         if datos_operacion['tipo'] == 'LONG':
             pnl_absoluto = datos_operacion['precio_salida'] - datos_operacion['precio_entrada']
@@ -4028,6 +4035,36 @@ class TradingBot:
         """
         return mensaje
 
+    def limpiar_breakouts_expirados(self, max_wait_minutes=120):
+ 
+        if not self.esperando_reentry:
+           return 0
+    
+        eliminados = 0
+        simbolos_a_eliminar = []
+    
+        for simbolo, info in self.esperando_reentry.items():tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
+        if tiempo_espera > max_wait_minutes:
+           simbolos_a_eliminar.append(simbolo)
+           eliminados += 1
+           print(f"   ⏰ {simbolo} - Expiró tiempo de espera ({tiempo_espera:.1f} min > {max_wait_minutes} min), eliminando...")
+    
+        # Eliminar los breakout expirados
+        for simbolo in simbolos_a_eliminar:
+            if simbolo in self.esperando_reentry:
+               del self.esperando_reentry[simbolo]
+        # También eliminar de breakouts_detectados si existe
+        if simbolo in self.breakouts_detectados:
+           del self.breakouts_detectados[simbolo]
+    
+        if eliminados > 0:
+           print(f"   🗑️ Total de breakout expirados eliminados: {eliminados}")
+           # Guardar estado después de la limpieza
+           self.guardar_estado()
+    
+           return eliminados
+    
+    
     def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
         if len(datos_mercado['cierres']) < period:
             return 50, 50 
@@ -4109,11 +4146,11 @@ class TradingBot:
 
     def determinar_direccion_tendencia(self, angulo_grados, umbral_minimo=1):
         if abs(angulo_grados) < umbral_minimo:
-            return "⚪ RANGO"
+            return "RANGO"
         elif angulo_grados > 0:
-            return "🟢 ALCISTA"
+            return "ALCISTA"
         else:
-            return "🔴 BAJISTA"
+            return "BAJISTA"
 
     def calcular_r2(self, y_real, x, pendiente, intercepto):
         if len(y_real) != len(x):
@@ -4211,7 +4248,7 @@ class TradingBot:
             stoch_k_values = []
             for i in range(len(df)):
                 if i < period - 1:
-                    stoch_k_values.append()
+                    stoch_k_values.append(np.nan)
                 else:
                     highest_high = df['High'].iloc[i-period+1:i+1].max()
                     lowest_low = df['Low'].iloc[i-period+1:i+1].min()
@@ -4361,6 +4398,11 @@ class TradingBot:
     def ejecutar_analisis(self):
         """Ejecutar análisis completo incluyendo sincronización con Bitget"""
         try:
+            # 0. LIMPIEZA DE BREAKOUT EXPIRADOS - siempre ejecutar primero
+            max_wait = self.config.get('max_wait_minutes', 120)
+            self.limpiar_breakouts_expirados(max_wait)
+            
+            
             # 1. Sincronización con Bitget (cada ciclo)
             if self.bitget_client:
                 self.sincronizar_con_bitget()
@@ -4414,7 +4456,7 @@ class TradingBot:
             print(f"   🤖 BITGET FUTUROS: ❌ No configurado")
         if self.operaciones_activas:
             for simbolo, op in self.operaciones_activas.items():
-                estado = "🟢 LONG" if op['tipo'] == 'LONG' else "🔴 SHORT"
+                estado = "LONG" if op['tipo'] == 'LONG' else "SHORT"
                 ancho_canal = op.get('ancho_canal_porcentual', 0)
                 timeframe = op.get('timeframe_utilizado', 'N/A')
                 velas = op.get('velas_utilizadas', 0)
@@ -4427,7 +4469,6 @@ class TradingBot:
     def iniciar(self):
         print("\n" + "=" * 70)
         print("🤖 BOT DE TRADING - ESTRATEGIA BREAKOUT + REENTRY")
-        print("🎯 PRIORIDAD: TIMEFRAMES CORTOS (1m > 3m > 5m > 15m > 30m)")
         print("💾 PERSISTENCIA: ACTIVADA")
         print("🔄 REEVALUACIÓN: CADA 2 HORAS")
         print("🏦 INTEGRACIÓN: BITGET FUTUROS API (Dinero REAL)")
@@ -4438,9 +4479,9 @@ class TradingBot:
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
         print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
         if self.config.get('simbolos_dinamicos', False):
-            print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 100 por volumen)")
+            print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 500 por volumen)")
         else:
-            print(f"📊 Modo: 🔴 SÍMBOLOS FIJOS")
+            print(f"📊 Modo: FIJOS")
         if self.bitget_client:
             print(f"🤖 BITGET FUTUROS: ✅ API Conectada")
             print(f"⚡ Apalancamiento: {self.leverage_por_defecto}x")
@@ -4524,12 +4565,14 @@ def crear_config_desde_entorno():
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 5,  
+        'scan_interval_minutes': 15,  
         'timeframes': ['15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
         # Símbolos vacíos - Se generarán dinámicamente en actualizar_moned()
         'symbols': [],
         'simbolos_dinamicos': True,  # Flag para indicar modo dinámico
+         # NUEVO: Tiempo máximo de espera para breakout
+        'max_wait_minutes': int(os.environ.get('MAX_WAIT_MINUTES', '120')),
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
         'telegram_chat_ids': telegram_chat_ids,
         'auto_optimize': True,
@@ -4542,7 +4585,7 @@ def crear_config_desde_entorno():
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '20')), 20)
+        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '5')), 5)
     }
 
 # ---------------------------
