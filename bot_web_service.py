@@ -1379,10 +1379,19 @@ class BitgetClient:
                 cantidad_contratos = round(cantidad_contratos / size_multiplier) * size_multiplier
                 logger.info(f"🔢 {symbol}: aplicado multiplicador {size_multiplier}x = {cantidad_contratos}")
             
-            # Verificar mínimo
+            
+            # Verificar mínimo - CORRECCIÓN DEL BUG
             if cantidad_contratos < min_trade_num:
-                cantidad_contratos = min_trade_num
-                logger.info(f"⚠️ {symbol}: ajustado a mínimo = {min_trade_num}")
+                # OPCIÓN 1: Redondear hacia ABAJO (recomendado para respetar 3%)
+                cantidad_contratos = math.floor(min_trade_num * 1000) / 1000  # Redondear hacia abajo
+                logger.warning(f"⚠️ {symbol}: cantidad {cantidad_contratos} < mínimo {min_trade_num}")
+                logger.warning(f"   🔧 Redondeando hacia ABAJO para respetar límite de 3%")
+                # Si sigue siendo menor que el mínimo después de redondear, LA OPERACIÓN DEBE FALLAR
+                if cantidad_contratos < min_trade_num:
+                    logger.error(f"❌ {symbol}: No se puede ajustar sin exceder 3% de margen")
+                    logger.error(f"   📊 Mínimo exchange: {min_trade_num}")
+                    logger.error(f"   📊 3% del saldo permite máximo: {margin_usdt_objetivo / leverage * precio_actual:.6f} contratos")
+                    return None  # ❌ Rechazar la operación
             
             # Validación final - MANEJAR CASOS ESPECIALES
             if escala_actual == 0:
@@ -4565,7 +4574,7 @@ def crear_config_desde_entorno():
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
         'min_rr_ratio': 1.2,
-        'scan_interval_minutes': 15,  
+        'scan_interval_minutes': 30,  
         'timeframes': ['15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
         # Símbolos vacíos - Se generarán dinámicamente en actualizar_moned()
