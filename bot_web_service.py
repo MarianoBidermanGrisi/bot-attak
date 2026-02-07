@@ -4047,31 +4047,31 @@ class TradingBot:
     def limpiar_breakouts_expirados(self, max_wait_minutes=120):
  
         if not self.esperando_reentry:
-           return 0
+            return 0
     
         eliminados = 0
         simbolos_a_eliminar = []
     
         for simbolo, info in self.esperando_reentry.items():tiempo_espera = (datetime.now() - info['timestamp']).total_seconds() / 60
-        if tiempo_espera > max_wait_minutes:
-           simbolos_a_eliminar.append(simbolo)
-           eliminados += 1
-           print(f"   ⏰ {simbolo} - Expiró tiempo de espera ({tiempo_espera:.1f} min > {max_wait_minutes} min), eliminando...")
+            if tiempo_espera > max_wait_minutes:
+                simbolos_a_eliminar.append(simbolo)
+                eliminados += 1
+                print(f"   ⏰ {simbolo} - Expiró tiempo de espera ({tiempo_espera:.1f} min > {max_wait_minutes} min), eliminando...")
     
         # Eliminar los breakout expirados
         for simbolo in simbolos_a_eliminar:
             if simbolo in self.esperando_reentry:
-               del self.esperando_reentry[simbolo]
-        # También eliminar de breakouts_detectados si existe
-        if simbolo in self.breakouts_detectados:
-           del self.breakouts_detectados[simbolo]
+                del self.esperando_reentry[simbolo]
+            # También eliminar de breakouts_detectados si existe
+            if simbolo in self.breakouts_detectados:
+                del self.breakouts_detectados[simbolo]
     
         if eliminados > 0:
-           print(f"   🗑️ Total de breakout expirados eliminados: {eliminados}")
-           # Guardar estado después de la limpieza
-           self.guardar_estado()
+            print(f"   🗑️ Total de breakout expirados eliminados: {eliminados}")
+            # Guardar estado después de la limpieza
+            self.guardar_estado()
     
-           return eliminados
+        return eliminados
     
     
     def calcular_stochastic(self, datos_mercado, period=14, k_period=3, d_period=3):
