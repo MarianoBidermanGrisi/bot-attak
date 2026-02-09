@@ -1637,12 +1637,12 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         # 5. Calcular TP y SL (2% SL, 10% TP para mejor RR)
         if tipo_operacion == "LONG":
             sl_porcentaje = 0.02  # 2% Stop Loss
-            tp_porcentaje = 0.04  # 4% Take Profit (RR 2:1)
+            tp_porcentaje = 0.02  # 4% Take Profit (RR 2:1)
             stop_loss = precio_actual * (1 - sl_porcentaje)
             take_profit = precio_actual * (1 + tp_porcentaje)
         else:
             sl_porcentaje = 0.02  # 2% Stop Loss
-            tp_porcentaje = 0.04  # 10% Take Profit (RR 5:1)
+            tp_porcentaje = 0.02  # 10% Take Profit (RR 5:1)
             stop_loss = precio_actual * (1 + sl_porcentaje)
             take_profit = precio_actual * (1 - tp_porcentaje)
         
@@ -2233,7 +2233,7 @@ class TradingBot:
     def actualizar_moned(self):
         """
         Actualiza la lista de monedas dinámicamente basándose en el volumen de trading.
-        Selecciona los 100 símbolos con mayor volumen que terminan en ':USDT'.
+        Selecciona los 500 símbolos con mayor volumen que terminan en ':USDT'.
         Excluye los símbolos definidos en SIMBOLOS_OMITIDOS.
         """
         try:
@@ -2796,7 +2796,7 @@ class TradingBot:
                             logger.warning(f"⚠️ No se encontraron niveles SL/TP originales para {simbolo}, recalculando...")
                             tipo = operacion['tipo']
                             sl_porcentaje = 0.02
-                            tp_porcentaje = 0.10
+                            tp_porcentaje = 0.02
 
                             if tipo == "LONG":
                                 stop_loss = precio_actual * (1 - sl_porcentaje)
