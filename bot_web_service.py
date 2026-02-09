@@ -2233,7 +2233,7 @@ class TradingBot:
     def actualizar_moned(self):
         """
         Actualiza la lista de monedas dinámicamente basándose en el volumen de trading.
-        Selecciona los 500 símbolos con mayor volumen que terminan en ':USDT'.
+        Selecciona los 400 símbolos con mayor volumen que terminan en ':USDT'.
         Excluye los símbolos definidos en SIMBOLOS_OMITIDOS.
         """
         try:
@@ -2265,10 +2265,10 @@ class TradingBot:
                 except (KeyError, TypeError, ValueError):
                     return 0
 
-            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:500]
+            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:400]
             self.ultima_actualizacion_moned = datetime.now()
 
-            print(f"[SISTEMA] ✅ 500 Monedas actualizadas dinámicamente (Top Volumen)")
+            print(f"[SISTEMA] ✅ 400 Monedas actualizadas dinámicamente (Top Volumen)")
             print(f"   📊 Total símbolos procesados: {len(filtrados)}")
             print(f"   🚫 Símbolos omitidos: {len(SIMBOLOS_OMITIDOS)}")
             print(f"   💱 Monedas seleccionadas: {len(self.moned)}")
@@ -3767,18 +3767,13 @@ class TradingBot:
 📊 <b>Ratio R/B:</b> {ratio_rr:.2f}:1
 🎯 <b>SL:</b> {sl_percent:.2f}%
 🎯 <b>TP:</b> {tp_percent:.2f}%
-💰 <b>Riesgo:</b> {riesgo:.8f}
-🎯 <b>Beneficio Objetivo:</b> {beneficio:.8f}
 📈 <b>Tendencia:</b> {info_canal['direccion']}
 💪 <b>Fuerza:</b> {info_canal['fuerza_texto']}
-📏 <b>Ángulo:</b> {info_canal['angulo_tendencia']:.1f}°
-📊 <b>Pearson:</b> {info_canal['coeficiente_pearson']:.3f}
-🎯 <b>R² Score:</b> {info_canal['r2_score']:.3f}
-🎰 <b>Stochástico:</b> {stoch_estado}
 📊 <b>Stoch K:</b> {info_canal['stoch_k']:.1f}
 📈 <b>Stoch D:</b> {info_canal['stoch_d']:.1f}
-⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-💡 <b>Estrategia:</b> BREAKOUT + REENTRY con confirmación Stochastic
+📊 <b>D +:</b> {info_canal['di_plus']:.1f}
+📈 <b>D -:</b> {info_canal['di_minus']:.1f}
+
         """
         token = self.config.get('telegram_token')
         chat_ids = self.config.get('telegram_chat_ids', [])
@@ -3846,6 +3841,8 @@ class TradingBot:
                         'velas_utilizadas': config_optima['num_velas'],
                         'stoch_k': info_canal['stoch_k'],
                         'stoch_d': info_canal['stoch_d'],
+                        'di_plus': info_canal['di_plus'],
+                        'di_minus': info_canal['di_minus'],
                         'breakout_usado': breakout_info is not None,
                         'operacion_ejecutada': True,  # Confirma ejecución exitosa
                         'operacion_manual_usuario': False,  # MARCA EXPLÍCITA: Operación automática
@@ -3888,6 +3885,8 @@ class TradingBot:
                 'velas_utilizadas': config_optima['num_velas'],
                 'stoch_k': info_canal['stoch_k'],
                 'stoch_d': info_canal['stoch_d'],
+                'di_plus': info_canal['di_plus'],
+                'di_minus': info_canal['di_minus'],
                 'breakout_usado': breakout_info is not None,
                 'operacion_ejecutada': False  # Confirma que no se ejecutó automáticamente
             }
@@ -3905,7 +3904,7 @@ class TradingBot:
                     'angulo_tendencia', 'pearson', 'r2_score',
                     'ancho_canal_relativo', 'ancho_canal_porcentual',
                     'nivel_fuerza', 'timeframe_utilizado', 'velas_utilizadas',
-                    'stoch_k', 'stoch_d', 'breakout_usado', 'operacion_ejecutada'
+                    'stoch_k', 'stoch_d','di_plus','di_minus','breakout_usado', 'operacion_ejecutada'
                 ])
 
     def registrar_operacion(self, datos_operacion):
@@ -3932,6 +3931,8 @@ class TradingBot:
                 datos_operacion.get('velas_utilizadas', 0),
                 datos_operacion.get('stoch_k', 0),
                 datos_operacion.get('stoch_d', 0),
+                datos_operacion.get('di_plus', 0),
+                datos_operacion.get('di_minus', 0),
                 datos_operacion.get('breakout_usado', False),
                 datos_operacion.get('operacion_ejecutada', False)
             ])
@@ -3994,6 +3995,8 @@ class TradingBot:
                     'velas_utilizadas': operacion.get('velas_utilizadas', 0),
                     'stoch_k': operacion.get('stoch_k', 0),
                     'stoch_d': operacion.get('stoch_d', 0),
+                    'di_plus': operacion.get('di_plus', 0),
+                    'di_minus': operacion.get('di_minus', 0),
                     'breakout_usado': operacion.get('breakout_usado', False),
                     'operacion_ejecutada': operacion.get('operacion_ejecutada', False)
                 }
@@ -4489,7 +4492,7 @@ class TradingBot:
         print(f"📏 ANCHO MÍNIMO: {self.config.get('min_channel_width_percent', 4)}%")
         print(f"🚀 Estrategia: 1) Detectar Breakout → 2) Esperar Reentry → 3) Confirmar con Stoch")
         if self.config.get('simbolos_dinamicos', False):
-            print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 500 por volumen)")
+            print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 400 por volumen)")
         else:
             print(f"📊 Modo: FIJOS")
         if self.bitget_client:
