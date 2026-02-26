@@ -7,6 +7,7 @@ import sys
 import json
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from flask import Flask, request, jsonify
 # import matplotlib  # Eliminado - no se usa y causa conflictos en Render
 # from io import BytesIO  # Eliminado - no se usa
 import threading
