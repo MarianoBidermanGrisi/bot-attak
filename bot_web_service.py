@@ -7,10 +7,8 @@ import sys
 import json
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
-from io import BytesIO
-# imports no necesarios para este bot - eliminados para evitar conflictos de threading
-# import matplotlib
-# matplotlib.use('Agg')
+# import matplotlib  # Eliminado - no se usa y causa conflictos en Render
+# from io import BytesIO  # Eliminado - no se usa
 import threading
 import logging
 
@@ -69,14 +67,20 @@ MIN_FUERZA_SENAL = 6
 # 1️⃣ Obtener configuración desde variables de entorno (Render)
 config = crear_config_desde_entorno()
 
-# 2️⃣ Inicializar exchange con las credenciales mapeadas
-exchange = ccxt.bitget({
-    'apiKey': config['bitget_api_key'],           
-    'secret': config['bitget_api_secret'],        
-    'password': config['bitget_passphrase'],      
-    'options': {'defaultType': 'swap'},
-    'enableRateLimit': True
-})
+# 2️⃣ Inicializar exchange con las credenciales mapeadas (solo si hay credenciales)
+exchange = None
+if config.get('bitget_api_key') and config.get('bitget_api_secret'):
+    try:
+        exchange = ccxt.bitget({
+            'apiKey': config['bitget_api_key'],           
+            'secret': config['bitget_api_secret'],        
+            'password': config['bitget_passphrase'],      
+            'options': {'defaultType': 'swap'},
+            'enableRateLimit': True
+        })
+    except Exception as e:
+        print(f"Error inicializando exchange: {e}")
+        exchange = None
 
 def enviar_telegram(msg, config=None):
     """
@@ -147,6 +151,8 @@ def guardar_memoria(datos):
 
 def obtener_balance_real():
     try:
+        if exchange is None:
+            return 0.0
         balance = exchange.fetch_balance()
         for item in balance['info']:
             if item['marginCoin'] == 'USDT':
@@ -174,6 +180,8 @@ def calcular_rsi(df, periodo=14):
 
 def verificar_tendencia_h1(symbol):
     try:
+        if exchange is None:
+            return "LATERAL"
         bars_1h = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
         if len(bars_1h) < 50:
             return "LATERAL"
@@ -275,6 +283,10 @@ def verificar_cooldown(memoria):
 
 def escanear_mercado():
     try:
+        if exchange is None:
+            print("Exchange no inicializado. Verifica las credenciales.")
+            return
+            
         memoria = cargar_memoria()
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] --- SINCRONIZANDO ---")
         
@@ -348,6 +360,10 @@ def escanear_mercado():
 
 def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
     try:
+        if exchange is None:
+            print("Exchange no inicializado. No se puede operar.")
+            return
+            
         print(f"\nSEÑAL CONFIRMADA: {side.upper()} en {symbol}")
         print(f"   Tendencia H1: {tendencia} | Fuerza: {fuerza}/7")
         print(f"   Aplicando REGLA DE ORO: {MARGEN_USDT} USDT x{PALANCA_ESTRICTA}...")
