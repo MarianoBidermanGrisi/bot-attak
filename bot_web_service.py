@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import requests
 import os
+import sys
 import json
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
@@ -27,12 +28,12 @@ def crear_config_desde_entorno():
     telegram_chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
     
     return {
-        # 🔑 Bitget API credentials (leer desde variables de entorno de Render)
+        # Bitget API credentials (leer desde variables de entorno de Render)
         'bitget_api_key': os.environ.get('BITGET_API_KEY'),
         'bitget_api_secret': os.environ.get('BITGET_SECRET_KEY'),
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         
-        # 📬 Telegram credentials (leer desde variables de entorno de Render)
+        # Telegram credentials (leer desde variables de entorno de Render)
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
         'telegram_chat_ids': telegram_chat_ids
     }
@@ -92,7 +93,7 @@ def enviar_telegram(msg, config=None):
         
         # Validar que hay credenciales para enviar
         if not token or not chat_ids:
-            logger.warning("⚠️ Credenciales de Telegram no configuradas. Mensaje no enviado.")
+            logger.warning("Credenciales de Telegram no configuradas. Mensaje no enviado.")
             return False
         
         # URL corregida (sin espacios extra)
@@ -111,17 +112,17 @@ def enviar_telegram(msg, config=None):
                     timeout=10
                 )
                 if response.status_code == 200:
-                    logger.info(f"✅ Mensaje enviado a Telegram (chat_id: {chat_id})")
+                    logger.info(f"Mensaje enviado a Telegram (chat_id: {chat_id})")
                 else:
-                    logger.warning(f"⚠️ Telegram API error {response.status_code}: {response.text}")
+                    logger.warning(f"Telegram API error {response.status_code}: {response.text}")
             except requests.exceptions.RequestException as e:
-                logger.error(f"❌ Error enviando a chat_id {chat_id}: {e}")
+                logger.error(f"Error enviando a chat_id {chat_id}: {e}")
                 continue  # Continuar con el siguiente chat_id si hay múltiples
                 
         return True
         
     except Exception as e:
-        logger.error(f"❌ Error crítico en enviar_telegram: {e}")
+        logger.error(f"Error critico en enviar_telegram: {e}")
         return False
 
 def a_decimal_estricto(numero, precision_raw):
@@ -210,7 +211,7 @@ def verificar_tendencia_h1(symbol):
             return "LATERAL"
             
     except Exception as e:
-        print(f"⚠️ Error calculando tendencia H1: {e}")
+        print(f"Error calculando tendencia H1: {e}")
         return "LATERAL"
 
 # ==========================================
@@ -268,14 +269,14 @@ def verificar_cooldown(memoria):
     tiempo_desde_ultima = tiempo_actual - memoria.get('ultima_operacion_time', 0)
     
     if tiempo_desde_ultima < COOLDOWN_OPERACION:
-        print(f"⏳ Cooldown activo: {COOLDOWN_OPERACION - int(tiempo_desde_ultima)}s restantes")
+        print(f"Cooldown activo: {COOLDOWN_OPERACION - int(tiempo_desde_ultima)}s restantes")
         return False
     return True
 
 def escanear_mercado():
     try:
         memoria = cargar_memoria()
-        print(f"\n🔄 [{datetime.now().strftime('%H:%M:%S')}] --- SINCRONIZANDO ---")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] --- SINCRONIZANDO ---")
         
         posiciones = exchange.fetch_positions()
         posiciones_reales = [p['symbol'] for p in posiciones if float(p.get('contracts', 0)) > 0]
@@ -285,15 +286,15 @@ def escanear_mercado():
         saldo = obtener_balance_real()
         activas_str = ", ".join([s.split(':')[0] for s in memoria['operaciones_activas']]) if memoria['operaciones_activas'] else "NINGUNA"
         
-        print(f"💰 SALDO DISPONIBLE: {saldo:.2f} USDT")
-        print(f"📈 ACTIVAS ({len(memoria['operaciones_activas'])}): {activas_str}")
+        print(f"SALDO DISPONIBLE: {saldo:.2f} USDT")
+        print(f"ACTIVAS ({len(memoria['operaciones_activas'])}): {activas_str}")
         print("-" * 60)
 
         tickers = exchange.fetch_tickers()
         monedas = sorted([{'s': s, 'v': t['quoteVolume']} for s, t in tickers.items() if ':USDT' in s],
                         key=lambda x: x['v'], reverse=True)[:NUM_MONEDAS_ESCANEAR]
 
-        print(f"🔍 Escaneando las primeras {NUM_MONEDAS_ESCANEAR} monedas por volumen...")
+        print(f"Escaneando las primeras {NUM_MONEDAS_ESCANEAR} monedas por volumen...")
         
         for item in monedas:
             symbol = item['s']
@@ -313,13 +314,13 @@ def escanear_mercado():
                 ratio_vol = vol_actual / vol_prom
 
                 if not verificar_volatilidad(df):
-                    print(f" ❌ {symbol.split(':')[0]:<10} | Volatilidad insuficiente", end="\r")
+                    print(f" {symbol.split(':')[0]:<10} | Volatilidad insuficiente", end="\r")
                     continue
                 
                 tendencia = verificar_tendencia_h1(symbol)
                 fuerza = calcular_fuerza_senal(zona, ratio_vol, precio, df)
                 
-                print(f" 👀 {symbol.split(':')[0]:<10} | P: {precio:<10.4f} | Vol: {ratio_vol:>4.1f}x | Zona: {zona:<6} | Tend: {tendencia:<8} | Fza: {fuerza}/7", end="\r")
+                print(f" {symbol.split(':')[0]:<10} | P: {precio:<10.4f} | Vol: {ratio_vol:>4.1f}x | Zona: {zona:<6} | Tend: {tendencia:<8} | Fza: {fuerza}/7", end="\r")
 
                 señal_valida = False
                 
@@ -340,25 +341,25 @@ def escanear_mercado():
                 time.sleep(0.05)
             except: continue
 
-        print(f"\n✅ Escaneo de las {NUM_MONEDAS_ESCANEAR} monedas completado.")
+        print(f"\nEscaneo de las {NUM_MONEDAS_ESCANEAR} monedas completado.")
 
     except Exception as e:
-        print(f"\n❌ Error General: {e}")
+        print(f"\nError General: {e}")
 
 def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
     try:
-        print(f"\n🚀 SEÑAL CONFIRMADA: {side.upper()} en {symbol}")
-        print(f"   📊 Tendencia H1: {tendencia} | Fuerza: {fuerza}/7")
-        print(f"   ✨ Aplicando REGLA DE ORO: {MARGEN_USDT} USDT x{PALANCA_ESTRICTA}...")
+        print(f"\nSEÑAL CONFIRMADA: {side.upper()} en {symbol}")
+        print(f"   Tendencia H1: {tendencia} | Fuerza: {fuerza}/7")
+        print(f"   Aplicando REGLA DE ORO: {MARGEN_USDT} USDT x{PALANCA_ESTRICTA}...")
         
         # ==========================================
         # VERIFICAR APALANCAMIENTO ANTES DE OPERAR
         # ==========================================
         try:
             exchange.set_leverage(PALANCA_ESTRICTA, symbol, params={'marginCoin': 'USDT'})
-            print(f"   ✅ Apalancamiento {PALANCA_ESTRICTA}x configurado")
+            print(f"   Apalancamiento {PALANCA_ESTRICTA}x configurado")
         except Exception as e:
-            print(f"❌ RECHAZADA: {symbol} no permite x{PALANCA_ESTRICTA} exacto.")
+            print(f"RECHAZADA: {symbol} no permite x{PALANCA_ESTRICTA} exacto.")
             print(f"   Error: {e}")
             return
 
@@ -389,8 +390,8 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
             valor_posicion_alt = float(cant_tokens_alt) * entrada
             margen_real_alt = valor_posicion_alt / PALANCA_ESTRICTA
             
-            print(f"   📐 Intento 1: {cant_tokens} tokens → {margen_real_1:.6f} USDT")
-            print(f"   📐 Intento 2: {cant_tokens_alt} tokens → {margen_real_alt:.6f} USDT")
+            print(f"   Intento 1: {cant_tokens} tokens -> {margen_real_1:.6f} USDT")
+            print(f"   Intento 2: {cant_tokens_alt} tokens -> {margen_real_alt:.6f} USDT")
             
             if abs(margen_real_alt - MARGEN_USDT) < abs(margen_real_1 - MARGEN_USDT):
                 cant_tokens = str(cant_tokens_alt)
@@ -400,9 +401,9 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         else:
             margen_real = margen_real_1
         
-        print(f"   📐 Tokens: {cant_tokens} | Precio: {entrada} USDT")
-        print(f"   📐 Valor posición: {float(cant_tokens) * entrada:.4f} USDT")
-        print(f"   📐 Margen calculado: {margen_real:.6f} USDT")
+        print(f"   Tokens: {cant_tokens} | Precio: {entrada} USDT")
+        print(f"   Valor posicion: {float(cant_tokens) * entrada:.4f} USDT")
+        print(f"   Margen calculado: {margen_real:.6f} USDT")
         
         # ==========================================
         # VERIFICACIÓN CON TOLERANCIA (máx 0.04 USDT)
@@ -411,16 +412,16 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         TOLERANCIA_MAX = 0.04  # Aceptar hasta 0.04 USDT de diferencia
         
         if diferencia > TOLERANCIA_MAX:
-            print(f"❌ RECHAZADA: Margen = {margen_real:.6f} USDT")
-            print(f"   ❌ REGLA DE ORO: diferencia máxima {TOLERANCIA_MAX} USDT")
-            print(f"   ❌ Diferencia actual: {diferencia:.6f} USDT")
+            print(f"RECHAZADA: Margen = {margen_real:.6f} USDT")
+            print(f"   REGLA DE ORO: diferencia maxima {TOLERANCIA_MAX} USDT")
+            print(f"   Diferencia actual: {diferencia:.6f} USDT")
             return
         
         if diferencia > 0.000001:
-            print(f"⚠️ Margen = {margen_real:.6f} USDT (diferencia: {diferencia:.6f})")
-            print(f"   ⚠️ Dentro de tolerancia ({TOLERANCIA_MAX} USDT) - continuar...")
+            print(f"Advertencia: Margen = {margen_real:.6f} USDT (diferencia: {diferencia:.6f})")
+            print(f"   Dentro de tolerancia ({TOLERANCIA_MAX} USDT) - continuar...")
         else:
-            print(f"   ✅ REGLA DE ORO CUMPLIDA: {margen_real:.6f} USDT exacto")
+            print(f"   REGLA DE ORO CUMPLIDA: {margen_real:.6f} USDT exacto")
         
         # ==========================================
         # CALCULAR SL Y TP
@@ -443,7 +444,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         # ==========================================
         # EJECUTAR ORDEN
         # ==========================================
-        print(f"   🚀 Ejecutando orden...")
+        print(f"   Ejecutando orden...")
         resultado = exchange.create_order(symbol, 'market', side, float(cant_tokens), params=params)
         
         # ==========================================
@@ -459,15 +460,15 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
                 break
         
         if posicion_encontrada is None:
-            print(f"⚠️ Advertencia: No se encontró posición después de abrir")
+            print(f"Advertencia: No se encontro posicion despues de abrir")
             return
             
         margen_verificado = float(posicion_encontrada.get('initialMargin', 0))
         apalancamiento_verificado = float(posicion_encontrada.get('leverage', 0))
         
-        print(f"   🔍 VERIFICACIÓN POST-OPERACIÓN:")
-        print(f"   🔍 Margen en exchange: {margen_verificado:.6f} USDT")
-        print(f"   🔍 Apalancamiento: {apalancamiento_verificado}x")
+        print(f"   VERIFICACIÓN POST-OPERACIÓN:")
+        print(f"   Margen en exchange: {margen_verificado:.6f} USDT")
+        print(f"   Apalancamiento: {apalancamiento_verificado}x")
         
         # ==========================================
         # VERIFICAR QUE SEA 1 USDT x20 EXACTO
@@ -478,9 +479,9 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         
         if not palanca_ok:
             # El apalancamiento no es 20x - CERRAR INMEDIATAMENTE
-            print(f"❌ VERIFICACIÓN FALLIDA!")
-            print(f"   ❌ Apalancamiento: {apalancamiento_verificado}x (esperado: {PALANCA_ESTRICTA}x)")
-            print(f"   🔴 Cerrando posición inmediatamente...")
+            print(f"VERIFICACIÓN FALLIDA!")
+            print(f"   Apalancamiento: {apalancamiento_verificado}x (esperado: {PALANCA_ESTRICTA}x)")
+            print(f"   Cerrando posicion inmediatamente...")
             
             try:
                 cerrar_params = {
@@ -492,21 +493,21 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
                     exchange.create_order(symbol, 'market', 'sell', float(cant_tokens), params=cerrar_params)
                 else:
                     exchange.create_order(symbol, 'market', 'buy', float(cant_tokens), params=cerrar_params)
-                print(f"   ✅ Posición cerrada")
+                print(f"   Posicion cerrada")
             except Exception as e:
-                print(f"   ⚠️ Error al cerrar: {e}")
+                print(f"   Error al cerrar: {e}")
             
-            enviar_telegram(f"❌ *OPERACIÓN RECHAZADA POR EXCHANGE*\n"
-                          f"Par: `{symbol}`\n"
+            enviar_telegram(f"OPERACIÓN RECHAZADA POR EXCHANGE\n"
+                          f"Par: {symbol}\n"
                           f"El exchange no respetó la REGLA DE ORO\n"
-                          f"Apalancamiento: `{apalancamiento_verificado}x` (esperado: {PALANCA_ESTRICTA}x)\n"
-                          f"_Posición cancelada_")
+                          f"Apalancamiento: {apalancamiento_verificado}x (esperado: {PALANCA_ESTRICTA}x)\n"
+                          f"Posicion cancelada")
             return
         
         # Verificar también si el margen excede la tolerancia
         if not margen_ok:
-            print(f"⚠️ Margen excede tolerancia: {margen_verificado:.4f} USDT")
-            print(f"   🔴 Cerrando posición...")
+            print(f"Advertencia: Margen excede tolerancia: {margen_verificado:.4f} USDT")
+            print(f"   Cerrando posicion...")
             
             try:
                 cerrar_params = {
@@ -518,93 +519,85 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
                     exchange.create_order(symbol, 'market', 'sell', float(cant_tokens), params=cerrar_params)
                 else:
                     exchange.create_order(symbol, 'market', 'buy', float(cant_tokens), params=cerrar_params)
-                print(f"   ✅ Posición cerrada")
+                print(f"   Posicion cerrada")
             except Exception as e:
-                print(f"   ⚠️ Error al cerrar: {e}")
+                print(f"   Error al cerrar: {e}")
             
-            enviar_telegram(f"❌ *MARGEN EXCEDE TOLERANCIA*\n"
-                          f"Par: `{symbol}`\n"
-                          f"Margen: `{margen_verificado:.4f}` (tolerancia: {TOLERANCIA_POST})\n"
-                          f"Apalancamiento: `{apalancamiento_verificado}x`\n"
-                          f"_Posición cancelada_")
+            enviar_telegram(f"MARGEN EXCEDE TOLERANCIA\n"
+                          f"Par: {symbol}\n"
+                          f"Margen: {margen_verificado:.4f} (tolerancia: {TOLERANCIA_POST})\n"
+                          f"Apalancamiento: {apalancamiento_verificado}x\n"
+                          f"Posicion cancelada")
             return
         
-        print(f"   ✅ VERIFICACIÓN PASADA: {margen_verificado:.6f} USDT x{apalancamiento_verificado}")
+        print(f"   VERIFICACIÓN PASADA: {margen_verificado:.6f} USDT x{apalancamiento_verificado}")
         
         memoria['operaciones_activas'].append(symbol)
         memoria['ultima_operacion_time'] = time.time()
         guardar_memoria(memoria)
         
-        enviar_telegram(f"🔥 *REGLA DE ORO EXACTA* ✅\n"
-                       f"Par: `{symbol}`\n"
-                       f"Lado: `{side.upper()}`\n"
-                       f"Margen: `{margen_verificado:.6f} USDT` (x{apalancamiento_verificado})\n"
-                       f"Tendencia H1: `{tendencia}`\n"
-                       f"Fuerza Señal: `{fuerza}/7`\n"
-                       f"SL: `{sl_str}` | TP: `{tp_str}`\n"
-                       f"_Posiciónabierta exitosamente_")
+        enviar_telegram(f"REGLA DE ORO EXACTA\n"
+                       f"Par: {symbol}\n"
+                       f"Lado: {side.upper()}\n"
+                       f"Margen: {margen_verificado:.6f} USDT (x{apalancamiento_verificado})\n"
+                       f"Tendencia H1: {tendencia}\n"
+                       f"Fuerza Señal: {fuerza}/7\n"
+                       f"SL: {sl_str} | TP: {tp_str}\n"
+                       f"Posicion abierta exitosamente")
         
-        print(f"✅ Éxito: {side.upper()} abierto en {symbol}")
-        print(f"   💰 SL: {sl_str} | TP: {tp_str}")
-        print(f"   🎯 REGLA DE ORO: {margen_verificado:.6f} USDT x{apalancamiento_verificado}")
+        print(f"Exito: {side.upper()} abierto en {symbol}")
+        print(f"   SL: {sl_str} | TP: {tp_str}")
+        print(f"   REGLA DE ORO: {margen_verificado:.6f} USDT x{apalancamiento_verificado}")
         
     except Exception as e:
-        print(f"⚠️ Error: {e}")
+        print(f"Error: {e}")
 
-# INICIO
-os.system('cls' if os.name == 'nt' else 'clear')
-print("="*60)
-print("     BOT ESTRATEGIA 4.5 - CON FILTROS AVANZADOS")
-print("     REGLA DE ORO: 1 USDT | x10 | POSICIÓN EXACTA")
-print("="*60)
-print(f"\n📋 Filtros activos:")
-print(f"   • Filtro 1: Tendencia H1 (RSI + EMAs)")
-print(f"   • Filtro 2: Volatilidad mínima ({MIN_VOLATILIDAD_PCT}%)")
-print(f"   • Filtro 6: Fuerza de señal (mín {MIN_FUERZA_SENAL}/7)")
-print(f"   • Cooldown: {COOLDOWN_OPERACION}s entre operaciones")
-print(f"   • Monedas a escanear: {NUM_MONEDAS_ESCANEAR}")
-print("-"*60)
-
-while True:
-    escanear_mercado()
-    print(f"💤 Esperando 30 segundos para el siguiente ciclo...")
-    time.sleep(30)
-   
-
-# ---------------------------
-# FLASK APP Y RENDER
-# ---------------------------
+# =========================================
+# FLASK APP PARA RENDER
+# =========================================
 
 app = Flask(__name__)
 
-# Crear bot con configuración desde entorno
-config = crear_config_desde_entorno()
-bot = TradingBot(config)
+# Variables globales para estado del bot
+bot_state = {
+    "operaciones_activas": [],
+    "ultima_operacion_time": 0,
+    "total_operaciones": 0,
+    "bitget_conectado": True
+}
 
 def run_bot_loop():
     """Ejecuta el bot en un hilo separado"""
-    logger.info("🤖 Iniciando hilo del bot...")
+    logger.info("Iniciando hilo del bot de trading...")
     while True:
         try:
-            bot.ejecutar_analisis()
-            time.sleep(bot.config.get('scan_interval_minutes', 1) * 60)
+            escanear_mercado()
+            logger.info("Ciclo de escaneo completado")
+            time.sleep(30)  # Esperar 30 segundos entre ciclos
         except Exception as e:
-            logger.error(f"❌ Error en el hilo del bot: {e}", exc_info=True)
+            logger.error(f"Error en el hilo del bot: {e}", exc_info=True)
             time.sleep(60)
 
-# Iniciar hilo del bot
-bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
-bot_thread.start()
+# Iniciar hilo del bot solo si está configurado correctamente
+try:
+    if config['bitget_api_key'] and config['bitget_api_secret']:
+        bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
+        bot_thread.start()
+        logger.info("Bot de trading iniciado en hilo separado")
+    else:
+        logger.warning("Credenciales de Bitget no configuradas. Bot no iniciado.")
+except Exception as e:
+    logger.warning(f"Error iniciando bot: {e}. Solo ejecutando web service.")
 
 @app.route('/')
 def index():
-    return "✅ Bot Breakout + Reentry con integración Bitget está en línea.", 200
+    return "Bot Breakout + Reentry con integración Bitget está en línea.", 200
 
 @app.route('/webhook', methods=['POST'])
 def telegram_webhook():
     if request.is_json:
         update = request.get_json()
-        logger.info(f"📩 Update recibido: {json.dumps(update)}")
+        logger.info(f"Update recibido: {json.dumps(update)}")
         return jsonify({"status": "ok"}), 200
     return jsonify({"error": "Request must be JSON"}), 400
 
@@ -612,14 +605,13 @@ def telegram_webhook():
 def health_check():
     """Endpoint para verificar el estado del bot"""
     try:
+        memoria = cargar_memoria()
         status = {
             "status": "running",
             "timestamp": datetime.now().isoformat(),
-            "operaciones_activas": len(bot.operaciones_activas),
-            "esperando_reentry": len(bot.esperando_reentry),
-            "total_operaciones": bot.total_operaciones,
-            "bitget_conectado": bot.bitget_client is not None,
-            "auto_trading": bot.ejecutar_operaciones_automaticas
+            "operaciones_activas": len(memoria.get('operaciones_activas', [])),
+            "total_operaciones": bot_state["total_operaciones"],
+            "bitget_conectado": bot_state["bitget_conectado"]
         }
         return jsonify(status), 200
     except Exception as e:
@@ -630,7 +622,7 @@ def health_check():
 def setup_telegram_webhook():
     token = os.environ.get('TELEGRAM_TOKEN')
     if not token:
-        logger.warning("⚠️ No hay token de Telegram configurado")
+        logger.warning("No hay token de Telegram configurado")
         return
     
     webhook_url = os.environ.get('WEBHOOK_URL')
@@ -639,11 +631,11 @@ def setup_telegram_webhook():
         if render_url:
             webhook_url = f"{render_url}/webhook"
         else:
-            logger.warning("⚠️ No hay URL de webhook configurada")
+            logger.warning("No hay URL de webhook configurada")
             return
     
     try:
-        logger.info(f"🔗 Configurando webhook Telegram en: {webhook_url}")
+        logger.info(f"Configurando webhook Telegram en: {webhook_url}")
         # Eliminar webhook anterior
         requests.get(f"https://api.telegram.org/bot{token}/deleteWebhook", timeout=10)
         time.sleep(1)
@@ -651,14 +643,28 @@ def setup_telegram_webhook():
         response = requests.get(f"https://api.telegram.org/bot{token}/setWebhook?url={webhook_url}", timeout=10)
         
         if response.status_code == 200:
-            logger.info("✅ Webhook de Telegram configurado correctamente")
+            logger.info("Webhook de Telegram configurado correctamente")
         else:
-            logger.error(f"❌ Error configurando webhook: {response.status_code} - {response.text}")
+            logger.error(f"Error configurando webhook: {response.status_code} - {response.text}")
     except Exception as e:
-        logger.error(f"❌ Error configurando webhook: {e}")
+        logger.error(f"Error configurando webhook: {e}")
 
 if __name__ == '__main__':
-    logger.info("🚀 Iniciando aplicación Flask...")
+    logger.info("Iniciando aplicación Flask...")
+    
+    # Mostrar configuración inicial
+    print("="*60)
+    print("     BOT ESTRATEGIA 4.5 - CON FILTROS AVANZADOS")
+    print("     REGLA DE ORO: 1 USDT | x10 | POSICIÓN EXACTA")
+    print("="*60)
+    print(f"\nFiltros activos:")
+    print(f"   - Filtro 1: Tendencia H1 (RSI + EMAs)")
+    print(f"   - Filtro 2: Volatilidad minima ({MIN_VOLATILIDAD_PCT}%)")
+    print(f"   - Filtro 6: Fuerza de señal (min {MIN_FUERZA_SENAL}/7)")
+    print(f"   - Cooldown: {COOLDOWN_OPERACION}s entre operaciones")
+    print(f"   - Monedas a escanear: {NUM_MONEDAS_ESCANEAR}")
+    print("-"*60)
+    
     setup_telegram_webhook()
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
