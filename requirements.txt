@@ -9,5 +9,6 @@ matplotlib>=3.8.2
 mplfinance>=0.12.10b0
 python-dotenv==1.0.0
 pytz==2024.1
+ccxt>=4.2.0
 
 
