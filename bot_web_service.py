@@ -1,4 +1,5 @@
 import ccxt
+import sys
 import pandas as pd
 import time
 import requests
