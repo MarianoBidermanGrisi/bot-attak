@@ -426,7 +426,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         rango = df['high'].max() - df['low'].min()
 
         sl = entrada - (atr * 2) if side == 'buy' else entrada + (atr * 2)
-        tp = entrada + (rango * 0.24) if side == 'buy' else entrada - (rango * 0.24)
+        tp = entrada + (rango * 0.20) if side == 'buy' else entrada - (rango * 0.20)
 
         sl_str = a_decimal_estricto(sl, market['precision']['price'])
         tp_str = a_decimal_estricto(tp, market['precision']['price'])
@@ -435,7 +435,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
             'marginCoin': 'USDT', 'marginMode': 'isolated', 'tradeSide': 'open',
             'presetStopSurplusPrice': tp_str, 'presetStopLossPrice': sl_str
         }
-
+        params.pop('posSide', None) 
         # ==========================================
         # EJECUTAR ORDEN
         # ==========================================
@@ -484,6 +484,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
                     'marginMode': 'isolated', 
                     'tradeSide': 'close'
                 }
+                cerrar_params.pop('posSide', None)
                 if side == 'buy':
                     exchange.create_order(symbol, 'market', 'sell', float(cant_tokens), params=cerrar_params)
                 else:
@@ -510,6 +511,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
                     'marginMode': 'isolated', 
                     'tradeSide': 'close'
                 }
+                cerrar_params.pop('posSide', None)
                 if side == 'buy':
                     exchange.create_order(symbol, 'market', 'sell', float(cant_tokens), params=cerrar_params)
                 else:
@@ -563,8 +565,8 @@ print("-"*60)
 
 while True:
     escanear_mercado()
-    print(f"💤 Esperando 30 segundos para el siguiente ciclo...")
-    time.sleep(30)
+    print(f"💤 Esperando 300 segundos para el siguiente ciclo...")
+    time.sleep(300)
    
 
 # ---------------------------
