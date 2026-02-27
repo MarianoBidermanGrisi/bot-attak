@@ -563,10 +563,7 @@ print(f"   • Cooldown: {COOLDOWN_OPERACION}s entre operaciones")
 print(f"   • Monedas a escanear: {NUM_MONEDAS_ESCANEAR}")
 print("-"*60)
 
-while True:
-    escanear_mercado()
-    print(f"💤 Esperando 300 segundos para el siguiente ciclo...")
-    time.sleep(300)
+
    
 
 # ---------------------------
@@ -577,15 +574,17 @@ app = Flask(__name__)
 
 
 def run_bot_loop():
-    """Ejecuta el bot en un hilo separado"""
-    logger.info("🤖 Iniciando hilo del bot...")
+    """Ejecuta el escaneo del bot en segundo plano"""
+    logger.info("🤖 Iniciando hilo del bot (escaneo de mercado)...")
+    time.sleep(10)  # Pequeña espera para que Flask arranque primero
+    
     while True:
         try:
-            bot.ejecutar_analisis()
-            time.sleep(bot.config.get('scan_interval_minutes', 1) * 60)
+            escanear_mercado()  # ✅ Tu función real de escaneo
+            time.sleep(30)  # Tu intervalo original
         except Exception as e:
-            logger.error(f"❌ Error en el hilo del bot: {e}", exc_info=True)
-            time.sleep(60)
+            logger.error(f"❌ Error en escaneo: {e}", exc_info=True)
+            time.sleep(60)  # Reintentar tras error
 
 # Iniciar hilo del bot
 bot_thread = threading.Thread(target=run_bot_loop, daemon=True)
