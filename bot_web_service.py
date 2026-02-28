@@ -425,7 +425,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         atr = tr.rolling(14).mean().iloc[-1]
         rango = df['high'].max() - df['low'].min()
 
-        sl = entrada - (atr * 2) if side == 'buy' else entrada + (atr * 2)
+        sl = entrada - (atr * 1.2) if side == 'buy' else entrada + (atr * 1.2)
         tp = entrada + (rango * 0.20) if side == 'buy' else entrada - (rango * 0.20)
 
         sl_str = a_decimal_estricto(sl, market['precision']['price'])
