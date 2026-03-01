@@ -39,7 +39,7 @@ def crear_config_desde_entorno():
 MARGEN_USDT = 1 
 PALANCA_ESTRICTA = 10
 MEMORIA_FILE = 'memoria_bot.json'
-stopFijo= 0.018
+stopFijo= 0.016
 
 # ==========================================
 #        FILTROS AVANZADOS - CONFIGURACION
@@ -429,7 +429,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         sl = entrada * (1 - stopFijo) if side == 'buy' else entrada * (1 + stopFijo)
 
         #sl = entrada - (rango * 0.15) if side == 'buy' else entrada + (rango * 0.15)
-        tp = entrada + (rango * 0.22) if side == 'buy' else entrada - (rango * 0.22)
+        tp = entrada + (rango * 0.24) if side == 'buy' else entrada - (rango * 0.24)
 
         sl_str = a_decimal_estricto(sl, market['precision']['price'])
         tp_str = a_decimal_estricto(tp, market['precision']['price'])
