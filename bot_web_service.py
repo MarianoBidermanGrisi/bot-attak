@@ -5,6 +5,8 @@ import time
 import requests
 import os
 import json
+import numpy as np
+import math
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from io import BytesIO
@@ -45,12 +47,12 @@ stopFijo= 0.016
 #        FILTROS AVANZADOS - CONFIGURACION
 # ==========================================
 NUM_MONEDAS_ESCANEAR = 200
-MIN_VOLATILIDAD_PCT = 1.2
+MIN_VOLATILIDAD_PCT = 1.0
 
 # Configuración RSI
 RSI_PERIODO = 14
-RSI_OVERSOLD = 35
-RSI_OVERBOUGHT = 65
+RSI_OVERSOLD = 40
+RSI_OVERBOUGHT = 60
 
 # Configuración Medias Móviles Adaptativas
 SMA_RAPIDA = 9
@@ -61,6 +63,13 @@ COOLDOWN_OPERACION = 180
 
 # Fuerza mínima de señal
 MIN_FUERZA_SENAL = 6
+
+# ==========================================
+#        FILTRO REGRESION LINEAL - CONFIGURACION
+# ==========================================
+LOOKBACK_REGRESION = 80  # Número de velas para calcular regresión
+MIN_R2_THRESHOLD = 0.6    # R2 mínimo para confirmar tendencia
+ANGULO_MINIMO_CONFIRMACION = 16.0  # Ángulo mínimo para confirmar tendencia
 
 # 1️⃣ Obtener configuración desde variables de entorno (Render)
 config = crear_config_desde_entorno()
@@ -269,6 +278,231 @@ def verificar_cooldown(memoria):
         return False
     return True
 
+# ==========================================
+#        FILTRO 7: REGRESION LINEAL (TENDENCIA CONFIRMADA)
+# ==========================================
+def calcular_regresion_lineal(x, y):
+    """
+    Calcula la regresión lineal simple.
+    Retorna: (pendiente, intercepto) o None si hay error
+    """
+    if len(x) != len(y) or len(x) == 0:
+        return None
+    
+    x = np.array(x)
+    y = np.array(y)
+    n = len(x)
+    
+    sum_x = np.sum(x)
+    sum_y = np.sum(y)
+    sum_xy = np.sum(x * y)
+    sum_x2 = np.sum(x * x)
+    
+    denom = (n * sum_x2 - sum_x * sum_x)
+    
+    if denom == 0:
+        pendiente = 0
+    else:
+        pendiente = (n * sum_xy - sum_x * sum_y) / denom
+    
+    intercepto = (sum_y - pendiente * sum_x) / n if n else 0
+    
+    return pendiente, intercepto
+
+def calcular_pearson_y_angulo(x, y):
+    """
+    Calcula el coeficiente de correlación de Pearson y el ángulo de la tendencia.
+    Retorna: (pearson, angulo_grados)
+    """
+    if len(x) != len(y) or len(x) < 2:
+        return 0, 0
+    
+    x = np.array(x)
+    y = np.array(y)
+    n = len(x)
+    
+    sum_x = np.sum(x)
+    sum_y = np.sum(y)
+    sum_xy = np.sum(x * y)
+    sum_x2 = np.sum(x * x)
+    sum_y2 = np.sum(y * y)
+    
+    numerator = n * sum_xy - sum_x * sum_y
+    denominator = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+    
+    if denominator == 0:
+        return 0, 0
+    
+    pearson = numerator / denominator
+    
+    denom_pend = (n * sum_x2 - sum_x * sum_x)
+    pendiente = (n * sum_xy - sum_x * sum_y) / denom_pend if denom_pend != 0 else 0
+    
+    # Calcular ángulo en grados
+    angulo_radianes = math.atan(pendiente * len(x) / (max(y) - min(y)) if (max(y) - min(y)) != 0 else 0)
+    angulo_grados = math.degrees(angulo_radianes)
+    
+    return pearson, angulo_grados
+
+def clasificar_fuerza_tendencia(angulo_grados):
+    """
+    Clasifica la fuerza de la tendencia basándose en el ángulo.
+    Retorna: (descripcion, nivel_fuerza)
+    """
+    angulo_abs = abs(angulo_grados)
+    
+    if angulo_abs < 3:
+        return "Muy Débil", 1
+    elif angulo_abs < 13:
+        return " Débil", 2
+    elif angulo_abs < 27:
+        return " Moderada", 3
+    elif angulo_abs < 45:
+        return " Fuerte", 4
+    else:
+        return " Muy Fuerte", 5
+
+def determinar_direccion_tendencia(angulo_grados, umbral_minimo=1):
+    """
+    Determina la dirección de la tendencia basándose en el ángulo.
+    Retorna: 'ALCISTA', 'BAJISTA' o 'RANGO'
+    """
+    if abs(angulo_grados) < umbral_minimo:
+        return "RANGO"
+    elif angulo_grados > 0:
+        return "ALCISTA"
+    else:
+        return "BAJISTA"
+
+def calcular_r2(y_real, x, pendiente, intercepto):
+    """
+    Calcula el coeficiente de determinación R2.
+    """
+    if len(y_real) != len(x):
+        return 0
+    
+    y_real = np.array(y_real)
+    y_pred = pendiente * np.array(x) + intercepto
+    
+    ss_res = np.sum((y_real - y_pred) ** 2)
+    ss_tot = np.sum((y_real - np.mean(y_real)) ** 2)
+    
+    if ss_tot == 0:
+        return 0
+    
+    return 1 - (ss_res / ss_tot)
+
+def validar_tendencia_regresion(df, lado_operacion):
+    """
+    Función gatekeeper: Valida que la operación esté a favor de la tendencia confirmada.
+    
+    Args:
+        df: DataFrame con datos OHLCV
+        lado_operacion: 'buy' o 'sell'
+    
+    Returns:
+        dict con {aprobada: bool, razon: str, detalles: dict}
+    """
+    try:
+        # Obtener precios de cierre
+        precios = df['close'].values[-LOOKBACK_REGRESION:]
+        
+        if len(precios) < LOOKBACK_REGRESION:
+            return {
+                'aprobada': False,
+                'razon': f'Datos insuficientes (necesita {LOOKBACK_REGRESION} velas)',
+                'detalles': {}
+            }
+        
+        # Generar eje X (índices)
+        x = list(range(len(precios)))
+        y = list(precios)
+        
+        # Calcular regresión lineal
+        resultado_regresion = calcular_regresion_lineal(x, y)
+        if resultado_regresion is None:
+            return {
+                'aprobada': False,
+                'razon': 'Error en cálculo de regresión lineal',
+                'detalles': {}
+            }
+        
+        pendiente, intercepto = resultado_regresion
+        
+        # Calcular Pearson y ángulo
+        pearson, angulo_grados = calcular_pearson_y_angulo(x, y)
+        
+        # Calcular R2
+        r2 = calcular_r2(y, x, pendiente, intercepto)
+        
+        # Determinar dirección de tendencia
+        direccion_tendencia = determinar_direccion_tendencia(angulo_grados, ANGULO_MINIMO_CONFIRMACION)
+        
+        # Clasificar fuerza
+        fuerza_tendencia, nivel_fuerza = clasificar_fuerza_tendencia(angulo_grados)
+        
+        # Crear detalles para logging
+        detalles = {
+            'pendiente': pendiente,
+            'angulo': angulo_grados,
+            'pearson': pearson,
+            'r2': r2,
+            'direccion': direccion_tendencia,
+            'fuerza': fuerza_tendencia,
+            'nivel_fuerza': nivel_fuerza
+        }
+        
+        # REGLA 1: Verificar que el mercado tenga estructura (R2 mínimo)
+        if r2 < MIN_R2_THRESHOLD:
+            return {
+                'aprobada': False,
+                'razon': f'Mercado en rango/ruido (R2: {r2:.2f} < {MIN_R2_THRESHOLD})',
+                'detalles': detalles
+            }
+        
+        # REGLA 2: Verificar que la operación esté a favor de la tendencia
+        if lado_operacion == 'buy':
+            if direccion_tendencia == 'ALCISTA':
+                return {
+                    'aprobada': True,
+                    'razon': f'Tendencia ALCISTA confirmada (∠{angulo_grados:.1f}°, R²={r2:.2f})',
+                    'detalles': detalles
+                }
+            else:
+                return {
+                    'aprobada': False,
+                    'razon': f'Señal BUY rechazada - Tendencia {direccion_tendencia} (∠{angulo_grados:.1f}°)',
+                    'detalles': detalles
+                }
+        
+        elif lado_operacion == 'sell':
+            if direccion_tendencia == 'BAJISTA':
+                return {
+                    'aprobada': True,
+                    'razon': f'Tendencia BAJISTA confirmada (∠{angulo_grados:.1f}°, R²={r2:.2f})',
+                    'detalles': detalles
+                }
+            else:
+                return {
+                    'aprobada': False,
+                    'razon': f'Señal SELL rechazada - Tendencia {direccion_tendencia} (∠{angulo_grados:.1f}°)',
+                    'detalles': detalles
+                }
+        
+        # Por defecto, rechazar operaciones desconocidas
+        return {
+            'aprobada': False,
+            'razon': 'Operación desconocida',
+            'detalles': detalles
+        }
+        
+    except Exception as e:
+        return {
+            'aprobada': False,
+            'razon': f'Error en validación de regresión: {str(e)}',
+            'detalles': {}
+        }
+
 def escanear_mercado():
     try:
         memoria = cargar_memoria()
@@ -320,19 +554,36 @@ def escanear_mercado():
 
                 señal_valida = False
                 
+                # ==========================================
+                # FILTRO 7: REGRESION LINEAL (GATEKEEPER)
+                # ==========================================
                 if zona == "DEMANDA" and precio > df['high'].iloc[-2] and vol_actual > vol_prom:
                     if tendencia in ["ALCISTA", "LATERAL"]:
                         if fuerza >= MIN_FUERZA_SENAL:
                             if verificar_cooldown(memoria):
-                                abrir_operacion(symbol, 'buy', precio, df, memoria, tendencia, fuerza)
-                                señal_valida = True
+                                # === NUEVO: Validar con regresión lineal ===
+                                validacion_regresion = validar_tendencia_regresion(df, 'buy')
+                                if validacion_regresion['aprobada']:
+                                    print(f"\n   ✅ Filtro Regresión: {validacion_regresion['razon']}")
+                                    abrir_operacion(symbol, 'buy', precio, df, memoria, tendencia, fuerza, validacion_regresion)
+                                    señal_valida = True
+                                else:
+                                    print(f"\n   ❌ Filtro Regresión: {validacion_regresion['razon']}")
+                                # ==========================================
                                 
                 elif zona == "OFERTA" and precio < df['low'].iloc[-2] and vol_actual > vol_prom:
                     if tendencia in ["BAJISTA", "LATERAL"]:
                         if fuerza >= MIN_FUERZA_SENAL:
                             if verificar_cooldown(memoria):
-                                abrir_operacion(symbol, 'sell', precio, df, memoria, tendencia, fuerza)
-                                señal_valida = True
+                                # === NUEVO: Validar con regresión lineal ===
+                                validacion_regresion = validar_tendencia_regresion(df, 'sell')
+                                if validacion_regresion['aprobada']:
+                                    print(f"\n   ✅ Filtro Regresión: {validacion_regresion['razon']}")
+                                    abrir_operacion(symbol, 'sell', precio, df, memoria, tendencia, fuerza, validacion_regresion)
+                                    señal_valida = True
+                                else:
+                                    print(f"\n   ❌ Filtro Regresión: {validacion_regresion['razon']}")
+                                # ==========================================
                 
                 time.sleep(0.05)
             except: continue
@@ -342,10 +593,16 @@ def escanear_mercado():
     except Exception as e:
         print(f"\n❌ Error General: {e}")
 
-def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
+def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza, validacion_regresion=None):
     try:
         print(f"\n🚀 SEÑAL CONFIRMADA: {side.upper()} en {symbol}")
         print(f"   📊 Tendencia H1: {tendencia} | Fuerza: {fuerza}/7")
+        
+        # Mostrar información de regresión lineal si está disponible
+        if validacion_regresion and validacion_regresion.get('detalles'):
+            detalles = validacion_regresion['detalles']
+            print(f"   📈 Regresión: ∠{detalles.get('angulo', 0):.1f}° | R²={detalles.get('r2', 0):.2f} | {detalles.get('direccion', 'N/A')}")
+        
         print(f"   ✨ Aplicando REGLA DE ORO: {MARGEN_USDT} USDT x{PALANCA_ESTRICTA}...")
         
         # ==========================================
@@ -536,14 +793,23 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza):
         memoria['ultima_operacion_time'] = time.time()
         guardar_memoria(memoria)
         
-        enviar_telegram(f"🔥 *REGLA DE ORO EXACTA* ✅\n"
-                       f"Par: `{symbol}`\n"
-                       f"Lado: `{side.upper()}`\n"
-                       f"Margen: `{margen_verificado:.6f} USDT` (x{apalancamiento_verificado})\n"
-                       f"Tendencia H1: `{tendencia}`\n"
-                       f"Fuerza Señal: `{fuerza}/7`\n"
-                       f"SL: `{sl_str}` | TP: `{tp_str}`\n"
-                       f"_Posiciónabierta exitosamente_")
+        # Construir mensaje de Telegram con información de regresión si está disponible
+        telegram_msg = f"🔥 *REGLA DE ORO EXACTA* ✅\n"
+        telegram_msg += f"Par: `{symbol}`\n"
+        telegram_msg += f"Lado: `{side.upper()}`\n"
+        telegram_msg += f"Margen: `{margen_verificado:.6f} USDT` (x{apalancamiento_verificado})\n"
+        telegram_msg += f"Tendencia H1: `{tendencia}`\n"
+        telegram_msg += f"Fuerza Señal: `{fuerza}/7`\n"
+        
+        # Agregar información de regresión lineal si está disponible
+        if validacion_regresion and validacion_regresion.get('detalles'):
+            detalles = validacion_regresion['detalles']
+            telegram_msg += f"Regresión: ∠{detalles.get('angulo', 0):.1f}° | R²={detalles.get('r2', 0):.2f} | {detalles.get('direccion', 'N/A')}\n"
+        
+        telegram_msg += f"SL: `{sl_str}` | TP: `{tp_str}`\n"
+        telegram_msg += f"_Posiciónabierta exitosamente_"
+        
+        enviar_telegram(telegram_msg)
         
         print(f"✅ Éxito: {side.upper()} abierto en {symbol}")
         print(f"   💰 SL: {sl_str} | TP: {tp_str}")
@@ -562,6 +828,7 @@ print(f"\n📋 Filtros activos:")
 print(f"   • Filtro 1: Tendencia H1 (RSI + EMAs)")
 print(f"   • Filtro 2: Volatilidad mínima ({MIN_VOLATILIDAD_PCT}%)")
 print(f"   • Filtro 6: Fuerza de señal (mín {MIN_FUERZA_SENAL}/7)")
+print(f"   • Filtro 7: Regresión Lineal (R²≥{MIN_R2_THRESHOLD}, ∠≥{ANGULO_MINIMO_CONFIRMACION}°)")
 print(f"   • Cooldown: {COOLDOWN_OPERACION}s entre operaciones")
 print(f"   • Monedas a escanear: {NUM_MONEDAS_ESCANEAR}")
 print("-"*60)
@@ -609,14 +876,26 @@ def telegram_webhook():
 def health_check():
     """Endpoint para verificar el estado del bot"""
     try:
+        # Obtener información de memoria
+        memoria = cargar_memoria()
+        saldo = obtener_balance_real()
+        
         status = {
             "status": "running",
             "timestamp": datetime.now().isoformat(),
-            "operaciones_activas": len(bot.operaciones_activas),
-            "esperando_reentry": len(bot.esperando_reentry),
-            "total_operaciones": bot.total_operaciones,
-            "bitget_conectado": bot.bitget_client is not None,
-            "auto_trading": bot.ejecutar_operaciones_automaticas
+            "operaciones_activas": len(memoria.get('operaciones_activas', [])),
+            "saldo_disponible": saldo,
+            "filtros_activos": [
+                "Tendencia H1 (RSI + EMAs)",
+                "Volatilidad minima",
+                "Fuerza de señal",
+                "Regresion Lineal"
+            ],
+            "config_regresion": {
+                "lookback": LOOKBACK_REGRESION,
+                "min_r2": MIN_R2_THRESHOLD,
+                "angulo_minimo": ANGULO_MINIMO_CONFIRMACION
+            }
         }
         return jsonify(status), 200
     except Exception as e:
