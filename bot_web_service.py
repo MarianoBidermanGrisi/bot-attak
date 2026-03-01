@@ -45,7 +45,7 @@ stopFijo= 0.018
 #        FILTROS AVANZADOS - CONFIGURACION
 # ==========================================
 NUM_MONEDAS_ESCANEAR = 200
-MIN_VOLATILIDAD_PCT = 1.5
+MIN_VOLATILIDAD_PCT = 1.2
 
 # Configuración RSI
 RSI_PERIODO = 14
