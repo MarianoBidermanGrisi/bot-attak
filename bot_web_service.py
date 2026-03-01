@@ -67,9 +67,9 @@ MIN_FUERZA_SENAL = 6
 # ==========================================
 #        FILTRO REGRESION LINEAL - CONFIGURACION
 # ==========================================
-LOOKBACK_REGRESION = 80  # Número de velas para calcular regresión
-MIN_R2_THRESHOLD = 0.6    # R2 mínimo para confirmar tendencia
-ANGULO_MINIMO_CONFIRMACION = 16.0  # Ángulo mínimo para confirmar tendencia
+LOOKBACK_REGRESION = 15  # Número de velas para calcular regresión
+MIN_R2_THRESHOLD = 0.4    # R2 mínimo para confirmar tendencia
+ANGULO_MINIMO_CONFIRMACION = 3  # Ángulo mínimo para confirmar tendencia
 
 # 1️⃣ Obtener configuración desde variables de entorno (Render)
 config = crear_config_desde_entorno()
