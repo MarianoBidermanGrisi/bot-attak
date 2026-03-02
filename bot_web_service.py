@@ -47,7 +47,7 @@ stopFijo= 0.015
 #        FILTROS AVANZADOS - CONFIGURACION
 # ==========================================
 NUM_MONEDAS_ESCANEAR = 200
-MIN_VOLATILIDAD_PCT = 1.3
+MIN_VOLATILIDAD_PCT = 2.0
 
 # Configuración RSI
 RSI_PERIODO = 14
@@ -64,12 +64,9 @@ COOLDOWN_OPERACION = 180
 # Fuerza mínima de señal
 MIN_FUERZA_SENAL = 6
 
-# ==========================================
-#        FILTRO REGRESION LINEAL - CONFIGURACION
-# ==========================================
 LOOKBACK_REGRESION = 22  # Número de velas para calcular regresión
-MIN_R2_THRESHOLD = 0.5    # R2 mínimo para confirmar tendencia
-ANGULO_MINIMO_CONFIRMACION = 4  # Ángulo mínimo para confirmar tendencia
+MIN_R2_THRESHOLD = 0.6   # R2 mínimo para confirmar tendencia
+ANGULO_MINIMO_CONFIRMACION = 5  # Ángulo mínimo para confirmar tendencia
 
 # 1️⃣ Obtener configuración desde variables de entorno (Render)
 config = crear_config_desde_entorno()
