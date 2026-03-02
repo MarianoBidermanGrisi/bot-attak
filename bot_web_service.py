@@ -51,8 +51,8 @@ MIN_VOLATILIDAD_PCT = 1.0
 
 # Configuración RSI
 RSI_PERIODO = 14
-RSI_OVERSOLD = 40
-RSI_OVERBOUGHT = 60
+RSI_OVERSOLD = 35
+RSI_OVERBOUGHT = 65
 
 # Configuración Medias Móviles Adaptativas
 SMA_RAPIDA = 9
@@ -67,7 +67,7 @@ MIN_FUERZA_SENAL = 6
 # ==========================================
 #        FILTRO REGRESION LINEAL - CONFIGURACION
 # ==========================================
-LOOKBACK_REGRESION = 15  # Número de velas para calcular regresión
+LOOKBACK_REGRESION = 26  # Número de velas para calcular regresión
 MIN_R2_THRESHOLD = 0.4    # R2 mínimo para confirmar tendencia
 ANGULO_MINIMO_CONFIRMACION = 3  # Ángulo mínimo para confirmar tendencia
 
