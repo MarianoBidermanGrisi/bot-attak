@@ -41,13 +41,13 @@ def crear_config_desde_entorno():
 MARGEN_USDT = 1 
 PALANCA_ESTRICTA = 10
 MEMORIA_FILE = 'memoria_bot.json'
-stopFijo= 0.016
+stopFijo= 0.015
 
 # ==========================================
 #        FILTROS AVANZADOS - CONFIGURACION
 # ==========================================
 NUM_MONEDAS_ESCANEAR = 200
-MIN_VOLATILIDAD_PCT = 1.0
+MIN_VOLATILIDAD_PCT = 1.3
 
 # Configuración RSI
 RSI_PERIODO = 14
@@ -67,9 +67,9 @@ MIN_FUERZA_SENAL = 6
 # ==========================================
 #        FILTRO REGRESION LINEAL - CONFIGURACION
 # ==========================================
-LOOKBACK_REGRESION = 26  # Número de velas para calcular regresión
-MIN_R2_THRESHOLD = 0.4    # R2 mínimo para confirmar tendencia
-ANGULO_MINIMO_CONFIRMACION = 3  # Ángulo mínimo para confirmar tendencia
+LOOKBACK_REGRESION = 22  # Número de velas para calcular regresión
+MIN_R2_THRESHOLD = 0.5    # R2 mínimo para confirmar tendencia
+ANGULO_MINIMO_CONFIRMACION = 4  # Ángulo mínimo para confirmar tendencia
 
 # 1️⃣ Obtener configuración desde variables de entorno (Render)
 config = crear_config_desde_entorno()
@@ -686,7 +686,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza, valid
         sl = entrada * (1 - stopFijo) if side == 'buy' else entrada * (1 + stopFijo)
 
         #sl = entrada - (rango * 0.15) if side == 'buy' else entrada + (rango * 0.15)
-        tp = entrada + (rango * 0.24) if side == 'buy' else entrada - (rango * 0.24)
+        tp = entrada + (rango * 0.25) if side == 'buy' else entrada - (rango * 0.25)
 
         sl_str = a_decimal_estricto(sl, market['precision']['price'])
         tp_str = a_decimal_estricto(tp, market['precision']['price'])
