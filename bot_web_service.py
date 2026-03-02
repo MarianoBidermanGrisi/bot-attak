@@ -51,12 +51,12 @@ MIN_VOLATILIDAD_PCT = 2.0
 
 # Configuración RSI
 RSI_PERIODO = 14
-RSI_OVERSOLD = 35
-RSI_OVERBOUGHT = 65
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
 
 # Configuración Medias Móviles Adaptativas
-SMA_RAPIDA = 9
-SMA_LENTA = 21
+SMA_RAPIDA = 12
+SMA_LENTA = 26
 
 # Cooldown entre operaciones
 COOLDOWN_OPERACION = 180
@@ -64,9 +64,9 @@ COOLDOWN_OPERACION = 180
 # Fuerza mínima de señal
 MIN_FUERZA_SENAL = 6
 
-LOOKBACK_REGRESION = 22  # Número de velas para calcular regresión
-MIN_R2_THRESHOLD = 0.6   # R2 mínimo para confirmar tendencia
-ANGULO_MINIMO_CONFIRMACION = 5  # Ángulo mínimo para confirmar tendencia
+LOOKBACK_REGRESION = 34  # Número de velas para calcular regresión
+MIN_R2_THRESHOLD = 0.7   # R2 mínimo para confirmar tendencia
+ANGULO_MINIMO_CONFIRMACION = 10  # Ángulo mínimo para confirmar tendencia
 
 # 1️⃣ Obtener configuración desde variables de entorno (Render)
 config = crear_config_desde_entorno()
