@@ -47,7 +47,7 @@ stopFijo= 0.015
 #        FILTROS AVANZADOS - CONFIGURACION
 # ==========================================
 NUM_MONEDAS_ESCANEAR = 200
-MIN_VOLATILIDAD_PCT = 2.0
+MIN_VOLATILIDAD_PCT = 1.0
 
 # Configuración RSI
 RSI_PERIODO = 14
@@ -56,7 +56,7 @@ RSI_OVERBOUGHT = 70
 
 # Configuración Medias Móviles Adaptativas
 SMA_RAPIDA = 12
-SMA_LENTA = 26
+SMA_LENTA = 50
 
 # Cooldown entre operaciones
 COOLDOWN_OPERACION = 180
@@ -64,9 +64,9 @@ COOLDOWN_OPERACION = 180
 # Fuerza mínima de señal
 MIN_FUERZA_SENAL = 6
 
-LOOKBACK_REGRESION = 34  # Número de velas para calcular regresión
+LOOKBACK_REGRESION = 55  # Número de velas para calcular regresión
 MIN_R2_THRESHOLD = 0.7   # R2 mínimo para confirmar tendencia
-ANGULO_MINIMO_CONFIRMACION = 10  # Ángulo mínimo para confirmar tendencia
+ANGULO_MINIMO_CONFIRMACION = 16  # Ángulo mínimo para confirmar tendencia
 
 # 1️⃣ Obtener configuración desde variables de entorno (Render)
 config = crear_config_desde_entorno()
@@ -683,7 +683,7 @@ def abrir_operacion(symbol, side, entrada, df, memoria, tendencia, fuerza, valid
         sl = entrada * (1 - stopFijo) if side == 'buy' else entrada * (1 + stopFijo)
 
         #sl = entrada - (rango * 0.15) if side == 'buy' else entrada + (rango * 0.15)
-        tp = entrada + (rango * 0.25) if side == 'buy' else entrada - (rango * 0.25)
+        tp = entrada + (rango * 0.23) if side == 'buy' else entrada - (rango * 0.23)
 
         sl_str = a_decimal_estricto(sl, market['precision']['price'])
         tp_str = a_decimal_estricto(tp, market['precision']['price'])
