@@ -4,6 +4,7 @@ requests==2.31.0
 numpy==1.26.4
 pandas>=2.2.3
 python-telegram-bot==21.3
+matplotlib>=3.8.0
 gunicorn==21.2.0
 mplfinance>=0.12.10b0
 python-dotenv==1.0.0
