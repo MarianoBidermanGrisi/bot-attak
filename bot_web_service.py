@@ -448,6 +448,97 @@ class TradingBot:
                     'options': {'defaultType': 'swap'},
                     'enableRateLimit': True
                 })
+
+                # --- MONKEY PATCHING PARA COMPATIBILIDAD CON LÓGICA EXISTENTE ---
+                def get_klines_patch(symbol, timeframe, limit=150):
+                    try:
+                        # Convertir símbolo simple a formato CCXT si es necesario
+                        symbol_ccxt = symbol
+                        if 'USDT' in symbol and '/' not in symbol:
+                            symbol_ccxt = symbol.replace('USDT', '/USDT:USDT')
+                        
+                        ohlcv = self.exchange.fetch_ohlcv(symbol_ccxt, timeframe, limit=limit)
+                        # Re-formatear para que coincida con lo que esperaba el cliente antiguo si es necesario
+                        # El cliente antiguo devolvía: [[timestamp, open, high, low, close, volume], ...]
+                        # CCXT ya devuelve exactamente eso.
+                        return ohlcv
+                    except Exception as e:
+                        logger.error(f"Error en get_klines (patch): {e}")
+                        return None
+
+                def get_positions_patch(symbol=None):
+                    try:
+                        # Importante: Usar USDT-FUTURES (mayúsculas) para Bitget V2
+                        return self.exchange.fetch_positions(symbol, params={'productType': 'USDT-FUTURES'})
+                    except Exception as e:
+                        logger.error(f"Error en get_positions (patch): {e}")
+                        return []
+
+                def verificar_orden_activa_patch(order_id, symbol):
+                    try:
+                        if not order_id: return False
+                        order = self.exchange.fetch_order(order_id, symbol)
+                        return order['status'] == 'open'
+                    except:
+                        return False
+
+                def place_tpsl_order_patch(**kwargs):
+                    try:
+                        # Mapeo de parámetros para Bitget V2 Plan Order
+                        symbol = kwargs.get('symbol')
+                        if 'USDT' in symbol and '/' not in symbol:
+                            symbol = symbol.replace('USDT', '/USDT:USDT')
+                            
+                        # El side debe ser el opuesto a la posición
+                        hold_side = kwargs.get('hold_side', '').lower()
+                        side = 'sell' if hold_side == 'long' else 'buy'
+                        
+                        order_type = kwargs.get('order_type') # 'stop_loss' o 'take_profit'
+                        trigger_price = kwargs.get('trigger_price')
+                        
+                        amount = kwargs.get('amount')
+                        if amount is None:
+                            # Intentar obtener el size de la posición abierta
+                            positions = self.exchange.fetch_positions(symbol, params={'productType': 'USDT-FUTURES'})
+                            for pos in positions:
+                                if pos['symbol'] == symbol:
+                                    amount = abs(float(pos['contracts']))
+                                    break
+                        
+                        if not amount:
+                            logger.error(f"Error: No se encontró monto para la orden {order_type} en {symbol}")
+                            return None
+
+                        params = {
+                            'stopPrice': trigger_price,
+                            'planType': 'normal_plan',
+                        }
+                        
+                        if order_type == 'stop_loss':
+                            params['triggerType'] = 'fill_price'
+                        
+                        # Usar create_order de CCXT para órdenes plan (tpsl)
+                        return self.exchange.create_order(
+                            symbol=symbol,
+                            type='market' if order_type == 'stop_loss' else 'limit',
+                            side=side,
+                            amount=amount,
+                            price=trigger_price if order_type == 'take_profit' else None,
+                            params=params
+                        )
+                    except Exception as e:
+                        logger.error(f"Error en place_tpsl_order (patch): {e}")
+                        return None
+
+                # Asignar los métodos parchados al objeto exchange
+                self.exchange.get_klines = get_klines_patch
+                self.exchange.get_positions = get_positions_patch
+                self.exchange.fetch_positions_orig = self.exchange.fetch_positions # Guardar original
+                self.exchange.fetch_positions = get_positions_patch # Reemplazar para consistencia
+                self.exchange.verificar_orden_activa = verificar_orden_activa_patch
+                self.exchange.place_tpsl_order = place_tpsl_order_patch
+                # --- FIN MONKEY PATCHING ---
+
                 # Check connection
                 balance = self.exchange.fetch_balance()
                 available = float(balance.get('USDT', {}).get('free', 0))
@@ -837,7 +928,7 @@ class TradingBot:
         
         try:
             # Obtener posiciones activas en Bitget
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
+            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'USDT-FUTURES'})
                 
             if not posiciones_bitget:
                 # No hay posiciones activas, liberar bloqueos
@@ -938,7 +1029,7 @@ class TradingBot:
             logger.info("🔄 Iniciando sincronización con Bitget FUTUROS...")
             
             # OBTENER POSICIONES ACTIVAS EN BITGET
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
+            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'USDT-FUTURES'})
             
             # DEBUG: Log de todas las posiciones encontradas
             if posiciones_bitget:
