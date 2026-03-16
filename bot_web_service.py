@@ -466,10 +466,15 @@ class TradingBot:
                         logger.error(f"Error en get_klines (patch): {e}")
                         return None
 
-                def get_positions_patch(symbol=None):
+                def get_positions_patch(symbol=None, *args, **kwargs):
                     try:
+                        # Extraer params si existen para mergearlos con productType
+                        extra_params = kwargs.get('params', {})
+                        params = {'productType': 'usdt-futures'}
+                        params.update(extra_params)
+                        
                         # Importante: Usar usdt-futures (minúsculas) para Bitget V2
-                        return self.exchange.fetch_positions(symbol, params={'productType': 'usdt-futures'})
+                        return self.exchange.fetch_positions_orig(symbol, params=params)
                     except Exception as e:
                         logger.error(f"Error en get_positions (patch): {e}")
                         return []
