@@ -438,18 +438,24 @@ class TradingBot:
         self.exchange = None
         if config.get('bitget_api_key') and config.get('bitget_api_secret') and config.get('bitget_passphrase'):
             try:
+                api_key = config['bitget_api_key']
+                logger.info(f"Cliente Bitget FUTUROS inicializado con API Key: {api_key[:10]}...")
+                logger.info("Verificando credenciales Bitget FUTUROS...")
                 self.exchange = ccxt.bitget({
-                    'apiKey': config['bitget_api_key'],           
+                    'apiKey': api_key,           
                     'secret': config['bitget_api_secret'],        
                     'password': config['bitget_passphrase'],      
                     'options': {'defaultType': 'swap'},
                     'enableRateLimit': True
                 })
                 # Check connection
-                self.exchange.fetch_balance()
-                logger.info("✅ Cliente BITGET FUTUROS inicializado (con CCXT)")
+                balance = self.exchange.fetch_balance()
+                available = float(balance.get('USDT', {}).get('free', 0))
+                logger.info("✓ Credenciales BITGET FUTUROS verificadas exitosamente")
+                logger.info(f"✓ Balance disponible FUTUROS: {available:.2f} USDT")
             except Exception as e:
-                logger.warning(f"⚠️ Error inicializando CCXT: {e}")
+                logger.error("✗ No se pudo verificar credenciales BITGET FUTUROS")
+                logger.error(f"Error verificando credenciales BITGET FUTUROS: {e}")
                 self.exchange = None
         
         # LIMPIEZA INICIAL: Liberar símbolos bloquados si no hay posiciones activas
@@ -3213,7 +3219,9 @@ def ejecutar_operacion_bitget(exchange, simbolo, tipo_operacion, capital_usd=Non
     """
     Ejecuta una operación usando CCXT aplicando la REGLA DE ORO (MARGEN_USDT = 1).
     """
-    print(f"🤖 Preparando orden para {simbolo} en {tipo_operacion} usando CCXT...")
+    logger.info(f"🚀 EJECUTANDO OPERACIÓN REAL EN BITGET FUTUROS")
+    logger.info(f"Símbolo: {simbolo}")
+    logger.info(f"Tipo: {tipo_operacion}")
     try:
         tipo_ccxt = 'buy' if tipo_operacion == 'LONG' else 'sell'
         
@@ -3226,19 +3234,22 @@ def ejecutar_operacion_bitget(exchange, simbolo, tipo_operacion, capital_usd=Non
         try:
             balance = exchange.fetch_balance()
             pnl_data['saldo_cuenta'] = float(balance.get('USDT', {}).get('free', 0))
+            logger.info(f"💰 Saldo actual cuenta: ${pnl_data['saldo_cuenta']:.2f}")
         except:
             pnl_data['saldo_cuenta'] = 0.0
+            logger.warning("⚠️ No se pudo obtener saldo de la cuenta")
 
-        print(f"[{simbolo}] Configurando modo de margen aislado y apalancamiento...")
+        logger.info(f"Configurando apalancamiento {PALANCA_ESTRICTA}x para {simbolo}")
         try:
             exchange.set_margin_mode('isolated', simbolo_ccxt)
         except Exception as e:
-            print(f"[{simbolo}] Aviso al aislar: {e}")
+            logger.warning(f"Error configurando modo de posición: {e}")
         
         try:
             exchange.set_leverage(PALANCA_ESTRICTA, simbolo_ccxt)
+            logger.info("✓ Apalancamiento configurado exitosamente")
         except Exception as e:
-            print(f"[{simbolo}] Aviso al fijar palanca: {e}")
+            logger.warning(f"No se pudo configurar apalancamiento, continuando... {e}")
 
         # Obtener información del mercado para la precisión
         mercados = exchange.load_markets()
@@ -3269,13 +3280,15 @@ def ejecutar_operacion_bitget(exchange, simbolo, tipo_operacion, capital_usd=Non
         cantidad_final = float(Decimal(str(cantidad_real)).quantize(Decimal(str(10**-decimales)), rounding=ROUND_DOWN))
         
         if cantidad_final < min_amount:
-            print(f"[{simbolo}] Cantidad calculada {cantidad_final} menor al mín {min_amount}.")
+            logger.error(f"❌ Para {simbolo} a ${precio_actual:.2f}, el mínimo requiere más margen")
             return None
 
-        print(f"[{simbolo}] Abriendo posición: Cantidad {cantidad_final} (Apalancamiento {palanca}x)")
+        logger.info(f"Colocando orden de {tipo_ccxt} con cantidad {cantidad_final}")
         orden_entrada = exchange.create_order(simbolo_ccxt, 'market', tipo_ccxt, cantidad_final)
         precio_entrada_real = orden_entrada.get('average', precio_actual)
         if not precio_entrada_real: precio_entrada_real = precio_actual
+        
+        logger.info(f"✓ Posición abierta en BITGET FUTUROS: {orden_entrada.get('id', 'N/A')}")
         
         # Stop loss logic (fijo) 1.6% (0.016)
         if tipo_operacion == 'LONG':
@@ -3287,16 +3300,18 @@ def ejecutar_operacion_bitget(exchange, simbolo, tipo_operacion, capital_usd=Non
                     'stopLossPrice': a_decimal_estricto(sl_calc, prec_precio),
                     'reduceOnly': True
                 })
+                logger.info("✓ Orden Stop Loss colocada")
             except Exception as e:
-                print(f"[{simbolo}] Aviso creando SL: {e}")
+                logger.warning(f"⚠️ Aviso creando SL: {e}")
             # TP order
             try:
                 exchange.create_order(simbolo_ccxt, 'market', 'sell', cantidad_final, params={
                     'takeProfitPrice': a_decimal_estricto(tp_calc, prec_precio),
                     'reduceOnly': True
                 })
+                logger.info("✓ Orden Take Profit colocada")
             except Exception as e:
-                print(f"[{simbolo}] Aviso creando TP: {e}")
+                logger.warning(f"⚠️ Aviso creando TP: {e}")
         else:
             sl_calc = precio_entrada_real * (1 + stopFijo)
             tp_calc = precio_entrada_real * (1 - stopFijo * 1.5)
@@ -3305,17 +3320,21 @@ def ejecutar_operacion_bitget(exchange, simbolo, tipo_operacion, capital_usd=Non
                     'stopLossPrice': a_decimal_estricto(sl_calc, prec_precio),
                     'reduceOnly': True
                 })
+                logger.info("✓ Orden Stop Loss colocada")
             except Exception as e:
-                print(f"[{simbolo}] Aviso creando SL: {e}")
+                logger.warning(f"⚠️ Aviso creando SL: {e}")
             # TP order
             try:
                 exchange.create_order(simbolo_ccxt, 'market', 'buy', cantidad_final, params={
                     'takeProfitPrice': a_decimal_estricto(tp_calc, prec_precio),
                     'reduceOnly': True
                 })
+                logger.info("✓ Orden Take Profit colocada")
             except Exception as e:
-                print(f"[{simbolo}] Aviso creando TP: {e}")
+                logger.warning(f"⚠️ Aviso creando TP: {e}")
 
+        logger.info(f"Capital usado (estimado): {capital}")
+        logger.info(f"Precio Entrada Real: {precio_entrada_real}")
         return {
             'capital_usado': capital,
             'saldo_cuenta': pnl_data['saldo_cuenta'],
@@ -3327,7 +3346,7 @@ def ejecutar_operacion_bitget(exchange, simbolo, tipo_operacion, capital_usd=Non
         }
         
     except Exception as e:
-        print(f"[{simbolo}] ERROR abriendo operación: {e}")
+        logger.error(f"❌ ERROR ejecutando orden en Bitget para {simbolo}: {e}")
         return None
 
 
