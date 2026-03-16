@@ -457,7 +457,7 @@ class TradingBot:
                         if 'USDT' in symbol and '/' not in symbol:
                             symbol_ccxt = symbol.replace('USDT', '/USDT:USDT')
                         
-                        ohlcv = self.exchange.fetch_ohlcv(symbol_ccxt, timeframe, limit=limit)
+                        ohlcv = self.exchange.fetch_ohlcv(symbol_ccxt, timeframe.lower(), limit=limit)
                         # Re-formatear para que coincida con lo que esperaba el cliente antiguo si es necesario
                         # El cliente antiguo devolvía: [[timestamp, open, high, low, close, volume], ...]
                         # CCXT ya devuelve exactamente eso.
@@ -468,8 +468,8 @@ class TradingBot:
 
                 def get_positions_patch(symbol=None):
                     try:
-                        # Importante: Usar USDT-FUTURES (mayúsculas) para Bitget V2
-                        return self.exchange.fetch_positions(symbol, params={'productType': 'USDT-FUTURES'})
+                        # Importante: Usar usdt-futures (minúsculas) para Bitget V2
+                        return self.exchange.fetch_positions(symbol, params={'productType': 'usdt-futures'})
                     except Exception as e:
                         logger.error(f"Error en get_positions (patch): {e}")
                         return []
@@ -499,7 +499,7 @@ class TradingBot:
                         amount = kwargs.get('amount')
                         if amount is None:
                             # Intentar obtener el size de la posición abierta
-                            positions = self.exchange.fetch_positions(symbol, params={'productType': 'USDT-FUTURES'})
+                            positions = self.exchange.fetch_positions(symbol, params={'productType': 'usdt-futures'})
                             for pos in positions:
                                 if pos['symbol'] == symbol:
                                     amount = abs(float(pos['contracts']))
@@ -928,7 +928,7 @@ class TradingBot:
         
         try:
             # Obtener posiciones activas en Bitget
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'USDT-FUTURES'})
+            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
                 
             if not posiciones_bitget:
                 # No hay posiciones activas, liberar bloqueos
@@ -1029,7 +1029,7 @@ class TradingBot:
             logger.info("🔄 Iniciando sincronización con Bitget FUTUROS...")
             
             # OBTENER POSICIONES ACTIVAS EN BITGET
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'USDT-FUTURES'})
+            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
             
             # DEBUG: Log de todas las posiciones encontradas
             if posiciones_bitget:
