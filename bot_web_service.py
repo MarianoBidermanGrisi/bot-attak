@@ -468,15 +468,20 @@ class TradingBot:
 
                 def get_positions_patch(symbol=None, *args, **kwargs):
                     try:
-                        # Importante: PARA V2 /all-position REQUIERE USDT-FUTURES (MAYÚSCULAS)
+                        # Extraer params si existen
                         extra_params = kwargs.get('params', {})
-                        params = {'productType': 'USDT-FUTURES'}
+                        # Bitget V2 MIX all-position requiere productType
+                        # Probamos usdt-futures (minúsculas) de nuevo pero con log detallado si falla
+                        params = {'productType': 'usdt-futures'}
                         params.update(extra_params)
                         
-                        # Importante: Usar USDT-FUTURES (mayúsculas) para Bitget V2 posiciones
                         return self.exchange.fetch_positions_orig(symbol, params=params)
                     except Exception as e:
-                        logger.error(f"Error en get_positions (patch): {e}")
+                        # Log detallado de la excepción para ver el cuerpo del error de Bitget
+                        error_msg = str(e)
+                        logger.error(f"❌ Error detallado en get_positions (patch): {error_msg}")
+                        if hasattr(e, 'response'):
+                             logger.error(f"   Respuesta del servidor: {e.response}")
                         return []
 
                 def verificar_orden_activa_patch(order_id, symbol):
