@@ -468,20 +468,19 @@ class TradingBot:
 
                 def get_positions_patch(symbol=None, *args, **kwargs):
                     try:
-                        # Extraer params si existen
-                        extra_params = kwargs.get('params', {})
-                        # Bitget V2 MIX all-position requiere productType
-                        # Probamos usdt-futures (minúsculas) de nuevo pero con log detallado si falla
+                        # Usar llamada directa para evitar que CCXT inyecte marginCoin=USDT o sobrescriba
+                        # el productType en cuentas unificadas.
                         params = {'productType': 'usdt-futures'}
-                        params.update(extra_params)
                         
-                        return self.exchange.fetch_positions_orig(symbol, params=params)
+                        # Llamada directa a la API V2
+                        raw_response = self.exchange.private_get_mix_position_all_position(params)
+                        
+                        if raw_response and 'data' in raw_response:
+                            # parse_positions convierte el formato crudo de Bitget al formato CCXT estándar
+                            return self.exchange.parse_positions(raw_response['data'])
+                        return []
                     except Exception as e:
-                        # Log detallado de la excepción para ver el cuerpo del error de Bitget
-                        error_msg = str(e)
-                        logger.error(f"❌ Error detallado en get_positions (patch): {error_msg}")
-                        if hasattr(e, 'response'):
-                             logger.error(f"   Respuesta del servidor: {e.response}")
+                        logger.error(f"❌ Error crítico en get_positions (patch): {e}")
                         return []
 
                 def verificar_orden_activa_patch(order_id, symbol):
@@ -937,8 +936,8 @@ class TradingBot:
             return
         
         try:
-            # Obtener posiciones activas en Bitget - REQUIERE MAYÚSCULAS para V2
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'USDT-FUTURES'})
+            # Obtener posiciones activas en Bitget - Usar minúsculas para V2
+            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
                 
             if not posiciones_bitget:
                 # No hay posiciones activas, liberar bloqueos
@@ -1038,8 +1037,8 @@ class TradingBot:
         try:
             logger.info("🔄 Iniciando sincronización con Bitget FUTUROS...")
             
-            # OBTENER POSICIONES ACTIVAS EN BITGET - REQUIERE MAYÚSCULAS para V2
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'USDT-FUTURES'})
+            # OBTENER POSICIONES ACTIVAS EN BITGET - Usar minúsculas para V2
+            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
             
             # DEBUG: Log de todas las posiciones encontradas
             if posiciones_bitget:
