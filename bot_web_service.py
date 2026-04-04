@@ -1,15 +1,8 @@
 # bot_web_service.py
 # Adaptación para ejecución local del bot Breakout + Reentry
 import requests
-import ccxt
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import time
 import json
-import sys
-try:
-    sys.stdout.reconfigure(encoding='utf-8')
-except AttributeError:
-    pass
 import os
 import sys
 import hmac
@@ -35,6 +28,8 @@ import logging
 # Configurar logging básico
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
 
 
 # ---------------------------
@@ -381,21 +376,6 @@ class OptimizadorIA:
 # ---------------------------
 # SÍMBOLOS OMITIDOS - Lista de símbolos a excluir en la generación dinámica
 # ---------------------------
-MARGEN_USDT = 1 
-PALANCA_ESTRICTA = 10
-stopFijo = 0.016
-NUM_MONEDAS_ESCANEAR = 200
-
-def a_decimal_estricto(numero, precision_raw):
-    if numero is None: return None
-    if isinstance(precision_raw, float):
-        precision_str = format(precision_raw, 'f').rstrip('0')
-        decimales = len(precision_str.split('.')[1]) if '.' in precision_str else 0
-    else:
-        decimales = int(precision_raw)
-    valor = Decimal(str(numero)).quantize(Decimal(str(10**-decimales)), rounding=ROUND_DOWN)
-    return str(valor)
-
 SIMBOLOS_OMITIDOS = {
     # stablecoins y relacionados
     'USDTUSDT', 'USDCUSDT', 'DAIUSDT', 'TUSDUSDT', 'BUSDUSDT',
@@ -413,6 +393,1291 @@ SIMBOLOS_OMITIDOS = {
     'LUNAUSDT', 'LUNA2USDT'
 }
 
+# ---------------------------
+# BITGET CLIENT - INTEGRACIÓN COMPLETA CON API BITGET FUTUROS
+# ---------------------------
+class BitgetClient:
+    def __init__(self, api_key, api_secret, passphrase, bot_instance=None):
+        # CREDENCIALES REALES DE BITGET FUTUROS (desde automatico.py)
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.passphrase = passphrase
+        self.base_url = "https://api.bitget.com"
+        self._bot_instance = bot_instance  # Referencia al bot para persistencia
+        logger.info(f"Cliente Bitget FUTUROS inicializado con API Key: {api_key[:10]}...")
+
+    def _generate_signature(self, timestamp, method, request_path, body=''):
+        # SI body ya es string (JSON), NO lo tocamos
+        if isinstance(body, str):
+            body_str = body
+        # SI es dict, lo convertimos UNA sola vez
+        elif body:
+            body_str = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+        else:
+            body_str = ''
+
+        message = f'{timestamp}{method}{request_path}{body_str}'
+
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            message.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+
+        return base64.b64encode(signature).decode()
+
+    def _get_headers(self, method, request_path, body=None):
+        timestamp = str(int(time.time() * 1000))
+        sign = self._generate_signature(timestamp, method, request_path, body)
+        headers = {
+            'ACCESS-KEY': self.api_key,
+            'ACCESS-SIGN': sign,
+            'ACCESS-TIMESTAMP': timestamp,
+            'ACCESS-PASSPHRASE': self.passphrase,
+            'Content-Type': 'application/json'
+        }
+        return headers
+
+    def verificar_credenciales(self):
+        """Verificar que las credenciales sean válidas"""
+        try:
+            logger.info("Verificando credenciales Bitget FUTUROS...")
+            
+            if not self.api_key or not self.api_secret or not self.passphrase:
+                logger.error("Credenciales incompletas")
+                return False
+            
+            accounts = self.get_account_info()
+            if accounts:
+                logger.info("✓ Credenciales BITGET FUTUROS verificadas exitosamente")
+                for account in accounts:
+                    if account.get('marginCoin') == 'USDT':
+                        available = float(account.get('available', 0))
+                        logger.info(f"✓ Balance disponible FUTUROS: {available:.2f} USDT")
+                return True
+            else:
+                logger.error("✗ No se pudo verificar credenciales BITGET FUTUROS")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error verificando credenciales BITGET FUTUROS: {e}")
+            return False
+
+    def get_account_info(self, product_type='USDT-FUTURES'):
+        """Obtener información de cuenta Bitget V2 - FUTUROS"""
+        try:
+            request_path = '/api/v2/mix/account/accounts'
+            params = {'productType': product_type, 'marginCoin': 'USDT'}
+            
+            query_string = f"?productType={product_type}&marginCoin=USDT"
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                f"{self.base_url}{request_path}",
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            logger.info(f"Respuesta cuenta FUTUROS - Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    return data.get('data', [])
+                else:
+                    error_msg = data.get('msg', 'Unknown error')
+                    error_code = data.get('code', 'Unknown')
+                    logger.error(f"Error API BITGET FUTUROS: {error_code} - {error_msg}")
+                    
+                    if error_code == '40020' and product_type == 'USDT-FUTURES':
+                        logger.info("Intentando con productType='USDT-MIX'...")
+                        return self.get_account_info('USDT-MIX')
+            else:
+                logger.error(f"Error HTTP BITGET FUTUROS: {response.status_code} - {response.text}")
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error en get_account_info BITGET FUTUROS: {e}")
+            return None
+
+    def get_symbol_info(self, symbol):
+        """Obtener información del símbolo FUTUROS"""
+        try:
+            request_path = '/api/v2/mix/market/contracts'
+            params = {'productType': 'USDT-FUTURES'}
+            
+            query_string = f"?productType=USDT-FUTURES"
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    contracts = data.get('data', [])
+                    for contract in contracts:
+                        if contract.get('symbol') == symbol:
+                            return contract
+            
+            params = {'productType': 'USDT-MIX'}
+            query_string = f"?productType=USDT-MIX"
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    contracts = data.get('data', [])
+                    for contract in contracts:
+                        if contract.get('symbol') == symbol:
+                            return contract
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error obteniendo info del símbolo BITGET FUTUROS: {e}")
+            return None
+
+    def get_max_leverage(self, symbol, product_type='USDT-FUTURES'):
+        """
+        Obtiene el apalancamiento máximo permitido para un símbolo específico.
+        
+        Args:
+            symbol: Símbolo de trading (ej: 'BTCUSDT')
+            product_type: Tipo de producto ('USDT-FUTURES' o 'USDT-MIX')
+        
+        Returns:
+            int: Apalancamiento máximo permitido, o 10 por defecto si hay error
+        """
+        try:
+            # Primero obtener la info del símbolo
+            symbol_info = self.get_symbol_info(symbol)
+            if not symbol_info:
+                logger.warning(f"No se pudo obtener info de {symbol}, usando leverage 10x por defecto")
+                return 10
+            
+            # Obtener el leverage máximo del exchange
+            # La API de Bitget devuelve 'openMaxLeverage' en la info del contrato
+            max_leverage = symbol_info.get('openMaxLeverage', 10)
+            
+            # Asegurar que sea un valor válido
+            if not max_leverage or max_leverage < 1:
+                max_leverage = 10
+            
+            logger.info(f"📊 {symbol}: Apalancamiento máximo permitido = {max_leverage}x")
+            return int(max_leverage)
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo leverage máximo para {symbol}: {e}")
+            return 10  # Fallback seguro
+
+    def place_tpsl_order(self, symbol, hold_side, trigger_price, order_type='stop_loss', stop_loss_price=None, take_profit_price=None, trade_direction=None):
+        """
+        Coloca orden de Stop Loss o Take Profit en Bitget Futuros para posición existente
+        
+        Args:
+            symbol: Símbolo (ej: 'CRVUSDT')
+            hold_side: 'long' o 'short'
+            trigger_price: Precio de activación (usado como precio de SL/TP)
+            order_type: 'stop_loss' o 'take_profit'
+            stop_loss_price: Precio de stop loss (opcional)
+            take_profit_price: Precio de take profit (opcional)
+            trade_direction: 'LONG' o 'SHORT' para redondeo correcto del SL
+        """
+        request_path = '/api/v2/mix/order/place-pos-tpsl'
+        
+        # Determinar la dirección de la operación si no se proporciona
+        if trade_direction is None:
+            trade_direction = 'LONG' if hold_side == 'long' else 'SHORT'
+        
+        # CORRECCIÓN ERROR 45115: Obtener la precisión correcta dinámicamente para cada símbolo
+        # Bitget requiere que los precios sean múltiplos del priceStep específico de cada símbolo
+        symbol_info = self.get_symbol_info(symbol)
+        if symbol_info:
+            # priceScale indica los decimales requeridos para este símbolo
+            price_scale = symbol_info.get('priceScale', 4)
+            logger.info(f"📋 {symbol}: priceScale = {price_scale} (decimales requeridos)")
+            precision_bitget = price_scale
+        else:
+            # Fallback: usar 4 decimales si no se puede obtener info del símbolo
+            logger.warning(f"⚠️ No se pudo obtener info de {symbol}, usando 4 decimales por defecto")
+            precision_bitget = 4
+        
+        # Body correcto según documentación Bitget API v2
+        # IMPORTANTE: NO incluir delegateType, orderType, triggerType, triggerPrice
+        # Estos parámetros no existen en el endpoint /api/v2/mix/order/place-pos-tpsl
+        body = {
+            'symbol': symbol,
+            'productType': 'USDT-FUTURES',
+            'marginCoin': 'USDT',
+            'holdSide': hold_side,
+            # Estos parámetros SÍ son requeridos según documentación Bitget
+            'stopLossTriggerType': 'mark_price',
+            'stopSurplusTriggerType': 'mark_price'
+        }
+        
+        # Usar la precisión correcta para precios de SL/TP en Bitget
+        if order_type == 'stop_loss' and stop_loss_price:
+            # Pasar la dirección para redondeo correcto del SL
+            stop_loss_formatted = self.redondear_precio_manual(stop_loss_price, precision_bitget, symbol, trade_direction)
+            body['stopLossTriggerPrice'] = stop_loss_formatted
+            logger.info(f"🔧 SL para {symbol}: precio={stop_loss_price}, precision={precision_bitget}, formatted={stop_loss_formatted}, direccion={trade_direction}")
+        elif order_type == 'take_profit' and take_profit_price:
+            take_profit_formatted = self.redondear_precio_manual(take_profit_price, precision_bitget, symbol)
+            body['stopSurplusTriggerPrice'] = take_profit_formatted
+            logger.info(f"🔧 TP para {symbol}: precio={take_profit_price}, precision={precision_bitget}, formatted={take_profit_formatted}")
+        
+        body_json = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+        headers = self._get_headers('POST', request_path, body_json)
+        
+        logger.info(f"📤 Enviando orden {order_type} para {symbol}: {body}")
+        
+        response = requests.post(
+            self.base_url + request_path,
+            headers=headers,
+            data=body_json,
+            timeout=10
+        )
+        
+        logger.info(f"📤 Respuesta TP/SL BITGET: {response.status_code} - {response.text}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('code') == '00000':
+                logger.info(f"✅ {order_type.upper()} creado correctamente para {symbol}")
+                return data.get('data')
+            else:
+                # Error 40017: parámetros incorrectos
+                if data.get('code') == '40017':
+                    logger.error(f"❌ Error 40017 en {order_type}: {data.get('msg')}")
+                    logger.error(f"💡 Body enviado: {body}")
+                # Error 40034: faltan parámetros de tipo
+                if data.get('code') == '40034':
+                    logger.error(f"❌ Error 40034 en {order_type}: {data.get('msg')}")
+                    logger.error(f"💡 Body enviado: {body}")
+        
+        logger.error(f"❌ Error creando {order_type}: {response.text}")
+        return None
+
+   
+   
+   
+   
+   
+   
+   
+
+    def get_order_status(self, order_id, symbol):
+        """
+        Verificar el estado de una orden específica en Bitget
+        
+        Args:
+            order_id: ID de la orden a verificar
+            symbol: Símbolo de la orden
+        
+        Returns:
+            dict: Información del estado de la orden o None si hay error
+        """
+        try:
+            request_path = '/api/v2/mix/order/detail'
+            params = {'orderId': order_id, 'symbol': symbol, 'productType': 'USDT-FUTURES'}
+            
+            query_parts = []
+            for key, value in params.items():
+                query_parts.append(f"{key}={value}")
+            query_string = "?" + "&".join(query_parts) if query_parts else ""
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    return data.get('data')
+                else:
+                    logger.warning(f"⚠️ Error consultando orden {order_id}: {data.get('msg')}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error verificando estado de orden {order_id}: {e}")
+            return None
+
+    def verificar_orden_activa(self, order_id, symbol):
+        """
+        Verificar si una orden TP/SL sigue activa (no ejecutada ni cancelada)
+        
+        Args:
+            order_id: ID de la orden
+            symbol: Símbolo de la orden
+        
+        Returns:
+            bool: True si la orden está activa, False si no
+        """
+        if not order_id:
+            return False
+        
+        orden = self.get_order_status(order_id, symbol)
+        if orden:
+            estado = orden.get('status', '')
+            # Estados activos en Bitget: 'alive', 'effective', 'not_trigger'
+            estados_activos = ['alive', 'effective', 'not_trigger', '1', '2']
+            if estado in estados_activos:
+                return True
+        
+        return False
+
+    def get_position_mode(self, symbol, product_type='USDT-FUTURES'):
+        """
+        Obtener el modo de posición actual de la cuenta para un símbolo específico
+        
+        Returns:
+            str: 'hedged' (cobertura) o 'unilateral' (one-way) o None si hay error
+        """
+        try:
+            request_path = '/api/v2/mix/account/account'
+            params = {'productType': product_type, 'marginCoin': 'USDT', 'symbol': symbol}
+            
+            query_parts = []
+            for key, value in params.items():
+                query_parts.append(f"{key}={value}")
+            query_string = "?" + "&".join(query_parts) if query_parts else ""
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    account_data = data.get('data', {})
+                    logger.info(f"📋 Modo de cuenta para {symbol}: {account_data}")
+                    return account_data
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error obteniendo modo de posición: {e}")
+            return None
+
+    def set_hedged_mode(self, symbol, hedged_mode=True):
+        """
+        Configurar el modo de posición (hedge/unilateral) para un símbolo
+        
+        Args:
+            symbol: Símbolo (ej: 'BTCUSDT')
+            hedged_mode: True para modo cobertura (hedged), False para unilateral (one-way)
+        
+        Returns:
+            bool: True si se configuró correctamente
+        """
+        try:
+            request_path = '/api/v2/mix/account/set-position-mode'
+            body = {
+                'symbol': symbol,
+                'productType': 'USDT-FUTURES',
+                'marginCoin': 'USDT',
+                'holdSide': 'long' if hedged_mode else 'short',  # Configuración dummy para API
+                'positionMode': 'hedged' if hedged_mode else 'single'  # Modo de posición
+            }
+            
+            logger.info(f"Configurando modo {'hedged' if hedged_mode else 'unilateral'} para {symbol}")
+            
+            body_json = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+            headers = self._get_headers('POST', request_path, body_json)
+            
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                data=body_json,
+                timeout=10
+            )
+            
+            logger.info(f"Respuesta set_position_mode BITGET: {response.status_code} - {response.text}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    logger.info(f"✓ Modo {'hedged' if hedged_mode else 'unilateral'} configurado para {symbol}")
+                    return True
+                    
+            return False
+        except Exception as e:
+            logger.error(f"Error configurando modo de posición: {e}")
+            return False
+
+    def place_order(self, symbol, side, size, order_type='market', posSide=None, is_hedged_account=False, 
+                    stop_loss_price=None, take_profit_price=None, trade_direction=None):
+        """
+        Coloca orden de entrada MARKET en Bitget Futuros con TP/SL integrados
+        
+        Args:
+            symbol: Símbolo (ej: 'BTCUSDT')
+            side: 'buy' o 'sell'
+            size: número de contratos (int)
+            order_type: 'market' o 'limit'
+            posSide: 'long' o 'short' (SOLO para modo unilateral, omitir en modo hedge)
+            is_hedged_account: True si la cuenta está en modo cobertura (hedged)
+            stop_loss_price: Precio de Stop Loss (opcional)
+            take_profit_price: Precio de Take Profit (opcional)
+            trade_direction: 'LONG' o 'SHORT' para redondeo correcto del SL
+        """
+        request_path = '/api/v2/mix/order/place-order'
+
+        # Determinar la dirección de la operación si no se proporciona
+        if trade_direction is None:
+            if side == 'buy':
+                trade_direction = 'LONG'
+            elif side == 'sell':
+                trade_direction = 'SHORT'
+        
+        # CORRECCIÓN ERROR 45115: Obtener la precisión correcta dinámicamente para cada símbolo
+        # Bitget requiere que los precios sean múltiplos del priceStep específico de cada símbolo
+        symbol_info = self.get_symbol_info(symbol)
+        if symbol_info:
+            # priceScale indica los decimales requeridos para este símbolo
+            price_scale = symbol_info.get('priceScale', 4)
+            logger.info(f"📋 {symbol}: priceScale = {price_scale} (decimales requeridos)")
+            precision_bitget = price_scale
+        else:
+            # Fallback: usar 4 decimales si no se puede obtener info del símbolo
+            logger.warning(f"⚠️ No se pudo obtener info de {symbol}, usando 4 decimales por defecto")
+            precision_bitget = 4
+        
+        if stop_loss_price is not None:
+            # Redondear con la precisión correcta para este símbolo
+            stop_loss_formatted = self.redondear_precio_manual(float(stop_loss_price), precision_bitget, symbol, trade_direction)
+        else:
+            stop_loss_formatted = None
+            
+        if take_profit_price is not None:
+            # Redondear con la precisión correcta para este símbolo
+            take_profit_formatted = self.redondear_precio_manual(float(take_profit_price), precision_bitget, symbol)
+        else:
+            take_profit_formatted = None
+
+        # EN MODO HEDGE: NO enviar posSide (causa error 40774)
+        # EN MODO UNILATERAL: SÍ enviar posSide
+        if is_hedged_account:
+            body = {
+                "symbol": symbol,
+                "productType": "USDT-FUTURES",
+                "marginMode": "isolated",
+                "marginCoin": "USDT",
+                "side": side,           # buy = long, sell = short
+                "orderType": "market",
+                "size": str(size)
+                # NOTA: En modo hedge, NO incluir posSide - causa error 40774
+            }
+            logger.info(f"📤 Orden en MODO HEDGE: side={side}, size={size} (sin posSide)")
+        else:
+            # Modo unilateral: posSide es obligatorio
+            if not posSide:
+                logger.error("❌ En modo unilateral, posSide es obligatorio ('long' o 'short')")
+                return None
+            body = {
+                "symbol": symbol,
+                "productType": "USDT-FUTURES",
+                "marginMode": "isolated",
+                "marginCoin": "USDT",
+                "side": side,           # buy = long, sell = short  
+                "orderType": "market",
+                "size": str(size),
+                "posSide": posSide      # OBLIGATORIO para modo unilateral
+            }
+            logger.info(f"📤 Orden en MODO UNILATERAL: side={side}, posSide={posSide}, size={size}")
+
+        # AGREGAR TP/SL DIRECTAMENTE EN LA ORDEN (según API Bitget v2)
+        # Documentación Bitget: presetStopSurplusPrice y presetStopLossPrice
+        if stop_loss_formatted is not None:
+            body["presetStopLossPrice"] = str(stop_loss_formatted)
+            logger.info(f"🔧 SL integrado: presetStopLossPrice={stop_loss_formatted}")
+        
+        if take_profit_formatted is not None:
+            body["presetStopSurplusPrice"] = str(take_profit_formatted)
+            logger.info(f"🔧 TP integrado: presetStopSurplusPrice={take_profit_formatted}")
+
+        body_json = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+
+        headers = self._get_headers('POST', request_path, body_json)
+
+        logger.info(f"📤 Enviando orden con TP/SL integrados: {body}")
+
+        response = requests.post(
+            self.base_url + request_path,
+            headers=headers,
+            data=body_json,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('code') == '00000':
+                logger.info(f"✅ Orden ejecutada ({side.upper()}) con TP/SL en modo {'HEDGE' if is_hedged_account else 'UNILATERAL'}")
+                return data.get('data')
+            else:
+                # Error 40774: Modo de posición
+                if data.get('code') == '40774':
+                    logger.error(f"❌ Error 40774: La cuenta está en modo {'HEDGE' if not is_hedged_account else 'UNILATERAL'} pero la orden espera el otro modo")
+                    logger.error(f"💡 Solución: Verificar configuración de modo de posición en Bitget")
+                # Error 40034: parámetros faltantes
+                if data.get('code') == '40034':
+                    logger.error(f"❌ Error 40034: {data.get('msg')}")
+
+        logger.error(f"❌ Error orden entrada: {response.text}")
+        return None
+
+    def obtener_precision_precio(self, symbol):
+        """Obtiene la precisión de precio para un símbolo específico"""
+        try:
+            symbol_info = self.get_symbol_info(symbol)
+            if symbol_info:
+                # Obtener la precisión de precio (priceScale)
+                price_scale = symbol_info.get('priceScale', 4)  # Default a 4 decimales
+                logger.info(f"📋 {symbol}: priceScale = {price_scale}")
+                return price_scale
+            else:
+                logger.warning(f"No se pudo obtener info de {symbol}, usando 4 decimales por defecto")
+                return 4
+        except Exception as e:
+            logger.error(f"Error obteniendo precisión de {symbol}: {e}")
+            return 4  # Fallback seguro
+
+    def redondear_precio_precision(self, price, symbol):
+        """Redondea el precio a la precisión correcta para el símbolo"""
+        try:
+            precision = self.obtener_precision_precio(symbol)
+            precio_redondeado = round(float(price), precision)
+            logger.info(f"🔢 {symbol}: {price} → {precio_redondeado} (precisión: {precision} decimales)")
+            return precio_redondeado
+        except Exception as e:
+            logger.error(f"Error redondeando precio para {symbol}: {e}")
+            return float(price)  # Fallback
+
+    def obtener_precision_adaptada(self, price, symbol):
+        """
+        Obtiene la precisión adaptativa basada en el precio para evitar redondeo a cero.
+        
+        Para símbolos con precios muy pequeños (SHIBUSDT, PEPE, ENS, XLM, etc.), la precisión
+        de priceScale no es suficiente. Este método calcula la precisión necesaria
+        para mantener al menos 4-6 dígitos significativos.
+        
+        Args:
+            price: Precio a evaluar
+            symbol: Símbolo de trading
+        
+        Returns:
+            int: Número de decimales a usar como "mínimo" para cálculo interno
+        """
+        try:
+            price = float(price)
+            
+            # Para precios < 1, siempre usar alta precisión para evitar redondeo a cero
+            # Esta es la causa principal del error con SHIB, PEPE, ENS, XLM, PHA, etc.
+            if price < 1:
+                # Para precios muy pequeños, necesitamos muchos decimales
+                if price < 0.00001:
+                    return 12  # Para PEPE, SHIB y similares
+                elif price < 0.0001:
+                    return 10  # Para memecoins extremos
+                elif price < 0.001:
+                    return 8   # Para memecoins y precios muy pequeños
+                elif price < 0.01:
+                    return 7   # Para precios como ENS (~0.008)
+                elif price < 0.1:
+                    return 6   # Para precios como PHA (~0.1)
+                elif price < 1:
+                    return 5   # Para precios como XLM (~0.2)
+            else:
+                # Para precios >= 1, usar 4 decimales como mínimo
+                return 4
+                
+        except Exception as e:
+            logger.error(f"Error calculando precisión adaptativa: {e}")
+            return 8  # Fallback seguro para cualquier precio
+
+    def redondear_precio_manual(self, price, precision, symbol=None, trade_direction=None):
+        """
+        Redondea el precio con la precisión correcta según el símbolo en Bitget.
+        IMPORTANTE: Para la API de Bitget, el precio debe ser un múltiplo del priceStep.
+        
+        Para Stop Loss:
+        - LONG: El SL debe redondearse hacia ABAJO (menor que el precio de entrada)
+        - SHORT: El SL debe redondearse hacia ARRIBA (mayor que el precio de entrada)
+        
+        Args:
+            price: Precio a redondear
+            precision: Número de decimales (obtenido del priceScale del símbolo)
+            symbol: Símbolo para obtener priceStep real del exchange
+            trade_direction: 'LONG', 'SHORT' o None (solo afecta el redondeo del SL)
+        
+        Returns:
+            str: Precio redondeado como string (nunca cero si el precio original > 0)
+        """
+        try:
+            price = float(price)
+            if price == 0:
+                return "0.0"
+            
+            # Determinar el tick_size basándose en el símbolo o en la precisión proporcionada
+            if symbol:
+                symbol_info = self.get_symbol_info(symbol)
+                if symbol_info:
+                    # priceScale indica los decimales requeridos para este símbolo
+                    price_scale = symbol_info.get('priceScale', precision)
+                    logger.info(f"📋 {symbol}: Usando priceScale = {price_scale} para redondeo")
+                else:
+                    # Si no se puede obtener info, usar la precisión proporcionada
+                    price_scale = precision
+                    logger.warning(f"⚠️ No se pudo obtener info de {symbol}, usando precision={precision}")
+            else:
+                # Si no hay símbolo, usar la precisión proporcionada
+                price_scale = precision
+            
+            # Calcular el tick_size basado en price_scale
+            tick_size = 10 ** (-price_scale)
+            
+            # Redondear matemáticamente al múltiplo más cercano del tick_size
+            precio_redondeado = round(price / tick_size) * tick_size
+            
+            # AJUSTE INTELIGENTE PARA STOP LOSS
+            # El SL para LONG debe estar POR DEBAJO del precio de entrada
+            # El SL para SHORT debe estar POR ENCIMA del precio de entrada
+            import math
+            if trade_direction and trade_direction in ['LONG', 'SHORT']:
+                precio_redondeado = float(f"{precio_redondeado:.{price_scale}f}")
+                
+                if trade_direction == 'LONG':
+                    # Para LONG: SL debe ser menor que precio de entrada
+                    # Redondear hacia ABAJO usando floor
+                    if precio_redondeado >= price:
+                        # Ir al tick anterior (menor)
+                        precio_redondeado = math.floor(price / tick_size) * tick_size
+                elif trade_direction == 'SHORT':
+                    # Para SHORT: SL debe ser mayor que precio de entrada
+                    # Redondear hacia ARRIBA usando ceil
+                    if precio_redondeado <= price:
+                        # Ir al siguiente tick (mayor)
+                        precio_redondeado = math.ceil(price / tick_size) * tick_size
+            
+            # Usar formato para evitar errores de punto flotante
+            precio_formateado = f"{precio_redondeado:.{price_scale}f}"
+            
+            # Verificar que no sea cero
+            if float(precio_formateado) == 0.0 and price > 0:
+                # Si se redondeó a cero, usar más decimales
+                nueva_scale = price_scale + 4
+                tick_size = 10 ** (-nueva_scale)
+                precio_redondeado = round(price / tick_size) * tick_size
+                precio_formateado = f"{precio_redondeado:.{nueva_scale}f}"
+                logger.warning(f"⚠️ {symbol}: Precio redondeado a cero, usando {nueva_scale} decimales")
+            
+            logger.info(f"🔢 {symbol if symbol else 'N/A'}: precio={price}, priceScale={price_scale}, tick={tick_size}, resultado={precio_formateado}, direccion={trade_direction}")
+            return precio_formateado
+            
+        except Exception as e:
+            logger.error(f"Error redondeando precio manualmente: {e}")
+            return str(price)
+
+    def redondear_a_price_step(self, price, symbol):
+        """
+        Redondea el precio al priceStep correcto del símbolo según la API de Bitget.
+        Esto asegura que el precio sea un múltiplo válido para la API.
+        
+        Args:
+            price: Precio a redondear
+            symbol: Símbolo de trading
+        
+        Returns:
+            float: Precio redondeado al priceStep del símbolo
+        """
+        try:
+            # Obtener la precisión del símbolo
+            precision = self.obtener_precision_precio(symbol)
+            price_step = 10 ** (-precision)
+            
+            # Redondear al múltiplo más cercano del priceStep
+            precio_redondeado = round(price / price_step) * price_step
+            
+            # Formatear para eliminar errores de punto flotante
+            return float(f"{precio_redondeado:.{precision}f}")
+        except Exception as e:
+            logger.error(f"Error redondeando a priceStep para {symbol}: {e}")
+            # Fallback: usar 4 decimales para la mayoría de símbolos
+            return float(f"{price:.4f}")
+
+    def set_leverage(self, symbol, leverage, hold_side='long'):
+        """Configurar apalancamiento en BITGET FUTUROS"""
+        try:
+            request_path = '/api/v2/mix/account/set-leverage'
+            body = {
+                'symbol': symbol,
+                'productType': 'USDT-FUTURES',
+                'marginCoin': 'USDT',
+                'leverage': str(leverage),
+                'holdSide': hold_side
+            }
+            
+            logger.info(f"Configurando leverage {leverage}x para {symbol} ({hold_side})")
+            
+            body_json = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+
+            headers = self._get_headers(
+                'POST',
+                request_path,
+                body_json
+            )
+
+            response = requests.post(
+                self.base_url + request_path,
+                headers=headers,
+                data=body_json,
+                timeout=10
+            )
+            
+            logger.info(f"Respuesta leverage BITGET: {response.status_code} - {response.text}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    logger.info(f"✓ Apalancamiento {leverage}x configurado en BITGET FUTUROS para {symbol}")
+                    return True
+                else:
+                    logger.error(f"Error configurando leverage BITGET FUTUROS: {data.get('code')} - {data.get('msg')}")
+            else:
+                logger.error(f"Error HTTP configurando leverage BITGET FUTUROS: {response.status_code} - {response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Error en set_leverage BITGET FUTUROS: {e}")
+            return False
+
+    def get_tickers(self, product_type='USDT-FUTURES'):
+        """
+        Obtiene todos los tickers disponibles para un tipo de producto.
+
+        Args:
+            product_type: Tipo de producto ('USDT-FUTURES' o 'USDT-MIX')
+
+        Returns:
+            dict: Diccionario con información de todos los tickers o None si hay error
+        """
+        try:
+            request_path = '/api/v2/mix/market/tickers'
+            params = {'productType': product_type}
+
+            query_string = f"?productType={product_type}"
+            full_request_path = request_path + query_string
+
+            headers = self._get_headers('GET', full_request_path, '')
+
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+
+            logger.info(f"Respuesta tickers {product_type}: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    tickers_data = data.get('data', [])
+                    # Convertir a diccionario por símbolo para facilitar acceso
+                    tickers_dict = {}
+                    for ticker in tickers_data:
+                        symbol = ticker.get('symbol')
+                        if symbol:
+                            tickers_dict[symbol] = ticker
+                    logger.info(f"✓ {len(tickers_dict)} tickers obtenidos para {product_type}")
+                    return tickers_dict
+                else:
+                    logger.warning(f"Error obteniendo tickers {product_type}: {data.get('msg')}")
+
+            # Intentar con el otro tipo de producto
+            if product_type == 'USDT-FUTURES':
+                return self.get_tickers('USDT-MIX')
+
+            return None
+        except Exception as e:
+            logger.error(f"Error en get_tickers: {e}")
+            return None
+
+    def get_all_tickers(self):
+        """
+        Obtiene todos los tickers disponibles combinando ambos tipos de producto.
+
+        Returns:
+            dict: Diccionario con información de todos los tickers
+        """
+        all_tickers = {}
+
+        # Obtener de USDT-FUTURES
+        tickers_futures = self.get_tickers('USDT-FUTURES')
+        if tickers_futures:
+            all_tickers.update(tickers_futures)
+
+        # Obtener de USDT-MIX
+        tickers_mix = self.get_tickers('USDT-MIX')
+        if tickers_mix:
+            # Evitar duplicados
+            for symbol, ticker in tickers_mix.items():
+                if symbol not in all_tickers:
+                    all_tickers[symbol] = ticker
+
+        logger.info(f"Total tickers combinados: {len(all_tickers)}")
+        return all_tickers
+
+    def get_positions(self, symbol=None, product_type='USDT-FUTURES'):
+        """Obtener posiciones abiertas en BITGET FUTUROS"""
+        try:
+            request_path = '/api/v2/mix/position/all-position'
+            params = {'productType': product_type, 'marginCoin': 'USDT'}
+            if symbol:
+                params['symbol'] = symbol
+            
+            query_parts = []
+            for key, value in params.items():
+                query_parts.append(f"{key}={value}")
+            query_string = "?" + "&".join(query_parts) if query_parts else ""
+            full_request_path = request_path + query_string
+            
+            headers = self._get_headers('GET', full_request_path, '')
+            
+            response = requests.get(
+                self.base_url + request_path,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            logger.info(f"🔍 get_positions response: status={response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"🔍 get_positions response: code={data.get('code')}, data_type={type(data.get('data'))}")
+                
+                if data.get('code') == '00000':
+                    data_list = data.get('data', [])
+                    # Asegurar que devuelva una lista
+                    if isinstance(data_list, list):
+                        logger.info(f"🔍 get_positions: {len(data_list)} posiciones encontradas")
+                        return data_list
+                    else:
+                        logger.warning(f"⚠️ get_positions: data no es lista, es {type(data_list)}")
+                        return []
+            
+            if product_type == 'USDT-FUTURES':
+                logger.info("🔄 Reintentando con USDT-MIX...")
+                return self.get_positions(symbol, 'USDT-MIX')
+            
+            logger.info(f"🔍 get_positions: sin posiciones")
+            return []
+        except Exception as e:
+            logger.error(f"Error obteniendo posiciones BITGET FUTUROS: {e}")
+            return []
+
+    def obtener_reglas_simbolo(self, symbol):
+        """Obtiene las reglas específicas de tamaño para un símbolo"""
+        try:
+            symbol_info = self.get_symbol_info(symbol)
+            if not symbol_info:
+                logger.warning(f"No se pudo obtener info de {symbol}, usando valores por defecto")
+                return {
+                    'size_scale': 0,
+                    'quantity_scale': 0,
+                    'min_trade_num': 1,
+                    'size_multiplier': 1,
+                    'delivery_mode': 0
+                }
+            
+            reglas = {
+                'size_scale': int(symbol_info.get('sizeScale', 0)),
+                'quantity_scale': int(symbol_info.get('quantityScale', 0)),
+                'min_trade_num': float(symbol_info.get('minTradeNum', 1)),
+                'size_multiplier': float(symbol_info.get('sizeMultiplier', 1)),
+                'delivery_mode': symbol_info.get('deliveryMode', 0)
+            }
+            
+            logger.info(f"📋 Reglas de {symbol}:")
+            logger.info(f"  - sizeScale: {reglas['size_scale']}")
+            logger.info(f"  - quantityScale: {reglas['quantity_scale']}")
+            logger.info(f"  - minTradeNum: {reglas['min_trade_num']}")
+            logger.info(f"  - sizeMultiplier: {reglas['size_multiplier']}")
+            
+            return reglas
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo reglas de {symbol}: {e}")
+            return {
+                'size_scale': 0,
+                'quantity_scale': 0,
+                'min_trade_num': 1,
+                'size_multiplier': 1,
+                'delivery_mode': 0
+            }
+    
+    def ajustar_tamaño_orden(self, symbol, cantidad_contratos, reglas):
+        """Ajusta el tamaño de la orden según las reglas del símbolo"""
+        try:
+            size_scale = reglas['size_scale']
+            quantity_scale = reglas['quantity_scale']
+            min_trade_num = reglas['min_trade_num']
+            size_multiplier = reglas['size_multiplier']
+            
+            # Determinar la escala a usar (prioridad: quantityScale > sizeScale)
+            escala_actual = quantity_scale if quantity_scale > 0 else size_scale
+            
+            # Ajustar según la escala
+            if escala_actual == 0:
+                # Requiere entero
+                cantidad_contratos = round(cantidad_contratos)
+                logger.info(f"🔢 {symbol}: ajustado a entero = {cantidad_contratos}")
+            elif escala_actual == 1:
+                # 1 decimal permitido
+                cantidad_contratos = round(cantidad_contratos, 1)
+                logger.info(f"🔢 {symbol}: ajustado a 1 decimal = {cantidad_contratos}")
+            elif escala_actual == 2:
+                # 2 decimales permitidos
+                cantidad_contratos = round(cantidad_contratos, 2)
+                logger.info(f"🔢 {symbol}: ajustado a 2 decimales = {cantidad_contratos}")
+            else:
+                # Otros casos
+                cantidad_contratos = round(cantidad_contratos, escala_actual)
+                logger.info(f"🔢 {symbol}: ajustado a {escala_actual} decimales = {cantidad_contratos}")
+            
+            # Aplicar multiplicador si existe
+            if size_multiplier > 1:
+                cantidad_contratos = round(cantidad_contratos / size_multiplier) * size_multiplier
+                logger.info(f"🔢 {symbol}: aplicado multiplicador {size_multiplier}x = {cantidad_contratos}")
+            
+            # Verificar mínimo
+            if cantidad_contratos < min_trade_num:
+                cantidad_contratos = min_trade_num
+                logger.info(f"⚠️ {symbol}: ajustado a mínimo = {min_trade_num}")
+            
+            # Validación final - MANEJAR CASOS ESPECIALES
+            if escala_actual == 0:
+                # Si requiere entero pero min_trade_num es decimal (caso especial como INJUSDT)
+                if min_trade_num < 1 and min_trade_num > 0:
+                    # Usar el mínimo pero asegurar que sea al menos 1
+                    cantidad_contratos = max(1, int(round(cantidad_contratos)))
+                    logger.info(f"🔢 {symbol}: caso especial - min decimal pero requiere entero = {cantidad_contratos}")
+                else:
+                    cantidad_contratos = int(round(cantidad_contratos))
+                logger.info(f"✅ {symbol} final: {cantidad_contratos} (entero)")
+            else:
+                cantidad_contratos = round(cantidad_contratos, escala_actual)
+                logger.info(f"✅ {symbol} final: {cantidad_contratos} ({escala_actual} decimales)")
+            
+            return cantidad_contratos
+            
+        except Exception as e:
+            logger.error(f"Error ajustando tamaño para {symbol}: {e}")
+            return int(round(cantidad_contratos))  # Fallback a entero
+    
+    def obtener_saldo_cuenta(self):
+        """Obtiene el saldo actual de la cuenta Bitget FUTUROS"""
+        try:
+            accounts = self.get_account_info()
+            if accounts:
+                for account in accounts:
+                    if account.get('marginCoin') == 'USDT':
+                        balance_usdt = float(account.get('available', 0))
+                        logger.info(f"💰 Saldo disponible USDT: ${balance_usdt:.2f}")
+                        return balance_usdt
+            logger.warning("⚠️ No se pudo obtener saldo de la cuenta")
+            return None
+        except Exception as e:
+            logger.error(f"Error obteniendo saldo de cuenta: {e}")
+            return None
+
+    def get_klines(self, symbol, interval='15m', limit=200):
+        """Obtener velas (datos de mercado) de BITGET FUTUROS"""
+        try:
+            interval_map = {
+                '15m': '15m', '30m': '30m', '1h': '1H',
+                '4h': '4H'
+            }
+            bitget_interval = interval_map.get(interval)
+            if bitget_interval is None:
+                logger.error(f"Intervalo '{interval}' no soportado. Timeframes válidos: {list(interval_map.keys())}")
+                return None
+
+            
+            request_path = f'/api/v2/mix/market/candles'
+            params = {
+                'symbol': symbol,
+                'productType': 'USDT-FUTURES',
+                'granularity': bitget_interval,
+                'limit': limit
+            }
+            
+            response = requests.get(
+                self.base_url + request_path,
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == '00000':
+                    candles = data.get('data', [])
+                    return candles
+                else:
+                    # Retry con USDT-MIX como fallback
+                    params['productType'] = 'USDT-MIX'
+                    response = requests.get(
+                        self.base_url + request_path,
+                        params=params,
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get('code') == '00000':
+                            candles = data.get('data', [])
+                            return candles
+            return None
+        except Exception as e:
+            logger.error(f"Error en get_klines BITGET FUTUROS: {e}")
+            return None
+
+# ---------------------------
+# FUNCIONES DE OPERACIONES BITGET FUTUROS
+# ---------------------------
+def a_decimal_estricto(numero, precision_raw):
+    from decimal import Decimal, ROUND_DOWN
+    import math
+    if numero is None: return None
+    try:
+        if isinstance(precision_raw, float):
+            precision_str = format(precision_raw, 'f').rstrip('0')
+            decimales = len(precision_str.split('.')[1]) if '.' in precision_str else 0
+        else:
+            decimales = int(precision_raw)
+        valor = Decimal(str(numero)).quantize(Decimal(str(10**-decimales)), rounding=ROUND_DOWN)
+        return str(valor)
+    except Exception:
+        return str(numero)
+
+def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_usd=None, leverage=None):
+    from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+    import time
+    from datetime import datetime
+    import pandas as pd
+    
+    logger.info(f"🚀 EJECUTANDO ORDEN ESTRICTA EN BITGET FUTUROS")
+    
+    try:
+        MARGEN_USDT = 1.0
+        PALANCA_ESTRICTA = 20
+        COOLDOWN_OPERACION = 180
+        TOLERANCIA_MAX = 0.04
+        stopFijo = 0.016
+
+        bot = getattr(bitget_client, '_bot_instance', None)
+        
+        # FILTRO COOLDOWN
+        if bot:
+            ultima_operacion = getattr(bot, 'ultima_operacion_time', 0)
+            tiempo_desde = time.time() - ultima_operacion
+            if tiempo_desde < COOLDOWN_OPERACION: # COOLDOWN_OPERACION
+                logger.warning(f"⏳ Cooldown activo: {COOLDOWN_OPERACION - int(tiempo_desde)}s restantes")
+                return None
+                
+        # VERIFICAR APALANCAMIENTO ANTES DE OPERAR
+        hold_side = 'long' if tipo_operacion == 'LONG' else 'short'
+        try:
+            leverage_ok = bitget_client.set_leverage(simbolo, PALANCA_ESTRICTA, hold_side)
+            if not leverage_ok:
+                logger.error(f"❌ RECHAZADA: {simbolo} no permite x{PALANCA_ESTRICTA} exacto.")
+                return None
+        except Exception as e:
+            logger.error(f"❌ RECHAZADA: Error apalancamiento: {e}")
+            return None
+            
+        time.sleep(1)
+
+        klines = bitget_client.get_klines(simbolo, '15m', 50)
+        if not klines or len(klines) == 0:
+            return None
+        
+        df = pd.DataFrame(klines, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'amount'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
+        precio_actual = float(klines[0][4])
+        rango = df['high'].max() - df['low'].min()
+        
+        # CALCULO ESTRICTO DE 1 USDT x20
+        reglas = bitget_client.obtener_reglas_simbolo(simbolo)
+        precision_amount = reglas['quantity_scale'] if reglas['quantity_scale'] > 0 else reglas['size_scale']
+        
+        # Intento 1
+        cant_tokens_base = (MARGEN_USDT * PALANCA_ESTRICTA) / precio_actual
+        cant_tokens = a_decimal_estricto(cant_tokens_base, precision_amount)
+        valor_posicion_1 = float(cant_tokens) * precio_actual
+        margen_real_1 = valor_posicion_1 / PALANCA_ESTRICTA
+        
+        # Intento 2
+        margen_real = margen_real_1
+        if abs(margen_real_1 - MARGEN_USDT) > 0.000001:
+            valor_objetivo = MARGEN_USDT * PALANCA_ESTRICTA
+            decimales = int(precision_amount)
+            try:
+                cant_tokens_alt = Decimal(str(valor_objetivo)).quantize(Decimal(str(10**-decimales)), rounding=ROUND_HALF_UP)
+            except:
+                cant_tokens_alt = Decimal(str(valor_objetivo))
+            valor_posicion_alt = float(cant_tokens_alt) * precio_actual
+            margen_real_alt = valor_posicion_alt / PALANCA_ESTRICTA
+            
+            logger.info(f"   📐 Intento 1: {cant_tokens} tokens → {margen_real_1:.6f} USDT")
+            logger.info(f"   📐 Intento 2: {cant_tokens_alt} tokens → {margen_real_alt:.6f} USDT")
+            
+            if abs(margen_real_alt - MARGEN_USDT) < abs(margen_real_1 - MARGEN_USDT):
+                cant_tokens = str(cant_tokens_alt)
+                margen_real = margen_real_alt
+                
+        diferencia = abs(margen_real - MARGEN_USDT)
+        if diferencia > TOLERANCIA_MAX:
+             logger.error(f"❌ RECHAZADA: Margen = {margen_real:.6f} USDT. Dif: {diferencia}")
+             return None
+             
+        # SL Y TP
+        sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
+        tp = precio_actual + (rango * 0.24) if tipo_operacion == 'LONG' else precio_actual - (rango * 0.24)
+        
+        def formatear_precio(price):
+            if price >= 100: return f"{price:.2f}"
+            elif price >= 10: return f"{price:.3f}"
+            elif price >= 1: return f"{price:.4f}"
+            elif price >= 0.1: return f"{price:.5f}"
+            elif price >= 0.01: return f"{price:.6f}"
+            elif price >= 0.001: return f"{price:.7f}"
+            elif price >= 0.0001: return f"{price:.8f}"
+            else: return f"{price:.10f}"
+            
+        sl_formatted = formatear_precio(sl)
+        tp_formatted = formatear_precio(tp)
+        
+        side = 'buy' if tipo_operacion == 'LONG' else 'sell'
+        pos_side = 'long' if tipo_operacion == 'LONG' else 'short'
+        
+        # EJECUTAR ORDEN
+        logger.info(f"🚀 Ejecutando orden en {simbolo}. SL: {sl_formatted}, TP: {tp_formatted}")
+        orden_entrada = None
+        intentos = 0
+        while intentos < 2 and orden_entrada is None:
+            intentos += 1
+            if intentos == 1:
+                orden_entrada = bitget_client.place_order(symbol=simbolo, side=side, order_type='market', size=str(cant_tokens), posSide=pos_side, is_hedged_account=False, stop_loss_price=sl_formatted, take_profit_price=tp_formatted, trade_direction=tipo_operacion)
+            else:
+                orden_entrada = bitget_client.place_order(symbol=simbolo, side=side, order_type='market', size=str(cant_tokens), posSide=None, is_hedged_account=True, stop_loss_price=sl_formatted, take_profit_price=tp_formatted, trade_direction=tipo_operacion)
+                
+        if not orden_entrada:
+            return None
+            
+        time.sleep(2)
+        
+        # VERIFICACIÓN POST-OPERACIÓN CRÍTICA
+        posiciones = bitget_client.get_positions(simbolo)
+        posicion_encontrada = None
+        if posiciones:
+            for pos in posiciones:
+                if pos.get('symbol') == simbolo and pos.get('holdSide', '').lower() == pos_side:
+                    posicion_encontrada = pos
+                    break
+        
+        margen_verificado = 0.0
+        apalancamiento_verificado = 0
+        if posicion_encontrada:
+            margen_verificado = float(posicion_encontrada.get('margin', posicion_encontrada.get('initialMargin', 0)))
+            apalancamiento_verificado = int(posicion_encontrada.get('leverage', 0))
+            
+        logger.info(f"   🔍 VERIFICACIÓN POST-OPERACIÓN:")
+        logger.info(f"   🔍 Margen en exchange: {margen_verificado:.6f}")
+        logger.info(f"   🔍 Apalancamiento: {apalancamiento_verificado}x")
+        
+        margen_ok = abs(margen_verificado - MARGEN_USDT) < TOLERANCIA_MAX
+        palanca_ok = apalancamiento_verificado == PALANCA_ESTRICTA
+        
+        if not palanca_ok or not margen_ok:
+            logger.error(f"❌ VERIFICACIÓN FALLIDA! Cerrando inmediatamente...")
+            cerrar_side = 'sell' if tipo_operacion == 'LONG' else 'buy'
+            try:
+                bitget_client.place_order(symbol=simbolo, side=cerrar_side, order_type='market', size=str(posicion_encontrada.get('available', cant_tokens)), posSide=pos_side, is_hedged_account=False, reduce_only=True)
+            except:
+                pass
+                
+            if bot:
+                msg = f"❌ *OPERACIÓN RECHAZADA POR EXCHANGE*
+Par: `{simbolo}`
+Apalancamiento: `{apalancamiento_verificado}x` (esperado {PALANCA_ESTRICTA})
+Margen: `{margen_verificado:.4f}`
+_Posición cancelada_"
+                try:
+                    bot._enviar_telegram_simple(msg, bot.config.get('telegram_token'), bot.config.get('telegram_chat_ids', []))
+                except: pass
+            return None
+            
+        logger.info(f"   ✅ VERIFICACIÓN PASADA: {margen_verificado:.6f} USDT x{apalancamiento_verificado}")
+        
+        if bot:
+            bot.ultima_operacion_time = time.time()
+            bot.order_ids_entrada[simbolo] = orden_entrada.get('orderId')
+            
+        operacion_data = {
+            'orden_entrada': orden_entrada,
+            'cantidad_contratos': cant_tokens,
+            'precio_entrada': precio_actual,
+            'take_profit': tp,
+            'stop_loss': sl,
+            'leverage': PALANCA_ESTRICTA,
+            'capital_usado': margen_verificado,
+            'saldo_cuenta': bitget_client.obtener_saldo_cuenta(),
+            'tipo': tipo_operacion,
+            'timestamp_entrada': datetime.now().isoformat(),
+            'symbol': simbolo
+        }
+        return operacion_data
+        
+    except Exception as e:
+        logger.error(f"Error fatal ejecutando orden bitget: {e}")
+        return None
+
+
+
+# ---------------------------
+# BOT PRINCIPAL - BREAKOUT + REENTRY CON INTEGRACIÓN BITGET FUTUROS
 # ---------------------------
 class TradingBot:
     def __init__(self, config):
@@ -435,134 +1700,25 @@ class TradingBot:
         self.inicializar_persistencia_avanzada()
         
         # Inicializar cliente Bitget FUTUROS con credenciales REALES
-        self.exchange = None
+        self.bitget_client = None
         if config.get('bitget_api_key') and config.get('bitget_api_secret') and config.get('bitget_passphrase'):
-            try:
-                api_key = config['bitget_api_key']
-                logger.info(f"Cliente Bitget FUTUROS inicializado con API Key: {api_key[:10]}...")
-                logger.info("Verificando credenciales Bitget FUTUROS...")
-                self.exchange = ccxt.bitget({
-                    'apiKey': api_key,           
-                    'secret': config['bitget_api_secret'],        
-                    'password': config['bitget_passphrase'],      
-                    'options': {'defaultType': 'swap'},
-                    'enableRateLimit': True
-                })
-
-                # --- MONKEY PATCHING PARA COMPATIBILIDAD CON LÓGICA EXISTENTE ---
-                def get_klines_patch(symbol, timeframe, limit=150):
-                    try:
-                        # Convertir símbolo simple a formato CCXT si es necesario
-                        symbol_ccxt = symbol
-                        if 'USDT' in symbol and '/' not in symbol:
-                            symbol_ccxt = symbol.replace('USDT', '/USDT:USDT')
-                        
-                        ohlcv = self.exchange.fetch_ohlcv(symbol_ccxt, timeframe.lower(), limit=limit)
-                        # Re-formatear para que coincida con lo que esperaba el cliente antiguo si es necesario
-                        # El cliente antiguo devolvía: [[timestamp, open, high, low, close, volume], ...]
-                        # CCXT ya devuelve exactamente eso.
-                        return ohlcv
-                    except Exception as e:
-                        logger.error(f"Error en get_klines (patch): {e}")
-                        return None
-
-                def get_positions_patch(symbol=None, *args, **kwargs):
-                    try:
-                        # Usar llamada directa para evitar que CCXT inyecte marginCoin=USDT o sobrescriba
-                        # el productType en cuentas unificadas.
-                        params = {'productType': 'usdt-futures'}
-                        
-                        # Llamada directa a la API V2
-                        raw_response = self.exchange.private_get_mix_position_all_position(params)
-                        
-                        if raw_response and 'data' in raw_response:
-                            # parse_positions convierte el formato crudo de Bitget al formato CCXT estándar
-                            return self.exchange.parse_positions(raw_response['data'])
-                        return []
-                    except Exception as e:
-                        logger.error(f"❌ Error crítico en get_positions (patch): {e}")
-                        return []
-
-                def verificar_orden_activa_patch(order_id, symbol):
-                    try:
-                        if not order_id: return False
-                        order = self.exchange.fetch_order(order_id, symbol)
-                        return order['status'] == 'open'
-                    except:
-                        return False
-
-                def place_tpsl_order_patch(**kwargs):
-                    try:
-                        # Mapeo de parámetros para Bitget V2 Plan Order
-                        symbol = kwargs.get('symbol')
-                        if 'USDT' in symbol and '/' not in symbol:
-                            symbol = symbol.replace('USDT', '/USDT:USDT')
-                            
-                        # El side debe ser el opuesto a la posición
-                        hold_side = kwargs.get('hold_side', '').lower()
-                        side = 'sell' if hold_side == 'long' else 'buy'
-                        
-                        order_type = kwargs.get('order_type') # 'stop_loss' o 'take_profit'
-                        trigger_price = kwargs.get('trigger_price')
-                        
-                        amount = kwargs.get('amount')
-                        if amount is None:
-                            # Intentar obtener el size de la posición abierta
-                            positions = self.exchange.fetch_positions(symbol, params={'productType': 'USDT-FUTURES'})
-                            for pos in positions:
-                                if pos['symbol'] == symbol:
-                                    amount = abs(float(pos['contracts']))
-                                    break
-                        
-                        if not amount:
-                            logger.error(f"Error: No se encontró monto para la orden {order_type} en {symbol}")
-                            return None
-
-                        params = {
-                            'stopPrice': trigger_price,
-                            'planType': 'normal_plan',
-                        }
-                        
-                        if order_type == 'stop_loss':
-                            params['triggerType'] = 'fill_price'
-                        
-                        # Usar create_order de CCXT para órdenes plan (tpsl)
-                        return self.exchange.create_order(
-                            symbol=symbol,
-                            type='market' if order_type == 'stop_loss' else 'limit',
-                            side=side,
-                            amount=amount,
-                            price=trigger_price if order_type == 'take_profit' else None,
-                            params=params
-                        )
-                    except Exception as e:
-                        logger.error(f"Error en place_tpsl_order (patch): {e}")
-                        return None
-
-                # Asignar los métodos parchados al objeto exchange
-                self.exchange.get_klines = get_klines_patch
-                self.exchange.get_positions = get_positions_patch
-                self.exchange.fetch_positions_orig = self.exchange.fetch_positions # Guardar original
-                self.exchange.fetch_positions = get_positions_patch # Reemplazar para consistencia
-                self.exchange.verificar_orden_activa = verificar_orden_activa_patch
-                self.exchange.place_tpsl_order = place_tpsl_order_patch
-                # --- FIN MONKEY PATCHING ---
-
-                # Check connection
-                balance = self.exchange.fetch_balance()
-                available = float(balance.get('USDT', {}).get('free', 0))
-                logger.info("✓ Credenciales BITGET FUTUROS verificadas exitosamente")
-                logger.info(f"✓ Balance disponible FUTUROS: {available:.2f} USDT")
-            except Exception as e:
-                logger.error("✗ No se pudo verificar credenciales BITGET FUTUROS")
-                logger.error(f"Error verificando credenciales BITGET FUTUROS: {e}")
-                self.exchange = None
+            self.bitget_client = BitgetClient(
+                api_key=config['bitget_api_key'],
+                api_secret=config['bitget_api_secret'],
+                passphrase=config['bitget_passphrase'],
+                bot_instance=self  # Pasar referencia del bot para persistencia
+            )
+            if self.bitget_client.verificar_credenciales():
+                logger.info("✅ Cliente BITGET FUTUROS inicializado y verificado")
+            else:
+                logger.warning("⚠️ No se pudieron verificar las credenciales de BITGET FUTUROS")
         
         # LIMPIEZA INICIAL: Liberar símbolos bloquados si no hay posiciones activas
         self.limpiar_bloqueos_iniciales()
 
         #monedas - Generación dinámica de símbolos por volumen
-        self.moned = config.get('symbols', ['BTCUSDT'])
+        self.moned = []  # Lista de símbolos generados dinámicamente
+        self.ultima_actualizacion_moned = None
 
         # Configuración de operaciones automáticas
         self.ejecutar_operaciones_automaticas = config.get('ejecutar_operaciones_automaticas', False)
@@ -589,46 +1745,6 @@ class TradingBot:
         self.senales_enviadas = set()
         self.archivo_log = self.log_path
         self.inicializar_log()
-
-
-    def actualizar_moned(self):
-        """Actualiza la lista de símbolos analizando las de mayor volumen, omitiendo estables e illiquidos"""
-        if not self.exchange:
-            logger.warning("⚠️ No se puede actualizar símbolos sin cliente exchange")
-            return False
-            
-        try:
-            logger.info(f"🔄 Obteniendo tickers del exchange para top {NUM_MONEDAS_ESCANEAR} monedas...")
-            tickers = self.exchange.fetch_tickers()
-            monedas_vivas = []
-            
-            for s, t in tickers.items():
-                # Filtrar solo USDT swaps y remover ":" de ccxt symbols si es necesario
-                # En ccxt para swaps a veces el símbolo es 'BTC/USDT:USDT'
-                simbolo_limpio = s.replace('/', '').replace(':USDT', '')
-                
-                # Para la lógica usamos el ticker CCXT o el limpio? El bot original usaba 'BTCUSDT'
-                # Guardaremos el limpio para compatibilidad con la lógica existente
-                if ':USDT' in s or '/USDT' in s:
-                    # Validaciones
-                    if simbolo_limpio in SIMBOLOS_OMITIDOS:
-                        continue
-                        
-                    # Filtrar por volumen quote (USDT)
-                    vol = t.get('quoteVolume', 0)
-                    if vol and vol > 0:
-                        monedas_vivas.append({'s': simbolo_limpio, 'v': vol})
-                        
-            # Ordenar por volumen y tomar las N primeras
-            monedas_vivas = sorted(monedas_vivas, key=lambda x: x['v'], reverse=True)[:NUM_MONEDAS_ESCANEAR]
-            self.moned = [m['s'] for m in monedas_vivas]
-            self.ultima_actualizacion_moned = datetime.now()
-            
-            logger.info(f"✅ Lista de monedas actualizada: {len(self.moned)} pares. Principal: {self.moned[0] if self.moned else 'Ninguno'}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error actualizando monedas dinámicas: {e}")
-            return False
 
     def cargar_estado(self):
         """Carga el estado previo del bot incluyendo breakouts"""
@@ -717,7 +1833,7 @@ class TradingBot:
                 'operaciones_cerradas_registradas': getattr(self, 'operaciones_cerradas_registradas', []),
                 #monedas dinámicas
                 'monedas_dinamicas': getattr(self, 'moned', []),
-                'ultima_actualizacion_moned': getattr(self, 'ultima_actualizacion_moned', None).isoformat() if getattr(self, 'ultima_actualizacion_moned', None) else None
+                'ultima_actualizacion_moned': self.ultima_actualizacion_moned.isoformat() if self.ultima_actualizacion_moned else None
             }
             
             with open(self.estado_file, 'w', encoding='utf-8') as f:
@@ -736,46 +1852,6 @@ class TradingBot:
                 logger.error(f"Error details: {str(e)}")
             except:
                 pass
-            return False
-
-
-    def actualizar_moned(self):
-        """Actualiza la lista de símbolos analizando las de mayor volumen, omitiendo estables e illiquidos"""
-        if not self.exchange:
-            logger.warning("⚠️ No se puede actualizar símbolos sin cliente exchange")
-            return False
-            
-        try:
-            logger.info(f"🔄 Obteniendo tickers del exchange para top {NUM_MONEDAS_ESCANEAR} monedas...")
-            tickers = self.exchange.fetch_tickers()
-            monedas_vivas = []
-            
-            for s, t in tickers.items():
-                # Filtrar solo USDT swaps y remover ":" de ccxt symbols si es necesario
-                # En ccxt para swaps a veces el símbolo es 'BTC/USDT:USDT'
-                simbolo_limpio = s.replace('/', '').replace(':USDT', '')
-                
-                # Para la lógica usamos el ticker CCXT o el limpio? El bot original usaba 'BTCUSDT'
-                # Guardaremos el limpio para compatibilidad con la lógica existente
-                if ':USDT' in s or '/USDT' in s:
-                    # Validaciones
-                    if simbolo_limpio in SIMBOLOS_OMITIDOS:
-                        continue
-                        
-                    # Filtrar por volumen quote (USDT)
-                    vol = t.get('quoteVolume', 0)
-                    if vol and vol > 0:
-                        monedas_vivas.append({'s': simbolo_limpio, 'v': vol})
-                        
-            # Ordenar por volumen y tomar las N primeras
-            monedas_vivas = sorted(monedas_vivas, key=lambda x: x['v'], reverse=True)[:NUM_MONEDAS_ESCANEAR]
-            self.moned = [m['s'] for m in monedas_vivas]
-            self.ultima_actualizacion_moned = datetime.now()
-            
-            logger.info(f"✅ Lista de monedas actualizada: {len(self.moned)} pares. Principal: {self.moned[0] if self.moned else 'Ninguno'}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error actualizando monedas dinámicas: {e}")
             return False
 
     def cargar_estado(self):
@@ -882,9 +1958,10 @@ class TradingBot:
             # Cargar monedas dinámicas
             self.moned = estado.get('monedas_dinamicas', [])
             ultima_moned_str = estado.get('ultima_actualizacion_moned')
+            self.ultima_actualizacion_moned = None
             if ultima_moned_str:
                 try:
-                    pass
+                    self.ultima_actualizacion_moned = datetime.fromisoformat(ultima_moned_str)
                 except Exception as e:
                     logger.warning(f"⚠️ Error cargando ultima_actualizacion_moned: {e}")
             
@@ -932,12 +2009,12 @@ class TradingBot:
         Si no hay posiciones activas en Bitget, libera todos los símbolos bloqueados
         para permitir nuevas operaciones.
         """
-        if not self.exchange:
+        if not self.bitget_client:
             return
         
         try:
-            # Obtener posiciones activas en Bitget - Usar minúsculas para V2
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
+            # Obtener posiciones activas en Bitget
+            posiciones_bitget = self.bitget_client.get_positions()
                 
             if not posiciones_bitget:
                 # No hay posiciones activas, liberar bloqueos
@@ -979,13 +2056,131 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error en limpieza inicial: {e}")
 
+    def actualizar_moned(self):
+        """
+        Actualiza la lista de monedas dinámicamente basándose en el volumen de trading.
+        Selecciona los 100 símbolos con mayor volumen que terminan en ':USDT'.
+        Excluye los símbolos definidos en SIMBOLOS_OMITIDOS.
+        """
+        try:
+            # Usar el cliente Bitget para obtener todos los tickers
+            if self.bitget_client:
+                tickers = self.bitget_client.get_all_tickers()
+            else:
+                logger.warning("⚠️ No hay cliente Bitget configurado, usando fallback")
+                return False
+
+            if not tickers:
+                logger.error("❌ No se pudieron obtener los tickers")
+                return False
+
+            # Filtrar símbolos: que terminen en USDM/USDT y no estén en la lista de omitidos
+            filtrados = []
+            for simbolo in tickers:
+                # Verificar que termine en USDT y no esté en omitidos
+                if simbolo.endswith('USDT') and simbolo not in SIMBOLOS_OMITIDOS:
+                    filtrados.append(simbolo)
+
+            # Ordenar por volumen (quoteVolume) de mayor a menor
+            def get_quote_volume(s):
+                try:
+                    ticker = tickers[s]
+                    # Diferentes campos según la respuesta de Bitget
+                    volume = ticker.get('quoteVolume') or ticker.get('vol24h') or 0
+                    return float(volume)
+                except (KeyError, TypeError, ValueError):
+                    return 0
+
+            self.moned = sorted(filtrados, key=get_quote_volume, reverse=True)[:200]
+            self.ultima_actualizacion_moned = datetime.now()
+
+            print(f"[SISTEMA] ✅ 100 Monedas actualizadas dinámicamente (Top Volumen)")
+            print(f"   📊 Total símbolos procesados: {len(filtrados)}")
+            print(f"   🚫 Símbolos omitidos: {len(SIMBOLOS_OMITIDOS)}")
+            print(f"   💱 Monedas seleccionadas: {len(self.moned)}")
+            print(f"   📈 Top 5 por volumen: {self.moned[:5]}")
+            logger.info(f"✅ Monedas dinámicas actualizadas: {len(self.moned)} símbolos")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Error actualizando monedas: {e}")
+            return False
+
     def obtener_simbolos_analisis(self):
-        if self.config.get('simbolos_dinamicos', False):
-            # Verificar si necesitamos actualizar
-            if not hasattr(self, 'ultima_actualizacion_moned') or (datetime.now() - self.ultima_actualizacion_moned).total_seconds() > 3600:
+        """
+        Obtiene la lista de símbolos a analizar.
+        Si hay monedas dinámicas configuradas, las usa.
+        Si no, usa la lista de símbolos de la configuración.
+        
+        Returns:
+            list: Lista de símbolos a analizar
+        """
+        # DEPURACIÓN
+        logger.info(f"🔍 DEBUG obtener_simbolos_analisis:")
+        logger.info(f"   - self.moned: {self.moned}")
+        logger.info(f"   - len(self.moned): {len(self.moned) if self.moned else 0}")
+        logger.info(f"   - self.ultima_actualizacion_moned: {self.ultima_actualizacion_moned}")
+        
+        # Si tenemos monedas dinámicas
+        if self.moned and len(self.moned) > 0:
+            # Verificar si la última actualización es reciente (menos de 1 hora)
+            if self.ultima_actualizacion_moned:
+                tiempo_desde_actualizacion = (datetime.now() - self.ultima_actualizacion_moned).total_seconds()
+                logger.info(f"   - Tiempo desde última actualización: {tiempo_desde_actualizacion:.1f}s")
+                if tiempo_desde_actualizacion < 3600:  # 1 hora en segundos
+                    logger.info(f"✅ Usando {len(self.moned)} monedas dinámicas (actualizadas hace {tiempo_desde_actualizacion:.1f}s)")
+                    return self.moned
+                else:
+                    logger.info(f"⏰ Monedas desactualizadas (más de 1 hora), actualizando...")
+            else:
+                logger.info(f"⏰ No hay fecha de actualización, actualizando...")
+            
+            # Actualizar monedas si no hay actualización reciente
+            if self.bitget_client:
                 self.actualizar_moned()
-            return self.moned if self.moned else ['BTCUSDT']
-        return self.config.get('symbols', ['BTCUSDT'])
+            else:
+                logger.warning("⚠️ No hay Bitget client para actualizar monedas")
+            
+            if self.moned and len(self.moned) > 0:
+                logger.info(f"✅ Monedas actualizadas: {len(self.moned)} símbolos")
+                return self.moned
+        else:
+            logger.info(f"⚠️ No hay monedas dinámicas, actualizando...")
+            # Intentar actualizar monedas si están vacías
+            if self.bitget_client:
+                self.actualizar_moned()
+            else:
+                logger.warning("⚠️ No hay Bitget client disponible")
+        
+        # DEPURACIÓN: Verificar si hay monedas después de actualizar
+        if self.moned and len(self.moned) > 0:
+            logger.info(f"✅ Monedas cargadas: {len(self.moned)} símbolos")
+            return self.moned
+        
+        # FALLBACK: Si aún no hay monedas, usar lista de emergencia
+        logger.warning("⚠️ WARNING: Usando símbolos de emergencia por fallo en actualización dinámica")
+        simbolos_emergencia = [
+            'PEPEUSDT', 'WIFUSDT', 'FLOKIUSDT', 'SHIBUSDT', 'POPCATUSDT',
+            'CHILLGUYUSDT', 'PNUTUSDT', 'MEWUSDT', 'FARTCOINUSDT', 'DOGEUSDT',
+            'VINEUSDT', 'HIPPOUSDT', 'TRXUSDT', 'XLMUSDT', 'XRPUSDT',
+            'ADAUSDT', 'ATOMUSDT', 'LINKUSDT', 'UNIUSDT',
+            'SUSHIUSDT', 'CRVUSDT', 'SNXUSDT', 'SANDUSDT', 'MANAUSDT',
+            'AXSUSDT', 'LRCUSDT', 'ARBUSDT', 'OPUSDT', 'INJUSDT',
+            'FILUSDT', 'SUIUSDT', 'AAVEUSDT', 'ENSUSDT',
+            'LDOUSDT', 'POLUSDT', 'ALGOUSDT', 'QNTUSDT',
+            '1INCHUSDT', 'CVCUSDT', 'STGUSDT', 'ENJUSDT', 'GALAUSDT',
+            'MAGICUSDT', 'REZUSDT', 'BLURUSDT', 'HMSTRUSDT', 'BEATUSDT',
+            'ZEREBROUSDT', 'ZENUSDT', 'CETUSUSDT', 'DRIFTUSDT', 'PHAUSDT',
+            'API3USDT', 'ACHUSDT', 'SPELLUSDT', 'YGGUSDT',
+            'GMXUSDT', 'C98USDT','XMRUSDT', 'DOTUSDT', 'BNBUSDT', 'SOLUSDT', 'AVAXUSDT',
+            'VETUSDT', 'BCHUSDT', 'NEOUSDT', 'TIAUSDT',
+            'TONUSDT', 'TRUMPUSDT','IPUSDT', 'TAOUSDT', 'XPLUSDT', 'HOLOUSDT', 'MONUSDT',
+            'OGUSDT', 'MSTRUSDT', 'VIRTUALUSDT', 
+            'TLMUSDT', 'BOMEUSDT', 'KAITOUSDT', 'APEUSDT', 'METUSDT',
+            'TUTUSDT'
+        ]
+        logger.info(f"🆘 Usando {len(simbolos_emergencia)} símbolos de emergencia")
+        return simbolos_emergencia
 
     def liberar_simbolo(self, simbolo):
         """
@@ -1030,15 +2225,15 @@ class TradingBot:
 
     def sincronizar_con_bitget(self):
         """Sincronizar estado local con posiciones reales en Bitget - FUNCIÓN CRÍTICA"""
-        if not self.exchange:
+        if not self.bitget_client:
             logger.warning("⚠️ No hay cliente Bitget configurado, omitiendo sincronización")
             return
         
         try:
             logger.info("🔄 Iniciando sincronización con Bitget FUTUROS...")
             
-            # OBTENER POSICIONES ACTIVAS EN BITGET - Usar minúsculas para V2
-            posiciones_bitget = self.exchange.fetch_positions(params={'productType': 'usdt-futures'})
+            # OBTENER POSICIONES ACTIVAS EN BITGET
+            posiciones_bitget = self.bitget_client.get_positions()
             
             # DEBUG: Log de todas las posiciones encontradas
             if posiciones_bitget:
@@ -1363,7 +2558,7 @@ class TradingBot:
 
     def verificar_y_recolocar_tp_sl(self):
         """Verificar y recolocar automáticamente TP y SL si es necesario - SOLO PARA OPERACIONES AUTOMÁTICAS"""
-        if not self.exchange:
+        if not self.bitget_client:
             return
         
         try:
@@ -1379,7 +2574,7 @@ class TradingBot:
                         logger.info(f"👤 {simbolo}: Operación MANUAL detectada - Solo monitoreando, sin recolocación de SL/TP")
                         
                         # Verificar si la posición aún existe en Bitget
-                        posiciones = self.exchange.get_positions(simbolo)
+                        posiciones = self.bitget_client.get_positions(simbolo)
                         if not posiciones or len(posiciones) == 0:
                             # La operación manual fue cerrada - LIBERAR EL SÍMBOLO
                             logger.info(f"🆓 {simbolo}: Operación manual cerrada por usuario - Liberando símbolo para nuevos escaneos")
@@ -1398,8 +2593,8 @@ class TradingBot:
                     orden_tp_id = self.order_ids_tp.get(simbolo)
                     
                     # Verificación REAL del estado de las órdenes en Bitget
-                    sl_activa = self.exchange.verificar_orden_activa(orden_sl_id, simbolo) if orden_sl_id else False
-                    tp_activa = self.exchange.verificar_orden_activa(orden_tp_id, simbolo) if orden_tp_id else False
+                    sl_activa = self.bitget_client.verificar_orden_activa(orden_sl_id, simbolo) if orden_sl_id else False
+                    tp_activa = self.bitget_client.verificar_orden_activa(orden_tp_id, simbolo) if orden_tp_id else False
                     
                     # Solo recolocar si las órdenes realmente no están activas
                     if not sl_activa or not tp_activa:
@@ -1411,7 +2606,7 @@ class TradingBot:
                             logger.info(f"ℹ️ Órdenes TP/SL para {simbolo}: SL={'OK' if sl_activa else 'FALTA'}, TP={'OK' if tp_activa else 'FALTA'}")
                         
                         # Obtener precio actual
-                        klines = self.exchange.get_klines(simbolo, '15m', 1)
+                        klines = self.bitget_client.get_klines(simbolo, '15m', 1)
                         if not klines:
                             continue
                         
@@ -1443,7 +2638,7 @@ class TradingBot:
                         # Recolocar SL solo si no está activa
                         if sl_necesita:
                             logger.info(f"🔧 Recolocando STOP LOSS para {simbolo}: {stop_loss}")
-                            orden_sl_nueva = self.exchange.place_tpsl_order(
+                            orden_sl_nueva = self.bitget_client.place_tpsl_order(
                                 symbol=simbolo,
                                 hold_side=hold_side,
                                 trigger_price=stop_loss,
@@ -1461,7 +2656,7 @@ class TradingBot:
                         # Recolocar TP solo si no está activa
                         if tp_necesita:
                             logger.info(f"🔧 Recolocando TAKE PROFIT para {simbolo}: {take_profit}")
-                            orden_tp_nueva = self.exchange.place_tpsl_order(
+                            orden_tp_nueva = self.bitget_client.place_tpsl_order(
                                 symbol=simbolo,
                                 hold_side=hold_side,
                                 trigger_price=take_profit,
@@ -1500,8 +2695,8 @@ class TradingBot:
                 return
             
             # Obtener precio de salida si no se proporcionó
-            if precio_salida is None and self.exchange:
-                klines = self.exchange.get_klines(simbolo, '15m', 1)
+            if precio_salida is None and self.bitget_client:
+                klines = self.bitget_client.get_klines(simbolo, '15m', 1)
                 if klines:
                     klines.reverse()
                     precio_salida = float(klines[0][4])
@@ -1665,9 +2860,9 @@ class TradingBot:
     def obtener_datos_mercado_config(self, simbolo, timeframe, num_velas):
         """Obtiene datos con configuración específica usando API de Bitget FUTUROS"""
         # Usar API de Bitget FUTUROS
-        if self.exchange:
+        if self.bitget_client:
             try:
-                candles = self.exchange.get_klines(simbolo, timeframe, num_velas + 14)
+                candles = self.bitget_client.get_klines(simbolo, timeframe, num_velas + 14)
                 if not candles or len(candles) == 0:
                     return None
                 
@@ -1858,8 +3053,8 @@ class TradingBot:
             plt.rcParams['font.family'] = ['DejaVu Sans', 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji']
             
             # Usar API de Bitget FUTUROS si está disponible
-            if self.exchange:
-                klines = self.exchange.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
+            if self.bitget_client:
+                klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
                 if klines:
                     df_data = []
                     for kline in klines:
@@ -2421,11 +3616,11 @@ class TradingBot:
         
         # Ejecutar operación automáticamente si está habilitado y tenemos cliente BITGET FUTUROS
         operacion_bitget = None  # Definir variable antes del try
-        if self.ejecutar_operaciones_automaticas and self.exchange:
+        if self.ejecutar_operaciones_automaticas and self.bitget_client:
             print(f"     🤖 Ejecutando operación automática en BITGET FUTUROS...")
             try:
                 operacion_bitget = ejecutar_operacion_bitget(
-                    exchange=self.exchange,
+                    bitget_client=self.bitget_client,
                     simbolo=simbolo,
                     tipo_operacion=tipo_operacion,
                     capital_usd=None,  # SIEMPRE calcular como 3% del saldo dinámicamente
@@ -2811,8 +4006,8 @@ class TradingBot:
                 return None
             
             # Usar API de Bitget FUTUROS si está disponible
-            if self.exchange:
-                klines = self.exchange.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
+            if self.bitget_client:
+                klines = self.bitget_client.get_klines(simbolo, config_optima['timeframe'], config_optima['num_velas'])
                 if klines:
                     df_data = []
                     for kline in klines:
@@ -3045,11 +4240,11 @@ class TradingBot:
             
             
             # 1. Sincronización con Bitget (cada ciclo)
-            if self.exchange:
+            if self.bitget_client:
                 self.sincronizar_con_bitget()
             
             # 2. Verificación y recolocación de TP/SL (cada ciclo)
-            if self.exchange:
+            if self.bitget_client:
                 self.verificar_y_recolocar_tp_sl()
             
             # 3. Reoptimización periódica
@@ -3058,7 +4253,7 @@ class TradingBot:
             
             # 4. Actualización periódica de monedas dinámicas (cada ~10 ciclos)
             if random.random() < 0.1:
-                if self.config.get('simbolos_dinamicos', False) and self.exchange:
+                if self.config.get('simbolos_dinamicos', False) and self.bitget_client:
                     print("\n🔄 Actualización programada de monedas dinámicas...")
                     self.actualizar_moned()
             
@@ -3087,7 +4282,7 @@ class TradingBot:
         print(f"   Activas: {len(self.operaciones_activas)}")
         print(f"   Esperando reentry: {len(self.esperando_reentry)}")
         print(f"   Total ejecutadas: {self.total_operaciones}")
-        if self.exchange:
+        if self.bitget_client:
             print(f"   🤖 BITGET FUTUROS: ✅ Conectado")
             if self.ejecutar_operaciones_automaticas:
                 print(f"   🤖 AUTO-TRADING: ✅ ACTIVADO (Dinero REAL)")
@@ -3123,7 +4318,7 @@ class TradingBot:
             print(f"📊 Modo: 🟢 MONEDAS DINÁMICAS (Top 200 por volumen)")
         else:
             print(f"📊 Modo: FIJOS")
-        if self.exchange:
+        if self.bitget_client:
             print(f"🤖 BITGET FUTUROS: ✅ API Conectada")
             print(f"⚡ Apalancamiento: {self.leverage_por_defecto}x")
             print(f"💰 MARGIN USDT: 3% del saldo actual (se recalcula para CADA operación)")
@@ -3147,7 +4342,7 @@ class TradingBot:
 
         # ACTUALIZACIÓN INICIAL DE MONEDAS DINÁMICAS
         print("\n📊 INICIALIZANDO MONEDAS DINÁMICAS POR VOLUMEN...")
-        if self.exchange:
+        if self.bitget_client:
             if self.actualizar_moned():
                 print(f"✅ Monedas dinámicas inicializadas: {len(self.moned)} símbolos")
             else:
@@ -3159,7 +4354,7 @@ class TradingBot:
             print(f"ℹ️ Usando símbolos de configuración: {len(self.moned)}")
 
         # SINCRONIZACIÓN INICIAL CON BITGET
-        if self.exchange:
+        if self.bitget_client:
             print("\n🔄 REALIZANDO SINCRONIZACIÓN INICIAL CON BITGET...")
             self.sincronizar_con_bitget()
             print("✅ Sincronización inicial completada")
@@ -3210,7 +4405,8 @@ def crear_config_desde_entorno():
         'timeframes': ['15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
         # Símbolos vacíos - Se generarán dinámicamente en actualizar_moned()
-        'symbols': ['BTCUSDT'],
+        'symbols': [],
+        'simbolos_dinamicos': True,  # Flag para indicar modo dinámico
          # NUEVO: Tiempo máximo de espera para breakout
         'max_wait_minutes': int(os.environ.get('MAX_WAIT_MINUTES', '120')),
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
@@ -3275,7 +4471,7 @@ def health_check():
             "operaciones_activas": len(bot.operaciones_activas),
             "esperando_reentry": len(bot.esperando_reentry),
             "total_operaciones": bot.total_operaciones,
-            "bitget_conectado": bot.exchange is not None,
+            "bitget_conectado": bot.bitget_client is not None,
             "auto_trading": bot.ejecutar_operaciones_automaticas
         }
         return jsonify(status), 200
@@ -3313,142 +4509,6 @@ def setup_telegram_webhook():
             logger.error(f"❌ Error configurando webhook: {response.status_code} - {response.text}")
     except Exception as e:
         logger.error(f"❌ Error configurando webhook: {e}")
-
-
-def ejecutar_operacion_bitget(exchange, simbolo, tipo_operacion, capital_usd=None, leverage=None, sl=None, tp=None):
-    """
-    Ejecuta una operación usando CCXT aplicando la REGLA DE ORO (MARGEN_USDT = 1).
-    """
-    logger.info(f"🚀 EJECUTANDO OPERACIÓN REAL EN BITGET FUTUROS")
-    logger.info(f"Símbolo: {simbolo}")
-    logger.info(f"Tipo: {tipo_operacion}")
-    try:
-        tipo_ccxt = 'buy' if tipo_operacion == 'LONG' else 'sell'
-        
-        # CCXT expects symbols with a slash for Spot or :USDT for futures
-        # We will dynamically format the symbol. Usually bitget futures in ccxt is BTC/USDT:USDT
-        simbolo_ccxt = simbolo.replace('USDT', '/USDT:USDT') if '/' not in simbolo else simbolo
-        
-        # Balance details to return
-        pnl_data = {}
-        try:
-            balance = exchange.fetch_balance()
-            pnl_data['saldo_cuenta'] = float(balance.get('USDT', {}).get('free', 0))
-            logger.info(f"💰 Saldo actual cuenta: ${pnl_data['saldo_cuenta']:.2f}")
-        except:
-            pnl_data['saldo_cuenta'] = 0.0
-            logger.warning("⚠️ No se pudo obtener saldo de la cuenta")
-
-        logger.info(f"Configurando apalancamiento {PALANCA_ESTRICTA}x para {simbolo}")
-        try:
-            exchange.set_margin_mode('isolated', simbolo_ccxt)
-        except Exception as e:
-            logger.warning(f"Error configurando modo de posición: {e}")
-        
-        try:
-            exchange.set_leverage(PALANCA_ESTRICTA, simbolo_ccxt)
-            logger.info("✓ Apalancamiento configurado exitosamente")
-        except Exception as e:
-            logger.warning(f"No se pudo configurar apalancamiento, continuando... {e}")
-
-        # Obtener información del mercado para la precisión
-        mercados = exchange.load_markets()
-        if simbolo_ccxt not in mercados:
-            print(f"[{simbolo}] Símbolo no encontrado en mercados cargados.")
-            return None
-            
-        info_mercado = mercados[simbolo_ccxt]
-        prec_precio = info_mercado['precision']['price']
-        prec_cantidad = info_mercado['precision']['amount']
-        
-        # Size minimums
-        min_cost = info_mercado.get('limits', {}).get('cost', {}).get('min', 5) # Default 5 USDT
-        min_amount = info_mercado.get('limits', {}).get('amount', {}).get('min', 0)
-
-        # Usar MARGEN_USDT global = 1, palanca = 10
-        capital = MARGEN_USDT
-        palanca = PALANCA_ESTRICTA
-        
-        ticker = exchange.fetch_ticker(simbolo_ccxt)
-        precio_actual = float(ticker['last'])
-        
-        cantidad_real = (capital * palanca) / precio_actual
-        # Apply precision
-        from decimal import Decimal, ROUND_DOWN
-        prec_str = format(prec_cantidad, 'f').rstrip('0')
-        decimales = len(prec_str.split('.')[1]) if '.' in prec_str else 0
-        cantidad_final = float(Decimal(str(cantidad_real)).quantize(Decimal(str(10**-decimales)), rounding=ROUND_DOWN))
-        
-        if cantidad_final < min_amount:
-            logger.error(f"❌ Para {simbolo} a ${precio_actual:.2f}, el mínimo requiere más margen")
-            return None
-
-        logger.info(f"Colocando orden de {tipo_ccxt} con cantidad {cantidad_final}")
-        orden_entrada = exchange.create_order(simbolo_ccxt, 'market', tipo_ccxt, cantidad_final)
-        precio_entrada_real = orden_entrada.get('average', precio_actual)
-        if not precio_entrada_real: precio_entrada_real = precio_actual
-        
-        logger.info(f"✓ Posición abierta en BITGET FUTUROS: {orden_entrada.get('id', 'N/A')}")
-        
-        # Stop loss logic (fijo) 1.6% (0.016)
-        if tipo_operacion == 'LONG':
-            sl_calc = precio_entrada_real * (1 - stopFijo)
-            tp_calc = precio_entrada_real * (1 + stopFijo * 1.5)
-            # Send SL order
-            try:
-                exchange.create_order(simbolo_ccxt, 'market', 'sell', cantidad_final, params={
-                    'stopLossPrice': a_decimal_estricto(sl_calc, prec_precio),
-                    'reduceOnly': True
-                })
-                logger.info("✓ Orden Stop Loss colocada")
-            except Exception as e:
-                logger.warning(f"⚠️ Aviso creando SL: {e}")
-            # TP order
-            try:
-                exchange.create_order(simbolo_ccxt, 'market', 'sell', cantidad_final, params={
-                    'takeProfitPrice': a_decimal_estricto(tp_calc, prec_precio),
-                    'reduceOnly': True
-                })
-                logger.info("✓ Orden Take Profit colocada")
-            except Exception as e:
-                logger.warning(f"⚠️ Aviso creando TP: {e}")
-        else:
-            sl_calc = precio_entrada_real * (1 + stopFijo)
-            tp_calc = precio_entrada_real * (1 - stopFijo * 1.5)
-            try:
-                exchange.create_order(simbolo_ccxt, 'market', 'buy', cantidad_final, params={
-                    'stopLossPrice': a_decimal_estricto(sl_calc, prec_precio),
-                    'reduceOnly': True
-                })
-                logger.info("✓ Orden Stop Loss colocada")
-            except Exception as e:
-                logger.warning(f"⚠️ Aviso creando SL: {e}")
-            # TP order
-            try:
-                exchange.create_order(simbolo_ccxt, 'market', 'buy', cantidad_final, params={
-                    'takeProfitPrice': a_decimal_estricto(tp_calc, prec_precio),
-                    'reduceOnly': True
-                })
-                logger.info("✓ Orden Take Profit colocada")
-            except Exception as e:
-                logger.warning(f"⚠️ Aviso creando TP: {e}")
-
-        logger.info(f"Capital usado (estimado): {capital}")
-        logger.info(f"Precio Entrada Real: {precio_entrada_real}")
-        return {
-            'capital_usado': capital,
-            'saldo_cuenta': pnl_data['saldo_cuenta'],
-            'leverage': palanca,
-            'precio_entrada': precio_entrada_real,
-            'take_profit': tp_calc,
-            'stop_loss': sl_calc,
-            'orden_entrada': orden_entrada
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ ERROR ejecutando orden en Bitget para {simbolo}: {e}")
-        return None
-
 
 if __name__ == '__main__':
     logger.info("🚀 Iniciando aplicación Flask...")
