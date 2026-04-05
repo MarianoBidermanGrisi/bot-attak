@@ -1535,7 +1535,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         df = pd.DataFrame(klines, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'amount'])
         df['high'] = pd.to_numeric(df['high'])
         df['low'] = pd.to_numeric(df['low'])
-        precio_actual = float(klines[0][4])
+        precio_actual = float(klines[-1][4])  # klines[-1] obtiene la vela más reciente
         rango = df['high'].max() - df['low'].min()
         
         # CALCULO ESTRICTO DE 1 USDT x20
