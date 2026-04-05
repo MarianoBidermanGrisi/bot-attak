@@ -1639,11 +1639,11 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
                 pass
                 
             if bot:
-                msg = f"❌ *OPERACIÓN RECHAZADA POR EXCHANGE*
+                msg = f"""❌ *OPERACIÓN RECHAZADA POR EXCHANGE*
 Par: `{simbolo}`
 Apalancamiento: `{apalancamiento_verificado}x` (esperado {PALANCA_ESTRICTA})
 Margen: `{margen_verificado:.4f}`
-_Posición cancelada_"
+_Posición cancelada_"""
                 try:
                     bot._enviar_telegram_simple(msg, bot.config.get('telegram_token'), bot.config.get('telegram_chat_ids', []))
                 except: pass
