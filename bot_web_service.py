@@ -3321,7 +3321,7 @@ class TradingBot:
         # REGLAS DE ORO: Ambas condiciones DI Y Stochastic DEBEN cumplirse
         if tipo_breakout == "BREAKOUT_LONG":
             # Para LONG: reingreso cerca del soporte + DI- < DI+ + Stoch K > D
-            tolerancia = 0.001 * precio_actual
+            tolerancia = 0.20 * (resistencia - soporte) # 20% del ancho del canal
             distancia_soporte = abs(precio_actual - soporte)
             
             if distancia_soporte <= tolerancia:
@@ -3340,10 +3340,12 @@ class TradingBot:
                             print(f"     ❌ {simbolo} - REENTRY LONG RECHAZADO: DI+ NO > DI- ({di_plus:.2f} <= {di_minus:.2f}) - VIOLA REGLAS DE ORO")
                         if angulo <= 0:
                             print(f"     ❌ {simbolo} - REENTRY LONG RECHAZADO: Ángulo NO positivo ({angulo:.2f}°)")
+            else:
+                print(f"     ⏳ {simbolo} - REENTRY LONG ESPERANDO: Precio muy lejos del soporte. Distancia={distancia_soporte:.4f} > Tolerancia={tolerancia:.4f}")
         
         elif tipo_breakout == "BREAKOUT_SHORT":
             # Para SHORT: reingreso cerca de la resistencia + DI- > DI+ + Stoch K < D
-            tolerancia = 0.001 * precio_actual
+            tolerancia = 0.20 * (resistencia - soporte) # 20% del ancho del canal
             distancia_resistencia = abs(precio_actual - resistencia)
             
             if distancia_resistencia <= tolerancia:
@@ -3362,6 +3364,8 @@ class TradingBot:
                             print(f"     ❌ {simbolo} - REENTRY SHORT RECHAZADO: DI- NO > DI+ ({di_minus:.2f} <= {di_plus:.2f}) - VIOLA REGLAS DE ORO")
                         if angulo >= 0:
                             print(f"     ❌ {simbolo} - REENTRY SHORT RECHAZADO: Ángulo NO negativo ({angulo:.2f}°)")
+            else:
+                print(f"     ⏳ {simbolo} - REENTRY SHORT ESPERANDO: Precio muy lejos de la resistencia. Distancia={distancia_resistencia:.4f} > Tolerancia={tolerancia:.4f}")
         
         return None
 
