@@ -4570,10 +4570,31 @@ bot = TradingBot(config)
 def run_bot_loop():
     """Ejecuta el bot en un hilo separado"""
     logger.info("🤖 Iniciando hilo del bot...")
+    
+    # Temporizador para vigilancia de posiciones (cada 3 minutos)
+    ultima_vigilancia_posiciones = 0
+    intervalo_vigilancia_seg = 180 # 3 minutos
+    
     while True:
         try:
+            ahora = time.time()
+            
+            # 1. VIGILANCIA PRIORITARIA DE POSICIONES (Cada 3 minutos)
+            if ahora - ultima_vigilancia_posiciones >= intervalo_vigilancia_seg:
+                if bot.operaciones_activas:
+                    logger.info(f"🛡️ ESCANEO DE SEGURIDAD (Cada 3 min): Verificando ADX/DI en {len(bot.operaciones_activas)} posiciones...")
+                    # Esta función internamente ya calcula el ADX/DI y cierra si es necesario
+                    bot.verificar_cierre_operaciones()
+                    bot.guardar_estado()
+                ultima_vigilancia_posiciones = ahora
+            
+            # 2. ESCANEO GENERAL DE NUEVAS SEÑALES (Según el intervalo configurado)
+            # Solo ejecutamos el análisis completo si no se acaba de hacer vigilancia o según el ritmo
             bot.ejecutar_analisis()
-            time.sleep(bot.config.get('scan_interval_minutes', 1) * 60)
+            
+            # Dormir un poco para no saturar el CPU (chequeo base de 30 segundos)
+            time.sleep(30)
+            
         except Exception as e:
             logger.error(f"❌ Error en el hilo del bot: {e}", exc_info=True)
             time.sleep(60)
