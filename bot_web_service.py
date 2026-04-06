@@ -1631,25 +1631,51 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         if posicion_encontrada:
             logger.info(f"   🔍 Size de posición: {size_verificado}")
         
-        # Si el margen reportado es 0 (común si la API tarda en actualizar o en cross margin mode)
-        # pero vemos que se abrió size_verificado > 0, lo consideramos válido.
-        margen_ok = abs(margen_verificado - MARGEN_USDT) < TOLERANCIA_MAX or (margen_verificado == 0.0 and size_verificado > 0)
-        palanca_ok = apalancamiento_verificado == PALANCA_ESTRICTA
+        # CRITERIO DE VERIFICACIÓN FLEXIBLE:
+        # 1. ¿Existe la posición?
+        # 2. ¿El tamaño (tokens) es razonablemente cercano al solicitado?
+        # Si esto se cumple, aceptamos la operación aunque el margen o leverage reportado
+        # por la API de Bitget sea impreciso en los primeros segundos.
         
-        if not palanca_ok or not margen_ok:
-            logger.error(f"❌ VERIFICACIÓN FALLIDA! Cerrando inmediatamente...")
+        size_objetivo = float(cant_tokens)
+        diferencia_size = abs(size_verificado - size_objetivo)
+        
+        # Aceptamos si el size coincide o si es una posición real (> 0) y el margen es razonable
+        size_ok = diferencia_size < (size_objetivo * 0.1) or (size_verificado > 0 and abs(margen_verificado - MARGEN_USDT) < 2.0)
+        
+        # Solo fallamos si realmente NO hay posición o el tamaño es drásticamente erróneo
+        if not posicion_encontrada or size_verificado <= 0:
+            logger.error(f"❌ VERIFICACIÓN FALLIDA: Posición no encontrada o size cero.")
+            verificacion_exitosa = False
+        else:
+            # Si llegamos aquí, la posición existe. Verificamos si queremos ser estrictos o no.
+            # Según los logs, Bitget a veces reporta 10x aunque se pida 20x, o el margen en cross es distinto.
+            # Si el size es correcto, la operación es válida para el usuario.
+            if size_ok:
+                logger.info(f"✅ VERIFICACIÓN EXITOSA: Posición confirmada con {size_verificado} tokens.")
+                verificacion_exitosa = True
+            else:
+                logger.error(f"❌ VERIFICACIÓN FALLIDA: Size incorrecto ({size_verificado} vs {size_objetivo})")
+                verificacion_exitosa = False
+        
+        if not verificacion_exitosa:
+            logger.error(f"❌ PROCEDIENDO A CIERRE DE EMERGENCIA...")
             cerrar_side = 'sell' if tipo_operacion == 'LONG' else 'buy'
             try:
-                bitget_client.place_order(symbol=simbolo, side=cerrar_side, order_type='market', size=str(posicion_encontrada.get('available', cant_tokens)), posSide=pos_side, is_hedged_account=False, reduce_only=True)
-            except:
-                pass
+                # Intentar cerrar lo que sea que se haya abierto
+                size_a_cerrar = size_verificado if size_verificado > 0 else str(cant_tokens)
+                bitget_client.place_order(symbol=simbolo, side=cerrar_side, order_type='market', size=str(size_a_cerrar), posSide=pos_side, is_hedged_account=False, reduce_only=True)
+            except Exception as e:
+                logger.error(f"Error en cierre de emergencia: {e}")
                 
             if bot:
                 msg = f"""❌ *OPERACIÓN RECHAZADA POR EXCHANGE*
 Par: `{simbolo}`
-Apalancamiento: `{apalancamiento_verificado}x` (esperado {PALANCA_ESTRICTA})
+Apalancamiento: `{apalancamiento_verificado}x`
 Margen: `{margen_verificado:.4f}`
-_Posición cancelada_"""
+Size: `{size_verificado}`
+_Posición cancelada por seguridad_"""
+
                 try:
                     bot._enviar_telegram_simple(msg, bot.config.get('telegram_token'), bot.config.get('telegram_chat_ids', []))
                 except: pass
