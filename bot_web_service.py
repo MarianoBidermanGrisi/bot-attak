@@ -1565,9 +1565,15 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
                 cant_tokens = str(cant_tokens_alt)
                 margen_real = margen_real_alt
                 
-        diferencia = abs(margen_real - MARGEN_USDT)
-        if diferencia > TOLERANCIA_MAX:
-             logger.error(f"❌ RECHAZADA: Margen = {margen_real:.6f} USDT. Dif: {diferencia}")
+        # GESTIÓN DE RIESGO INTELIGENTE:
+        # 1) Permitir cualquier margen que sea menor que nuestro objetivo (no hay riesgo extra)
+        # 2) Solo RECHAZAR si el margen calculado EXSEDE nuestra tolerancia superior
+        if margen_real > (MARGEN_USDT + TOLERANCIA_MAX):
+             logger.error(f"❌ RECHAZADA POR SEGURIDAD: Margen = {margen_real:.6f} USDT excede el límite de {MARGEN_USDT + TOLERANCIA_MAX} USDT")
+             return None
+        
+        if margen_real < 0.10: # Seguridad mínima para que Bitget no rechace por orden muy pequeña
+             logger.error(f"❌ RECHAZADA: Margen = {margen_real:.6f} USDT es demasiado bajo para ser procesado por Bitget.")
              return None
              
         # SL TÉCNICO INTELIGENTE: Buscar el mínimo/máximo desde el breakout
@@ -3871,17 +3877,52 @@ class TradingBot:
             sl = operacion['stop_loss']
             tipo = operacion['tipo']
             resultado = None
-            if tipo == "LONG":
-                if precio_actual >= tp:
-                    resultado = "TP"
-                elif precio_actual <= sl:
-                    resultado = "SL"
-            else:
-                if precio_actual <= tp:
-                    resultado = "TP"
-                elif precio_actual >= sl:
-                    resultado = "SL"
+            # =====================================================
+            # NUEVO: PROTECCIÓN DE CAPITAL - CIERRE ANTICIPADO POR DI
+            # =====================================================
+            resultado_di = None
+            df_actual = datos.get('df')
+            if df_actual is not None and not df_actual.empty:
+                # Calcular ADX/DI actualizados
+                res_di = calcular_adx_di(df_actual['High'], df_actual['Low'], df_actual['Close'], length=14)
+                di_plus_now = res_di['di_plus'][-1]
+                di_minus_now = res_di['di_minus'][-1]
+                
+                if tipo == "LONG" and di_minus_now > di_plus_now:
+                    resultado_di = "CIERRE_DI_LONG"
+                    print(f"     🛡️ {simbolo} - PROTECCIÓN DI: DI-({di_minus_now:.1f}) > DI+({di_plus_now:.1f}). Cerrando...")
+                elif tipo == "SHORT" and di_plus_now > di_minus_now:
+                    resultado_di = "CIERRE_DI_SHORT"
+                    print(f"     🛡️ {simbolo} - PROTECCIÓN DI: DI+({di_plus_now:.1f}) > DI-({di_minus_now:.1f}). Cerrando...")
+
+            # Determinar si cerramos la operación
+            if precio_actual >= tp and tipo == "LONG": resultado = "TP"
+            elif precio_actual <= sl and tipo == "LONG": resultado = "SL"
+            elif precio_actual <= tp and tipo == "SHORT": resultado = "TP"
+            elif precio_actual >= sl and tipo == "SHORT": resultado = "SL"
+            elif resultado_di: resultado = resultado_di # Cierre por protección de tendencia
+
             if resultado:
+                # Si es un cierre por DI o una operación automática, intentar cerrar en Bitget
+                if self.bitget_client and operacion.get('operacion_ejecutada', False):
+                    try:
+                        logger.info(f"📤 Ejecutando cierre de mercado en BITGET por {resultado} para {simbolo}...")
+                        lado_cierre = "sell" if tipo == "LONG" else "buy"
+                        pos_side = "long" if tipo == "LONG" else "short"
+                        # Cierre directo a mercado
+                        self.bitget_client.place_order(
+                            symbol=simbolo, 
+                            side=lado_cierre, 
+                            order_type='market', 
+                            size=str(operacion.get('size_real', 0)), 
+                            posSide=pos_side, 
+                            is_hedged_account=False
+                        )
+                        # Cancelar cualquier orden TP/SL pendiente
+                        if simbolo in self.order_ids_sl: self.bitget_client.cancel_order(self.order_ids_sl[simbolo], simbolo)
+                        if simbolo in self.order_ids_tp: self.bitget_client.cancel_order(self.order_ids_tp[simbolo], simbolo)
+                    except Exception as e:
+                        logger.error(f"❌ Error cerrando posición en Bitget: {e}")
                 if tipo == "LONG":
                     pnl_percent = ((precio_actual - operacion['precio_entrada']) / operacion['precio_entrada']) * 100
                 else:
