@@ -641,7 +641,8 @@ class BitgetClient:
             body['stopLossTriggerPrice'] = stop_loss_formatted
             logger.info(f"🔧 SL para {symbol}: precio={stop_loss_price}, precision={precision_bitget}, formatted={stop_loss_formatted}, direccion={trade_direction}")
         elif order_type == 'take_profit' and take_profit_price:
-            take_profit_formatted = self.redondear_precio_manual(take_profit_price, precision_bitget, symbol)
+            tp_direction = f"{trade_direction}_TP" if trade_direction else None
+            take_profit_formatted = self.redondear_precio_manual(take_profit_price, precision_bitget, symbol, tp_direction)
             body['stopSurplusTriggerPrice'] = take_profit_formatted
             logger.info(f"🔧 TP para {symbol}: precio={take_profit_price}, precision={precision_bitget}, formatted={take_profit_formatted}")
         
@@ -882,7 +883,8 @@ class BitgetClient:
             
         if take_profit_price is not None:
             # Redondear con la precisión correcta para este símbolo
-            take_profit_formatted = self.redondear_precio_manual(float(take_profit_price), precision_bitget, symbol)
+            tp_direction = f"{trade_direction}_TP" if trade_direction else None
+            take_profit_formatted = self.redondear_precio_manual(float(take_profit_price), precision_bitget, symbol, tp_direction)
         else:
             take_profit_formatted = None
 
@@ -1070,24 +1072,20 @@ class BitgetClient:
             # Redondear matemáticamente al múltiplo más cercano del tick_size
             precio_redondeado = round(price / tick_size) * tick_size
             
-            # AJUSTE INTELIGENTE PARA STOP LOSS
-            # El SL para LONG debe estar POR DEBAJO del precio de entrada
-            # El SL para SHORT debe estar POR ENCIMA del precio de entrada
+            # AJUSTE INTELIGENTE PARA TP Y SL
             import math
-            if trade_direction and trade_direction in ['LONG', 'SHORT']:
+            if trade_direction and trade_direction in ['LONG', 'SHORT', 'LONG_TP', 'SHORT_TP']:
                 precio_redondeado = float(f"{precio_redondeado:.{price_scale}f}")
                 
-                if trade_direction == 'LONG':
-                    # Para LONG: SL debe ser menor que precio de entrada
+                if trade_direction == 'LONG' or trade_direction == 'SHORT_TP':
+                    # SL para LONG y TP para SHORT deben ser menores que el precio de entrada
                     # Redondear hacia ABAJO usando floor
                     if precio_redondeado >= price:
-                        # Ir al tick anterior (menor)
                         precio_redondeado = math.floor(price / tick_size) * tick_size
-                elif trade_direction == 'SHORT':
-                    # Para SHORT: SL debe ser mayor que precio de entrada
+                elif trade_direction == 'SHORT' or trade_direction == 'LONG_TP':
+                    # SL para SHORT y TP para LONG deben ser mayores que el precio de entrada
                     # Redondear hacia ARRIBA usando ceil
                     if precio_redondeado <= price:
-                        # Ir al siguiente tick (mayor)
                         precio_redondeado = math.ceil(price / tick_size) * tick_size
             
             # Usar formato para evitar errores de punto flotante
@@ -1572,9 +1570,17 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
              logger.error(f"❌ RECHAZADA: Margen = {margen_real:.6f} USDT. Dif: {diferencia}")
              return None
              
-        # SL Y TP
+        # SL Y TP - Ajustado para que el TP sea aproximadamente el doble del SL (RR ~ 2:1)
         sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
-        tp = precio_actual + (rango * 0.24) if tipo_operacion == 'LONG' else precio_actual - (rango * 0.24)
+        riesgo_unidades = abs(precio_actual - sl)
+        distancia_tp_optimo = riesgo_unidades * 2.0 # Ratio 2:1 preferido
+        
+        # El TP original basado en canal (rango * 0.24)
+        distancia_tp_canal = rango * 0.24
+        
+        # Usar el mayor entre el TP del canal y el TP del ratio 2:1 para asegurar rentabilidad
+        distancia_tp = max(distancia_tp_canal, distancia_tp_optimo, precio_actual * 0.006)
+        tp = precio_actual + distancia_tp if tipo_operacion == 'LONG' else precio_actual - distancia_tp
         
         def formatear_precio(price):
             if price >= 100: return f"{price:.2f}"
@@ -1664,7 +1670,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             try:
                 # Intentar cerrar lo que sea que se haya abierto
                 size_a_cerrar = size_verificado if size_verificado > 0 else str(cant_tokens)
-                bitget_client.place_order(symbol=simbolo, side=cerrar_side, order_type='market', size=str(size_a_cerrar), posSide=pos_side, is_hedged_account=False, reduce_only=True)
+                bitget_client.place_order(symbol=simbolo, side=cerrar_side, order_type='market', size=str(size_a_cerrar), posSide=pos_side, is_hedged_account=False)
             except Exception as e:
                 logger.error(f"Error en cierre de emergencia: {e}")
                 
@@ -3056,25 +3062,35 @@ class TradingBot:
 ⏰ <b>Hora:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 📍 {expectativa}
         """
-        token = self.config.get('telegram_token')
-        chat_ids = self.config.get('telegram_chat_ids', [])
-        if token and chat_ids:
-            try:
-                print(f"     📊 Generando gráfico de breakout para {simbolo}...")
-                buf = self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
-                if buf:
-                    print(f"     📨 Enviando alerta de breakout por Telegram...")
-                    self.enviar_grafico_telegram(buf, token, chat_ids)
-                    time.sleep(0.5)
+        # Verificar si las alertas de breakout se envían a Telegram o a Consola
+        breakout_telegram = self.config.get('breakout_telegram_alerts', False)
+        
+        if breakout_telegram:
+            token = self.config.get('telegram_token')
+            chat_ids = self.config.get('telegram_chat_ids', [])
+            if token and chat_ids:
+                try:
+                    print(f"     📊 Generando gráfico de breakout para {simbolo}...")
+                    buf = self.generar_grafico_breakout(simbolo, info_canal, datos_mercado, tipo_breakout, config_optima)
+                    if buf:
+                        print(f"     📨 Enviando alerta de breakout por Telegram...")
+                        self.enviar_grafico_telegram(buf, token, chat_ids)
+                        time.sleep(0.5)
                     self._enviar_telegram_simple(mensaje, token, chat_ids)
-                    print(f"     ✅ Alerta de breakout enviada para {simbolo}")
-                else:
-                    self._enviar_telegram_simple(mensaje, token, chat_ids)
-                    print(f"     ⚠️ Alerta enviada sin gráfico")
-            except Exception as e:
-                print(f"     ❌ Error enviando alerta de breakout: {e}")
+                    print(f"     ✅ Alerta de breakout enviada a Telegram para {simbolo}")
+                except Exception as e:
+                    print(f"     ❌ Error enviando alerta de breakout a Telegram: {e}")
+            else:
+                print(f"     📢 Breakout detectado en {simbolo} (Telegram no configurado)")
         else:
-            print(f"     📢 Breakout detectado en {simbolo} (sin Telegram)")
+            # Impresión detallada en consola
+            print("\n" + "!" * 50)
+            print(f"🚨 BREAKOUT CONSOLA - {simbolo}")
+            print(f"🚨 TIPO: {tipo_texto}")
+            print(f"📍 NIVEL: {nivel_roto}")
+            print(f"⏰ HORA: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"🎯 EXPECTATIVA: {expectativa}")
+            print("!" * 50 + "\n")
 
     def generar_grafico_breakout(self, simbolo, info_canal, datos_mercado, tipo_breakout, config_optima):
         """
@@ -3430,12 +3446,14 @@ class TradingBot:
         beneficio = abs(take_profit - precio_entrada)
         ratio_rr = beneficio / riesgo if riesgo > 0 else 0
         
-        # Solo ajustar si el ratio es muy bajo (protección adicional)
-        if ratio_rr < 0.5:
+        # AJUSTE DE PROFITABILIDAD: Garantizar que el TP sea aproximadamente el doble del SL
+        min_beneficio_objetivo = riesgo * 2.0 # Ratio deseado 2:1
+        
+        if beneficio < min_beneficio_objetivo:
             if tipo_operacion == "LONG":
-                take_profit = precio_entrada + (riesgo * self.config['min_rr_ratio'])
+                take_profit = precio_entrada + min_beneficio_objetivo
             else:
-                take_profit = precio_entrada - (riesgo * self.config['min_rr_ratio'])
+                take_profit = precio_entrada - min_beneficio_objetivo
         
         return precio_entrada, take_profit, stop_loss
 
@@ -3707,8 +3725,8 @@ class TradingBot:
                         'operacion_manual_usuario': False,  # MARCA EXPLÍCITA: Operación automática
                         # NUEVOS CAMPOS PARA BITGET
                         'order_id_entrada': operacion_bitget['orden_entrada'].get('orderId'),
-                        'order_id_sl': operacion_bitget['orden_sl'].get('orderId') if operacion_bitget['orden_sl'] else None,
-                        'order_id_tp': operacion_bitget['orden_tp'].get('orderId') if operacion_bitget['orden_tp'] else None,
+                        'order_id_sl': None,  # Integrado en la orden base
+                        'order_id_tp': None,  # Integrado en la orden base
                         'capital_usado': operacion_bitget['capital_usado'],
                         'valor_nocional': operacion_bitget['capital_usado'] * operacion_bitget['leverage'],
                         'margin_usdt_real': operacion_bitget['capital_usado'],
@@ -4436,13 +4454,14 @@ def crear_config_desde_entorno():
         'trend_threshold_degrees': 16.0,
         'min_trend_strength_degrees': 16.0,
         'entry_margin': 0.001,
-        'min_rr_ratio': 1.2,
+        'min_rr_ratio': 2.0,
         'scan_interval_minutes': 15,  
         'timeframes': ['15m', '30m', '1h', '4h'],
         'velas_options': [80, 100, 120, 150, 200],
         # Símbolos vacíos - Se generarán dinámicamente en actualizar_moned()
         'symbols': [],
         'simbolos_dinamicos': True,  # Flag para indicar modo dinámico
+        'breakout_telegram_alerts': False, # True: Envía breakouts a Telegram, False: Solo Consola
          # NUEVO: Tiempo máximo de espera para breakout
         'max_wait_minutes': int(os.environ.get('MAX_WAIT_MINUTES', '120')),
         'telegram_token': os.environ.get('TELEGRAM_TOKEN'),
