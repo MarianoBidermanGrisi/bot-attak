@@ -1570,16 +1570,47 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
              logger.error(f"❌ RECHAZADA: Margen = {margen_real:.6f} USDT. Dif: {diferencia}")
              return None
              
-        # SL Y TP - Ajustado para que el TP sea aproximadamente el doble del SL (RR ~ 2:1)
-        sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
+        # SL TÉCNICO INTELIGENTE: Buscar el mínimo/máximo desde el breakout
+        try:
+            # Obtener velas desde el breakout para encontrar el extremo técnico
+            simbolo_espera = bot.esperando_reentry.get(simbolo) if bot else None
+            velas_atras = 20 # Por defecto mirar 20 velas atrás
+            if simbolo_espera:
+                tiempo_breakout = simbolo_espera.get('timestamp')
+                # Intentar calcular cuántas velas pasaron
+                minutos_pasados = (datetime.now() - tiempo_breakout).total_seconds() / 60
+                tf_min = 15 # Asumir 15m si no se detecta
+                if '1h' in str(bot.config.get('timeframes')): tf_min = 60
+                velas_atras = max(10, int(minutos_pasados / tf_min) + 5)
+            
+            recent_candles = bitget_client.get_klines(simbolo, '15m', velas_atras)
+            if recent_candles:
+                highs = [float(k[2]) for k in recent_candles]
+                lows = [float(k[3]) for k in recent_candles]
+                if tipo_operacion == 'LONG':
+                    # SL Debajo del mínimo reciente (con 0.1% de respiro)
+                    sl_tecnico = min(lows) * 0.998
+                    # No permitir un SL absurdamente lejos (max 3%)
+                    sl = max(sl_tecnico, precio_actual * 0.97)
+                else:
+                    # SL Arriba del máximo reciente (con 0.1% de respiro)
+                    sl_tecnico = max(highs) * 1.002
+                    # No permitir un SL absurdamente lejos (max 3%)
+                    sl = min(sl_tecnico, precio_actual * 1.03)
+            else:
+                # Fallback al SL porcentual si fallan las velas
+                sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
+        except Exception as e:
+            logger.error(f"Error calculando SL técnico: {e}")
+            sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
+
+        # TP BASADO ESTRICTAMENTE EN RATIO 2:1 DEL SL TÉCNICO
         riesgo_unidades = abs(precio_actual - sl)
-        distancia_tp_optimo = riesgo_unidades * 2.0 # Ratio 2:1 preferido
+        distancia_tp = riesgo_unidades * 2.0 # Ratio exacto 2:1 para rentabilidad matemática
         
-        # El TP original basado en canal (rango * 0.24)
-        distancia_tp_canal = rango * 0.24
+        # Seguridad mínima (0.5% del precio para evitar TPs absurdamente pegados)
+        distancia_tp = max(distancia_tp, precio_actual * 0.005)
         
-        # Usar el mayor entre el TP del canal y el TP del ratio 2:1 para asegurar rentabilidad
-        distancia_tp = max(distancia_tp_canal, distancia_tp_optimo, precio_actual * 0.006)
         tp = precio_actual + distancia_tp if tipo_operacion == 'LONG' else precio_actual - distancia_tp
         
         def formatear_precio(price):
@@ -3433,27 +3464,33 @@ class TradingBot:
         
         if tipo_operacion == "LONG":
             precio_entrada = precio_actual
-            stop_loss = precio_entrada * (1 - sl_porcentaje)
-            # TP en la resistencia (ancho completo del canal desde el soporte)
+            # SL TÉCNICO: Mínimo de las velas recientes
+            try:
+                minimo_reciente = min(datos_mercado['minimos'][-20:])
+                stop_loss = min(minimo_reciente * 0.998, precio_entrada * 0.984) # Técnico pero max 1.6% del fijo para no arriesgar de más
+            except:
+                stop_loss = precio_entrada * (1 - sl_porcentaje)
+            # TP en la resistencia
             take_profit = resistencia
         else:
             precio_entrada = precio_actual
-            stop_loss = resistencia * (1 + sl_porcentaje)
-            # TP en el soporte (ancho completo del canal desde la resistencia)
+            # SL TÉCNICO: Máximo de las velas recientes
+            try:
+                maximo_reciente = max(datos_mercado['maximos'][-20:])
+                stop_loss = max(maximo_reciente * 1.002, precio_entrada * 1.016) # Técnico pero max 1.6%
+            except:
+                stop_loss = resistencia * (1 + sl_porcentaje)
+            # TP en el soporte
             take_profit = soporte
         
         riesgo = abs(precio_entrada - stop_loss)
-        beneficio = abs(take_profit - precio_entrada)
-        ratio_rr = beneficio / riesgo if riesgo > 0 else 0
+        # TP ESTRICTO: DOBLE QUE EL RIESGO (RATIO 2:1)
+        beneficio = riesgo * 2.0
         
-        # AJUSTE DE PROFITABILIDAD: Garantizar que el TP sea aproximadamente el doble del SL
-        min_beneficio_objetivo = riesgo * 2.0 # Ratio deseado 2:1
-        
-        if beneficio < min_beneficio_objetivo:
-            if tipo_operacion == "LONG":
-                take_profit = precio_entrada + min_beneficio_objetivo
-            else:
-                take_profit = precio_entrada - min_beneficio_objetivo
+        if tipo_operacion == "LONG":
+            take_profit = precio_entrada + beneficio
+        else:
+            take_profit = precio_entrada - beneficio
         
         return precio_entrada, take_profit, stop_loss
 
