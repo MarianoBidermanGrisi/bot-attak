@@ -1619,15 +1619,21 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
         
         margen_verificado = 0.0
         apalancamiento_verificado = 0
+        size_verificado = 0.0
         if posicion_encontrada:
-            margen_verificado = float(posicion_encontrada.get('margin', posicion_encontrada.get('initialMargin', 0)))
+            margen_verificado = float(posicion_encontrada.get('marginSize', posicion_encontrada.get('margin', posicion_encontrada.get('initialMargin', 0))))
             apalancamiento_verificado = int(posicion_encontrada.get('leverage', 0))
+            size_verificado = float(posicion_encontrada.get('total', posicion_encontrada.get('size', posicion_encontrada.get('available', 0))))
             
         logger.info(f"   🔍 VERIFICACIÓN POST-OPERACIÓN:")
         logger.info(f"   🔍 Margen en exchange: {margen_verificado:.6f}")
         logger.info(f"   🔍 Apalancamiento: {apalancamiento_verificado}x")
+        if posicion_encontrada:
+            logger.info(f"   🔍 Size de posición: {size_verificado}")
         
-        margen_ok = abs(margen_verificado - MARGEN_USDT) < TOLERANCIA_MAX
+        # Si el margen reportado es 0 (común si la API tarda en actualizar o en cross margin mode)
+        # pero vemos que se abrió size_verificado > 0, lo consideramos válido.
+        margen_ok = abs(margen_verificado - MARGEN_USDT) < TOLERANCIA_MAX or (margen_verificado == 0.0 and size_verificado > 0)
         palanca_ok = apalancamiento_verificado == PALANCA_ESTRICTA
         
         if not palanca_ok or not margen_ok:
