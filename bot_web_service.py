@@ -1662,24 +1662,42 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             elif price >= 0.0001: return f"{price:.8f}"
             else: return f"{price:.10f}"
             
-        sl_formatted = formatear_precio(sl)
-        tp_formatted = formatear_precio(tp)
+        sl_f = formatear_precio(sl)
+        tp_f = formatear_precio(tp)
         
         side = 'buy' if tipo_operacion == 'LONG' else 'sell'
         pos_side = 'long' if tipo_operacion == 'LONG' else 'short'
         
-        # EJECUTAR ORDEN
-        logger.info(f"🚀 Ejecutando orden en {simbolo}. SL: {sl_formatted}, TP: {tp_formatted}")
-        orden_entrada = None
-        intentos = 0
-        while intentos < 2 and orden_entrada is None:
-            intentos += 1
-            if intentos == 1:
-                orden_entrada = bitget_client.place_order(symbol=simbolo, side=side, order_type='market', size=str(cant_tokens), posSide=pos_side, is_hedged_account=False, stop_loss_price=sl_formatted, take_profit_price=tp_formatted, trade_direction=tipo_operacion)
-            else:
-                orden_entrada = bitget_client.place_order(symbol=simbolo, side=side, order_type='market', size=str(cant_tokens), posSide=None, is_hedged_account=True, stop_loss_price=sl_formatted, take_profit_price=tp_formatted, trade_direction=tipo_operacion)
-                
-        if not orden_entrada:
+        # EJECUCIÓN DE ORDEN DE ENTRADA
+        try:
+            params_entrada = {
+                'symbol': simbolo,
+                'productType': 'USDT-FUTURES',
+                'marginMode': 'isolated',
+                'marginCoin': 'USDT',
+                'side': side,
+                'orderType': 'market',
+                'size': str(cant_tokens),
+                'posSide': pos_side,
+                'presetStopLossPrice': str(sl_f),
+                'presetStopSurplusPrice': str(tp_f),
+                'triggerType': 'mark_price',  # REQUERIDO PARA EVITAR ERROR 43011
+                'planType': 'market_price'     # REQUERIDO PARA EVITAR ERROR 43011
+            }
+            
+            logger.info(f"📤 Enviando orden con TP/SL integrados: {params_entrada}")
+            
+            orden_entrada = bitget_client.place_order(**params_entrada)
+            
+            if not orden_entrada or orden_entrada.get('code') != '00000':
+                error_msg = orden_entrada.get('msg', 'Error desconocido') if orden_entrada else 'Sin respuesta'
+                logger.error(f"❌ FALLO CRÍTICO APERTURA: {error_msg}")
+                return None
+
+            logger.info(f"✅ Orden ejecutada (Market) para {simbolo}. Verificando TP/SL...")
+            
+        except Exception as e:
+            logger.error(f"❌ Excepción en apertura: {e}")
             return None
             
         time.sleep(2)
@@ -1708,14 +1726,49 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             logger.info(f"   🔍 Size de posición: {size_verificado}")
         
         # CRITERIO DE VERIFICACIÓN FLEXIBLE:
-        # 1. ¿Existe la posición?
-        # 2. ¿El tamaño (tokens) es razonablemente cercano al solicitado?
-        # Si esto se cumple, aceptamos la operación aunque el margen o leverage reportado
-        # por la API de Bitget sea impreciso en los primeros segundos.
-        
         size_objetivo = float(cant_tokens)
         diferencia_size = abs(size_verificado - size_objetivo)
         
+        # Una vez confirmada la posición, re-verificamos que existan órdenes plan
+        # Si NO existen, las intentamos colocar UNA VEZ. Si vuelve a fallar, CERRAR POSICIÓN.
+        try:
+            ordenes_plan = bitget_client.get_open_orders(simbolo)
+            has_tp = False
+            has_sl = False
+            if ordenes_plan and isinstance(ordenes_plan, list):
+                for o in ordenes_plan:
+                    if o.get('orderType') == 'stop_loss': has_sl = True
+                    if o.get('orderType') == 'take_profit': has_tp = True
+            
+            if not has_tp or not has_sl:
+                logger.warning(f"⚠️ {simbolo}: FALTAN órdenes de protección. Intentando colocar manualmente...")
+                
+                # Intentar colocar SL manual con parámetros corregidos
+                res_sl = bitget_client.place_tpsl_order(
+                    symbol=simbolo, hold_side=pos_side, trigger_price=sl_f, 
+                    order_type='stop_loss', stop_loss_price=sl_f, trade_direction=tipo_operacion
+                )
+                
+                # Intentar colocar TP manual con parámetros corregidos
+                res_tp = bitget_client.place_tpsl_order(
+                    symbol=simbolo, hold_side=pos_side, trigger_price=tp_f, 
+                    order_type='take_profit', take_profit_price=tp_f, trade_direction=tipo_operacion
+                )
+
+                # KILL SWITCH: Si al segundo intento sigue fallando, CERRAR TODO
+                if (not res_sl or res_sl.get('code') != '00000') or (not res_tp or res_tp.get('code') != '00000'):
+                    logger.critical(f"🚨 KILL SWITCH ACTIVADO: Fallo crítico al asegurar {simbolo}. CERRANDO POSICIÓN A MERCADO.")
+                    bitget_client.place_order(
+                        symbol=simbolo, side='sell' if tipo_operacion == 'LONG' else 'buy',
+                        orderType='market', size=str(cant_tokens), posSide=pos_side
+                    )
+                    # Bloquear símbolo por 1 hora por seguridad
+                    if bot: bot.operaciones_cerradas_registradas.append(simbolo)
+                    return None
+
+        except Exception as e:
+            logger.error(f"Error en verificación de protección: {e}")
+
         # Aceptamos si el size coincide o si es una posición real (> 0) y el margen es razonable
         size_ok = diferencia_size < (size_objetivo * 0.1) or (size_verificado > 0 and abs(margen_verificado - MARGEN_USDT) < 2.0)
         
@@ -2655,7 +2708,9 @@ class TradingBot:
             self.ultima_sincronizacion_bitget = datetime.now()
             logger.info(f"✅ Sincronización con Bitget completada")
             logger.info(f"📊 Operaciones activas locales: {len(self.operaciones_activas)}")
-            logger.info(f"📊 Operaciones Bitget activas: {len(self.operaciones_bitget_activas)}")
+            
+            # --- BLINDAJE DE SEGURIDAD: NO ABRIR OPERACIONES MANUALES NI AUTOMÁTICAS DESDE AQUÍ ---
+            # Solo actualizamos el estado de las que ya existen, NUNCA abrimos nada nuevo
             
             # GUARDAR ESTADO después de sincronización
             self.guardar_estado()
@@ -3956,6 +4011,13 @@ class TradingBot:
                         if simbolo in self.order_ids_tp: self.bitget_client.cancel_order(self.order_ids_tp[simbolo], simbolo)
                     except Exception as e:
                         logger.error(f"❌ Error cerrando posición en Bitget: {e}")
+                
+                # BLOQUEO DE SEGURIDAD POST-CIERRE: 
+                # Evitar que el bot vuelva a entrar inmediatamente al mismo símbolo
+                if bot:
+                    bot.senales_enviadas.add(simbolo)
+                    bot.operaciones_cerradas_registradas.append(simbolo)
+                
                 if tipo == "LONG":
                     pnl_percent = ((precio_actual - operacion['precio_entrada']) / operacion['precio_entrada']) * 100
                 else:
