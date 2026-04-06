@@ -172,18 +172,51 @@ def calcular_adx_di(high, low, close, length=14):
         0,
         (di_diff / np.where(di_sum == 0, np.nan, di_sum)) * 100
     )
+    """Calcula ADX, DI+ y DI- siguiendo EXACTAMENTE la lógica de TradingView/Welles Wilder"""
+    import pandas as pd
+    import numpy as np
+
+    # Convertir a Series si son arrays
+    high = pd.Series(high)
+    low = pd.Series(low)
+    close = pd.Series(close)
+
+    # 1. Calcular True Range (TR)
+    t1 = high - low
+    t2 = (high - close.shift(1)).abs()
+    t3 = (low - close.shift(1)).abs()
+    tr = pd.concat([t1, t2, t3], axis=1).max(axis=1)
+
+    # 2. Calcular Directional Movement (+DM y -DM)
+    up = high - high.shift(1)
+    down = low.shift(1) - low
     
-    # ADX = sma(DX, length) - Media móvil simple de DX
-    for i in range(n):
-        if i < length - 1:
-            adx[i] = np.nan
-        else:
-            adx[i] = np.mean(dx[i-length+1:i+1])
+    dp = np.where((up > down) & (up > 0), up, 0)
+    dm = np.where((down > up) & (down > 0), down, 0)
     
+    # transformamos a Series de pandas para el suavizado
+    tr_s = pd.Series(tr)
+    dp_s = pd.Series(dp, index=tr_s.index)
+    dm_s = pd.Series(dm, index=tr_s.index)
+
+    # 3. SUAVIZADO DE WILDER (La clave de TradingView v4)
+    # Ruso: nz(S[1]) - (nz(S[1])/len) + Val == EWM con alpha = 1/len
+    tr_smoothed = tr_s.ewm(alpha=1/length, adjust=False).mean() * length
+    dp_smoothed = dp_s.ewm(alpha=1/length, adjust=False).mean() * length
+    dm_smoothed = dm_s.ewm(alpha=1/length, adjust=False).mean() * length
+
+    # 4. Calcular DI+ y DI-
+    di_plus = (dp_smoothed / tr_smoothed) * 100
+    di_minus = (dm_smoothed / tr_smoothed) * 100
+
+    # 5. Calcular DX y ADX (Simple Moving Average del DX)
+    dx = (abs(di_plus - di_minus) / (di_plus + di_minus)) * 100
+    adx = dx.rolling(window=length).mean() # SMA como el script sma(DX, len)
+
     return {
-        'di_plus': di_plus,
-        'di_minus': di_minus,
-        'adx': adx
+        'adx': adx.fillna(0).values,
+        'di_plus': di_plus.fillna(0).values,
+        'di_minus': di_minus.fillna(0).values
     }
 
 
