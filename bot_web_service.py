@@ -3121,9 +3121,10 @@ class TradingBot:
         })
         
         # Calcular ADX, DI+ y DI-
+        # Usar la nueva función idéntica a TradingView
         resultado_adx = calcular_adx_di(df_indicadores['High'], df_indicadores['Low'], df_indicadores['Close'], length=14)
         
-        # Obtener los valores más recientes
+        # Obtener los valores más recientes (último índice)
         di_plus = resultado_adx['di_plus'][-1]
         di_minus = resultado_adx['di_minus'][-1]
         adx = resultado_adx['adx'][-1]
@@ -3153,6 +3154,7 @@ class TradingBot:
             'stoch_d': stoch_d,
             'di_plus': di_plus,
             'di_minus': di_minus,
+            'adx': adx,
             'timeframe': datos_mercado.get('timeframe', 'N/A'),
             'num_velas': candle_period
         }
@@ -3314,7 +3316,7 @@ class TradingBot:
             df['Stoch_K'] = k_smoothed
             df['Stoch_D'] = stoch_d_values
 
-            # Calcular ADX, DI+ y DI-
+            # Calcular ADX, DI+ y DI- usando la nueva función compatible con TradingView
             resultado_adx = calcular_adx_di(df['High'], df['Low'], df['Close'], length=14)
             df['DI+'] = resultado_adx['di_plus']
             df['DI-'] = resultado_adx['di_minus']
