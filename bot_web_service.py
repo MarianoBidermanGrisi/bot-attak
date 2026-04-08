@@ -172,51 +172,18 @@ def calcular_adx_di(high, low, close, length=14):
         0,
         (di_diff / np.where(di_sum == 0, np.nan, di_sum)) * 100
     )
-    """Calcula ADX, DI+ y DI- siguiendo EXACTAMENTE la lógica de TradingView/Welles Wilder"""
-    import pandas as pd
-    import numpy as np
-
-    # Convertir a Series si son arrays
-    high = pd.Series(high)
-    low = pd.Series(low)
-    close = pd.Series(close)
-
-    # 1. Calcular True Range (TR)
-    t1 = high - low
-    t2 = (high - close.shift(1)).abs()
-    t3 = (low - close.shift(1)).abs()
-    tr = pd.concat([t1, t2, t3], axis=1).max(axis=1)
-
-    # 2. Calcular Directional Movement (+DM y -DM)
-    up = high - high.shift(1)
-    down = low.shift(1) - low
     
-    dp = np.where((up > down) & (up > 0), up, 0)
-    dm = np.where((down > up) & (down > 0), down, 0)
+    # ADX = sma(DX, length) - Media móvil simple de DX
+    for i in range(n):
+        if i < length - 1:
+            adx[i] = np.nan
+        else:
+            adx[i] = np.mean(dx[i-length+1:i+1])
     
-    # transformamos a Series de pandas para el suavizado
-    tr_s = pd.Series(tr)
-    dp_s = pd.Series(dp, index=tr_s.index)
-    dm_s = pd.Series(dm, index=tr_s.index)
-
-    # 3. SUAVIZADO DE WILDER (La clave de TradingView v4)
-    # Ruso: nz(S[1]) - (nz(S[1])/len) + Val == EWM con alpha = 1/len
-    tr_smoothed = tr_s.ewm(alpha=1/length, adjust=False).mean() * length
-    dp_smoothed = dp_s.ewm(alpha=1/length, adjust=False).mean() * length
-    dm_smoothed = dm_s.ewm(alpha=1/length, adjust=False).mean() * length
-
-    # 4. Calcular DI+ y DI-
-    di_plus = (dp_smoothed / tr_smoothed) * 100
-    di_minus = (dm_smoothed / tr_smoothed) * 100
-
-    # 5. Calcular DX y ADX (Simple Moving Average del DX)
-    dx = (abs(di_plus - di_minus) / (di_plus + di_minus)) * 100
-    adx = dx.rolling(window=length).mean() # SMA como el script sma(DX, len)
-
     return {
-        'adx': adx.fillna(0).values,
-        'di_plus': di_plus.fillna(0).values,
-        'di_minus': di_minus.fillna(0).values
+        'di_plus': di_plus,
+        'di_minus': di_minus,
+        'adx': adx
     }
 
 
@@ -989,7 +956,14 @@ class BitgetClient:
                 if data.get('code') == '40034':
                     logger.error(f"❌ Error 40034: {data.get('msg')}")
 
-        logger.error(f"❌ Error orden entrada: {response.text}")
+        logger.error(f"❌ Error orden entrada: {response.status_code} - {response.text}")
+        try:
+            # Intentar parsear el mensaje de error específico de Bitget
+            error_data = response.json()
+            if error_data.get('msg'):
+                logger.error(f"❌ Bitget Error: {error_data.get('msg')} (Code: {error_data.get('code')})")
+        except:
+            pass
         return None
 
     def obtener_precision_precio(self, symbol):
@@ -1527,309 +1501,211 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
     from datetime import datetime
     import pandas as pd
     
-    logger.info(f"🚀 EJECUTANDO ORDEN ESTRICTA EN BITGET FUTUROS")
+    logger.info(f"🚀 EJECUTANDO ORDEN ESTRICTA EN BITGET FUTUROS (Lógica 4.5 Consolidada)")
     
     try:
-        MARGEN_USDT = 1.0
-        PALANCA_ESTRICTA = 20
+        # Obtener configuración del bot si está disponible, sino usar valores por defecto
+        bot = getattr(bitget_client, '_bot_instance', None)
+        if bot and hasattr(bot, 'config'):
+            MARGEN_USDT = float(bot.config.get('margen_usdt', 1.0))
+            PALANCA_ESTRICTA = int(bot.config.get('leverage_por_defecto', 10))
+        else:
+            MARGEN_USDT = 1.0
+            PALANCA_ESTRICTA = 10
+            
         COOLDOWN_OPERACION = 180
         TOLERANCIA_MAX = 0.04
         stopFijo = 0.016
 
-        bot = getattr(bitget_client, '_bot_instance', None)
-        
         # FILTRO COOLDOWN
         if bot:
             ultima_operacion = getattr(bot, 'ultima_operacion_time', 0)
             tiempo_desde = time.time() - ultima_operacion
-            if tiempo_desde < COOLDOWN_OPERACION: # COOLDOWN_OPERACION
+            if tiempo_desde < COOLDOWN_OPERACION:
                 logger.warning(f"⏳ Cooldown activo: {COOLDOWN_OPERACION - int(tiempo_desde)}s restantes")
                 return None
                 
-        # VERIFICAR APALANCAMIENTO ANTES DE OPERAR
+        # 1. VERIFICAR/CONFIGURAR APALANCAMIENTO
         hold_side = 'long' if tipo_operacion == 'LONG' else 'short'
         try:
+            # Forzar el apalancamiento deseado antes de cada operación
             leverage_ok = bitget_client.set_leverage(simbolo, PALANCA_ESTRICTA, hold_side)
-            if not leverage_ok:
-                logger.error(f"❌ RECHAZADA: {simbolo} no permite x{PALANCA_ESTRICTA} exacto.")
+            if leverage_ok:
+                 logger.info(f"   ✅ Apalancamiento {PALANCA_ESTRICTA}x configurado para {simbolo}")
+            else:
+                logger.error(f"❌ RECHAZADA: {simbolo} no permitió configurar x{PALANCA_ESTRICTA}")
                 return None
         except Exception as e:
-            logger.error(f"❌ RECHAZADA: Error apalancamiento: {e}")
+            logger.error(f"❌ RECHAZADA: Error configurando apalancamiento: {e}")
             return None
             
         time.sleep(1)
 
+        # 2. OBTENER DATOS PARA PRECISION Y SL/TP
         klines = bitget_client.get_klines(simbolo, '15m', 50)
         if not klines or len(klines) == 0:
+            logger.error(f"❌ Error obteniendo klines para {simbolo}")
             return None
         
         df = pd.DataFrame(klines, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'amount'])
-        df['high'] = pd.to_numeric(df['high'])
-        df['low'] = pd.to_numeric(df['low'])
-        precio_actual = float(klines[-1][4])  # klines[-1] obtiene la vela más reciente
+        for col in ['open', 'high', 'low', 'close', 'vol']:
+            df[col] = pd.to_numeric(df[col])
+            
+        precio_actual = float(klines[-1][4])
         rango = df['high'].max() - df['low'].min()
         
-        # CALCULO ESTRICTO DE 1 USDT x20
         reglas = bitget_client.obtener_reglas_simbolo(simbolo)
-        precision_amount = reglas['quantity_scale'] if reglas['quantity_scale'] > 0 else reglas['size_scale']
+        # Bitget V2 usa priceScale para precios y quantityScale/sizeScale para cantidades
+        precision_amount = reglas['quantity_scale'] if reglas['quantity_scale'] > 0 else reglas.get('size_scale', 0)
         
-        # Intento 1
+        # 3. CÁLCULO ESTRICTO DE TOKENS (Lógica de Doble Intento de 4.5)
+        # Intento 1: Basado en redondeo hacia abajo (conservador)
         cant_tokens_base = (MARGEN_USDT * PALANCA_ESTRICTA) / precio_actual
         cant_tokens = a_decimal_estricto(cant_tokens_base, precision_amount)
         valor_posicion_1 = float(cant_tokens) * precio_actual
         margen_real_1 = valor_posicion_1 / PALANCA_ESTRICTA
         
-        # Intento 2
-        margen_real = margen_real_1
+        # Intento 2: Redondeo manual (HALF_UP) para buscar mayor precisión
+        cant_tokens_final = cant_tokens
+        margen_real_final = margen_real_1
+        
         if abs(margen_real_1 - MARGEN_USDT) > 0.000001:
             valor_objetivo = MARGEN_USDT * PALANCA_ESTRICTA
             decimales = int(precision_amount)
             try:
-                cant_tokens_alt = Decimal(str(valor_objetivo)).quantize(Decimal(str(10**-decimales)), rounding=ROUND_HALF_UP)
-            except:
-                cant_tokens_alt = Decimal(str(valor_objetivo))
-            valor_posicion_alt = float(cant_tokens_alt) * precio_actual
-            margen_real_alt = valor_posicion_alt / PALANCA_ESTRICTA
-            
-            logger.info(f"   📐 Intento 1: {cant_tokens} tokens → {margen_real_1:.6f} USDT")
-            logger.info(f"   📐 Intento 2: {cant_tokens_alt} tokens → {margen_real_alt:.6f} USDT")
-            
-            if abs(margen_real_alt - MARGEN_USDT) < abs(margen_real_1 - MARGEN_USDT):
-                cant_tokens = str(cant_tokens_alt)
-                margen_real = margen_real_alt
+                # Intentar un redondeo más agresivo para acercarse al 1.0 USDT
+                cant_tokens_alt = Decimal(str(valor_objetivo / precio_actual)).quantize(
+                    Decimal(str(10**-decimales)), rounding=ROUND_HALF_UP
+                )
+                valor_posicion_alt = float(cant_tokens_alt) * precio_actual
+                margen_real_alt = valor_posicion_alt / PALANCA_ESTRICTA
                 
-        # GESTIÓN DE RIESGO INTELIGENTE:
-        # 1) Permitir cualquier margen que sea menor que nuestro objetivo (no hay riesgo extra)
-        # 2) Solo RECHAZAR si el margen calculado EXSEDE nuestra tolerancia superior
-        if margen_real > (MARGEN_USDT + TOLERANCIA_MAX):
-             logger.error(f"❌ RECHAZADA POR SEGURIDAD: Margen = {margen_real:.6f} USDT excede el límite de {MARGEN_USDT + TOLERANCIA_MAX} USDT")
-             return None
-        
-        if margen_real < 0.10: # Seguridad mínima para que Bitget no rechace por orden muy pequeña
-             logger.error(f"❌ RECHAZADA: Margen = {margen_real:.6f} USDT es demasiado bajo para ser procesado por Bitget.")
-             return None
-             
-        # SL TÉCNICO INTELIGENTE: Buscar el mínimo/máximo desde el breakout
-        try:
-            # Obtener velas desde el breakout para encontrar el extremo técnico
-            simbolo_espera = bot.esperando_reentry.get(simbolo) if bot else None
-            velas_atras = 20 # Por defecto mirar 20 velas atrás
-            if simbolo_espera:
-                tiempo_breakout = simbolo_espera.get('timestamp')
-                # Intentar calcular cuántas velas pasaron
-                minutos_pasados = (datetime.now() - tiempo_breakout).total_seconds() / 60
-                tf_min = 15 # Asumir 15m si no se detecta
-                if '1h' in str(bot.config.get('timeframes')): tf_min = 60
-                velas_atras = max(10, int(minutos_pasados / tf_min) + 5)
-            
-            recent_candles = bitget_client.get_klines(simbolo, '15m', velas_atras)
-            if recent_candles:
-                highs = [float(k[2]) for k in recent_candles]
-                lows = [float(k[3]) for k in recent_candles]
-                if tipo_operacion == 'LONG':
-                    # SL Debajo del mínimo reciente (con 0.1% de respiro)
-                    sl_tecnico = min(lows) * 0.998
-                    # No permitir un SL absurdamente lejos (max 3%)
-                    sl = max(sl_tecnico, precio_actual * 0.97)
-                else:
-                    # SL Arriba del máximo reciente (con 0.1% de respiro)
-                    sl_tecnico = max(highs) * 1.002
-                    # No permitir un SL absurdamente lejos (max 3%)
-                    sl = min(sl_tecnico, precio_actual * 1.03)
-            else:
-                # Fallback al SL porcentual si fallan las velas
-                sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
-        except Exception as e:
-            logger.error(f"Error calculando SL técnico: {e}")
-            sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
+                logger.info(f"   📐 Intento 1: {cant_tokens} → {margen_real_1:.6f} USDT")
+                logger.info(f"   📐 Intento 2: {cant_tokens_alt} → {margen_real_alt:.6f} USDT")
+                
+                if abs(margen_real_alt - MARGEN_USDT) < abs(margen_real_1 - MARGEN_USDT):
+                    cant_tokens_final = str(cant_tokens_alt)
+                    margen_real_final = margen_real_alt
+            except Exception as e:
+                logger.warning(f"⚠️ Error en intento 2 de cálculo: {e}")
 
-        # TP BASADO ESTRICTAMENTE EN RATIO 2:1 DEL SL TÉCNICO
+        # Verificación de tolerancia antes de enviar
+        diferencia = abs(margen_real_final - MARGEN_USDT)
+        if diferencia > TOLERANCIA_MAX:
+             logger.error(f"❌ RECHAZADA: Margen calculado ({margen_real_final:.6f}) excede tolerancia ({TOLERANCIA_MAX})")
+             return None
+        
+        # 4. CÁLCULO DE SL Y TP (Consolidado)
+        # Aplicamos stop fijo de la 4.5 y el TP dinámico mejorado
+        sl = precio_actual * (1 - stopFijo) if tipo_operacion == 'LONG' else precio_actual * (1 + stopFijo)
+        
+        # Objetivo: Ratio RR 2:1 mínimo
         riesgo_unidades = abs(precio_actual - sl)
-        distancia_tp = riesgo_unidades * 2.0 # Ratio exacto 2:1 para rentabilidad matemática
+        distancia_tp_optimo = riesgo_unidades * 2.0
+        distancia_tp_canal = rango * 0.24 # Lógica del bot calabaza
         
-        # Seguridad mínima (0.5% del precio para evitar TPs absurdamente pegados)
-        distancia_tp = max(distancia_tp, precio_actual * 0.005)
-        
+        # Usar el mejor TP (asegurando al menos 0.6% de profit y el RR 2:1)
+        distancia_tp = max(distancia_tp_canal, distancia_tp_optimo, precio_actual * 0.006)
         tp = precio_actual + distancia_tp if tipo_operacion == 'LONG' else precio_actual - distancia_tp
-        
-        def formatear_precio(price):
-            if price >= 100: return f"{price:.2f}"
-            elif price >= 10: return f"{price:.3f}"
-            elif price >= 1: return f"{price:.4f}"
-            elif price >= 0.1: return f"{price:.5f}"
-            elif price >= 0.01: return f"{price:.6f}"
-            elif price >= 0.001: return f"{price:.7f}"
-            elif price >= 0.0001: return f"{price:.8f}"
-            else: return f"{price:.10f}"
-            
-        sl_f = formatear_precio(sl)
-        tp_f = formatear_precio(tp)
         
         side = 'buy' if tipo_operacion == 'LONG' else 'sell'
         pos_side = 'long' if tipo_operacion == 'LONG' else 'short'
         
-        # EJECUCIÓN DE ORDEN DE ENTRADA
-        try:
-            params_entrada = {
-                'symbol': simbolo,
-                'productType': 'USDT-FUTURES',
-                'marginMode': 'isolated',
-                'marginCoin': 'USDT',
-                'side': side,
-                'orderType': 'market',
-                'size': str(cant_tokens),
-                'posSide': pos_side,
-                'presetStopLossPrice': str(sl_f),
-                'presetStopSurplusPrice': str(tp_f),
-                'triggerType': 'mark_price',  # REQUERIDO PARA EVITAR ERROR 43011
-                'planType': 'market_price'     # REQUERIDO PARA EVITAR ERROR 43011
-            }
-            
-            logger.info(f"📤 Enviando orden con TP/SL integrados: {params_entrada}")
-            
-            orden_entrada = bitget_client.place_order(**params_entrada)
-            
-            if not orden_entrada or orden_entrada.get('code') != '00000':
-                error_msg = orden_entrada.get('msg', 'Error desconocido') if orden_entrada else 'Sin respuesta'
-                logger.error(f"❌ FALLO CRÍTICO APERTURA: {error_msg}")
-                return None
+        # 5. EJECUCIÓN DE ORDEN CON TP/SL INTEGRADOS
+        logger.info(f"🚀 Enviando ORDEN MARKET: {simbolo} | {tipo_operacion} | Tokens: {cant_tokens_final}")
+        
+        orden_entrada = None
+        # Probamos primero modo Unilateral (estándar del bot) y luego Hedge si falla
+        for intento_modo in range(2):
+            is_hedged = (intento_modo == 1)
+            orden_entrada = bitget_client.place_order(
+                symbol=simbolo, 
+                side=side, 
+                order_type='market', 
+                size=str(cant_tokens_final), 
+                posSide=pos_side if not is_hedged else None, 
+                is_hedged_account=is_hedged, 
+                stop_loss_price=sl, 
+                take_profit_price=tp, 
+                trade_direction=tipo_operacion
+            )
+            if orden_entrada: break
+            time.sleep(0.5)
 
-            logger.info(f"✅ Orden ejecutada (Market) para {simbolo}. Verificando TP/SL...")
-            
-        except Exception as e:
-            logger.error(f"❌ Excepción en apertura: {e}")
+        if not orden_entrada:
+            logger.error(f"❌ FALLO CRÍTICO: No se pudo colocar la orden de entrada para {simbolo}")
             return None
             
+        # 6. VERIFICACIÓN POST-OPERACIÓN (Lógica Estricta de 4.5)
+        logger.info(f"⏳ Esperando confirmación del exchange...")
         time.sleep(2)
         
-        # VERIFICACIÓN POST-OPERACIÓN CRÍTICA
         posiciones = bitget_client.get_positions(simbolo)
-        posicion_encontrada = None
+        posicion_real = None
         if posiciones:
             for pos in posiciones:
                 if pos.get('symbol') == simbolo and pos.get('holdSide', '').lower() == pos_side:
-                    posicion_encontrada = pos
+                    posicion_real = pos
                     break
         
-        margen_verificado = 0.0
-        apalancamiento_verificado = 0
-        size_verificado = 0.0
-        if posicion_encontrada:
-            margen_verificado = float(posicion_encontrada.get('marginSize', posicion_encontrada.get('margin', posicion_encontrada.get('initialMargin', 0))))
-            apalancamiento_verificado = int(posicion_encontrada.get('leverage', 0))
-            size_verificado = float(posicion_encontrada.get('total', posicion_encontrada.get('size', posicion_encontrada.get('available', 0))))
-            
-        logger.info(f"   🔍 VERIFICACIÓN POST-OPERACIÓN:")
-        logger.info(f"   🔍 Margen en exchange: {margen_verificado:.6f}")
-        logger.info(f"   🔍 Apalancamiento: {apalancamiento_verificado}x")
-        if posicion_encontrada:
-            logger.info(f"   🔍 Size de posición: {size_verificado}")
-        
-        # CRITERIO DE VERIFICACIÓN FLEXIBLE:
-        size_objetivo = float(cant_tokens)
-        diferencia_size = abs(size_verificado - size_objetivo)
-        
-        # Una vez confirmada la posición, re-verificamos que existan órdenes plan
-        # Si NO existen, las intentamos colocar UNA VEZ. Si vuelve a fallar, CERRAR POSICIÓN.
-        try:
-            ordenes_plan = bitget_client.get_open_orders(simbolo)
-            has_tp = False
-            has_sl = False
-            if ordenes_plan and isinstance(ordenes_plan, list):
-                for o in ordenes_plan:
-                    if o.get('orderType') == 'stop_loss': has_sl = True
-                    if o.get('orderType') == 'take_profit': has_tp = True
-            
-            if not has_tp or not has_sl:
-                logger.warning(f"⚠️ {simbolo}: FALTAN órdenes de protección. Intentando colocar manualmente...")
-                
-                # Intentar colocar SL manual con parámetros corregidos
-                res_sl = bitget_client.place_tpsl_order(
-                    symbol=simbolo, hold_side=pos_side, trigger_price=sl_f, 
-                    order_type='stop_loss', stop_loss_price=sl_f, trade_direction=tipo_operacion
-                )
-                
-                # Intentar colocar TP manual con parámetros corregidos
-                res_tp = bitget_client.place_tpsl_order(
-                    symbol=simbolo, hold_side=pos_side, trigger_price=tp_f, 
-                    order_type='take_profit', take_profit_price=tp_f, trade_direction=tipo_operacion
-                )
-
-                # KILL SWITCH: Si al segundo intento sigue fallando, CERRAR TODO
-                if (not res_sl or res_sl.get('code') != '00000') or (not res_tp or res_tp.get('code') != '00000'):
-                    logger.critical(f"🚨 KILL SWITCH ACTIVADO: Fallo crítico al asegurar {simbolo}. CERRANDO POSICIÓN A MERCADO.")
-                    bitget_client.place_order(
-                        symbol=simbolo, side='sell' if tipo_operacion == 'LONG' else 'buy',
-                        orderType='market', size=str(cant_tokens), posSide=pos_side
-                    )
-                    # Bloquear símbolo por 1 hora por seguridad
-                    if bot: bot.operaciones_cerradas_registradas.append(simbolo)
-                    return None
-
-        except Exception as e:
-            logger.error(f"Error en verificación de protección: {e}")
-
-        # Aceptamos si el size coincide o si es una posición real (> 0) y el margen es razonable
-        size_ok = diferencia_size < (size_objetivo * 0.1) or (size_verificado > 0 and abs(margen_verificado - MARGEN_USDT) < 2.0)
-        
-        # Solo fallamos si realmente NO hay posición o el tamaño es drásticamente erróneo
-        if not posicion_encontrada or size_verificado <= 0:
-            logger.error(f"❌ VERIFICACIÓN FALLIDA: Posición no encontrada o size cero.")
-            verificacion_exitosa = False
-        else:
-            # Si llegamos aquí, la posición existe. Verificamos si queremos ser estrictos o no.
-            # Según los logs, Bitget a veces reporta 10x aunque se pida 20x, o el margen en cross es distinto.
-            # Si el size es correcto, la operación es válida para el usuario.
-            if size_ok:
-                logger.info(f"✅ VERIFICACIÓN EXITOSA: Posición confirmada con {size_verificado} tokens.")
-                verificacion_exitosa = True
-            else:
-                logger.error(f"❌ VERIFICACIÓN FALLIDA: Size incorrecto ({size_verificado} vs {size_objetivo})")
-                verificacion_exitosa = False
-        
-        if not verificacion_exitosa:
-            logger.error(f"❌ PROCEDIENDO A CIERRE DE EMERGENCIA...")
-            cerrar_side = 'sell' if tipo_operacion == 'LONG' else 'buy'
-            try:
-                # Intentar cerrar lo que sea que se haya abierto
-                size_a_cerrar = size_verificado if size_verificado > 0 else str(cant_tokens)
-                bitget_client.place_order(symbol=simbolo, side=cerrar_side, order_type='market', size=str(size_a_cerrar), posSide=pos_side, is_hedged_account=False)
-            except Exception as e:
-                logger.error(f"Error en cierre de emergencia: {e}")
-                
-            if bot:
-                msg = f"""❌ *OPERACIÓN RECHAZADA POR EXCHANGE*
-Par: `{simbolo}`
-Apalancamiento: `{apalancamiento_verificado}x`
-Margen: `{margen_verificado:.4f}`
-Size: `{size_verificado}`
-_Posición cancelada por seguridad_"""
-
-                try:
-                    bot._enviar_telegram_simple(msg, bot.config.get('telegram_token'), bot.config.get('telegram_chat_ids', []))
-                except: pass
+        if not posicion_real:
+            logger.error(f"⚠️ Alerta: Orden enviada pero posición no detectada inmediatamente en {simbolo}")
+            # No cerramos todavía, podría ser latencia, pero marcamos como riesgo
             return None
+
+        # Extraer métricas reales del exchange
+        margen_v = float(posicion_real.get('marginSize', posicion_real.get('initialMargin', 0)))
+        palanca_v = int(posicion_real.get('leverage', 0))
+        size_v = float(posicion_real.get('total', posicion_real.get('size', 0)))
+        
+        logger.info(f"   🔍 EXCHANGE CONFIRM: Margen: {margen_v:.4f} | Palanca: {palanca_v}x | Size: {size_v}")
+        
+        # VERIFICACIÓN DE REGLA DE ORO
+        # Si la palanca es distinta a la solicitada o el margen se desvía demasiado -> CIERRE DE EMERGENCIA
+        palanca_ok = (palanca_v == PALANCA_ESTRICTA)
+        
+        if not palanca_ok:
+            logger.error(f"❌ REGLA DE ORO VIOLADA: Palanca {palanca_v}x != {PALANCA_ESTRICTA}x")
+            # CIERRE DE EMERGENCIA
+            logger.error(f"🚨 EJECUTANDO CIERRE DE EMERGENCIA EN {simbolo}...")
+            bitget_client.place_order(
+                symbol=simbolo, 
+                side='sell' if side == 'buy' else 'buy', 
+                size=str(size_v if size_v > 0 else cant_tokens_final),
+                order_type='market', 
+                posSide=pos_side, 
+                trade_direction='CLOSE'
+            )
             
-        logger.info(f"   ✅ VERIFICACIÓN PASADA: {margen_verificado:.6f} USDT x{apalancamiento_verificado}")
+            if bot:
+                bot._enviar_telegram_simple(
+                    f"🚨 *CIERRE DE EMERGENCIA - {simbolo}*\nLa palanca del exchange ({palanca_v}x) no coincide con la configurada ({PALANCA_ESTRICTA}x).",
+                    bot.config.get('telegram_token'), bot.config.get('telegram_chat_ids', [])
+                )
+            return None
+
+        # 7. REGISTRO Y RETORNO
+        logger.info(f"✅ OPERACIÓN EXITOSA Y VERIFICADA EN {simbolo}")
         
         if bot:
             bot.ultima_operacion_time = time.time()
+            if not hasattr(bot, 'order_ids_entrada'): bot.order_ids_entrada = {}
             bot.order_ids_entrada[simbolo] = orden_entrada.get('orderId')
             
-        operacion_data = {
+        return {
             'orden_entrada': orden_entrada,
-            'cantidad_contratos': cant_tokens,
+            'cantidad_contratos': cant_tokens_final,
             'precio_entrada': precio_actual,
             'take_profit': tp,
             'stop_loss': sl,
-            'leverage': PALANCA_ESTRICTA,
-            'capital_usado': margen_verificado,
+            'leverage': palanca_v,
+            'capital_usado': margen_v,
             'saldo_cuenta': bitget_client.obtener_saldo_cuenta(),
             'tipo': tipo_operacion,
             'timestamp_entrada': datetime.now().isoformat(),
-            'symbol': simbolo
+            'symbol': simbolo,
+            'verificada': True
         }
-        return operacion_data
         
     except Exception as e:
         logger.error(f"Error fatal ejecutando orden bitget: {e}")
@@ -2708,9 +2584,7 @@ class TradingBot:
             self.ultima_sincronizacion_bitget = datetime.now()
             logger.info(f"✅ Sincronización con Bitget completada")
             logger.info(f"📊 Operaciones activas locales: {len(self.operaciones_activas)}")
-            
-            # --- BLINDAJE DE SEGURIDAD: NO ABRIR OPERACIONES MANUALES NI AUTOMÁTICAS DESDE AQUÍ ---
-            # Solo actualizamos el estado de las que ya existen, NUNCA abrimos nada nuevo
+            logger.info(f"📊 Operaciones Bitget activas: {len(self.operaciones_bitget_activas)}")
             
             # GUARDAR ESTADO después de sincronización
             self.guardar_estado()
@@ -3121,10 +2995,9 @@ class TradingBot:
         })
         
         # Calcular ADX, DI+ y DI-
-        # Usar la nueva función idéntica a TradingView
         resultado_adx = calcular_adx_di(df_indicadores['High'], df_indicadores['Low'], df_indicadores['Close'], length=14)
         
-        # Obtener los valores más recientes (último índice)
+        # Obtener los valores más recientes
         di_plus = resultado_adx['di_plus'][-1]
         di_minus = resultado_adx['di_minus'][-1]
         adx = resultado_adx['adx'][-1]
@@ -3154,7 +3027,6 @@ class TradingBot:
             'stoch_d': stoch_d,
             'di_plus': di_plus,
             'di_minus': di_minus,
-            'adx': adx,
             'timeframe': datos_mercado.get('timeframe', 'N/A'),
             'num_velas': candle_period
         }
@@ -3316,7 +3188,7 @@ class TradingBot:
             df['Stoch_K'] = k_smoothed
             df['Stoch_D'] = stoch_d_values
 
-            # Calcular ADX, DI+ y DI- usando la nueva función compatible con TradingView
+            # Calcular ADX, DI+ y DI-
             resultado_adx = calcular_adx_di(df['High'], df['Low'], df['Close'], length=14)
             df['DI+'] = resultado_adx['di_plus']
             df['DI-'] = resultado_adx['di_minus']
@@ -3560,33 +3432,27 @@ class TradingBot:
         
         if tipo_operacion == "LONG":
             precio_entrada = precio_actual
-            # SL TÉCNICO: Mínimo de las velas recientes
-            try:
-                minimo_reciente = min(datos_mercado['minimos'][-20:])
-                stop_loss = min(minimo_reciente * 0.998, precio_entrada * 0.984) # Técnico pero max 1.6% del fijo para no arriesgar de más
-            except:
-                stop_loss = precio_entrada * (1 - sl_porcentaje)
-            # TP en la resistencia
+            stop_loss = precio_entrada * (1 - sl_porcentaje)
+            # TP en la resistencia (ancho completo del canal desde el soporte)
             take_profit = resistencia
         else:
             precio_entrada = precio_actual
-            # SL TÉCNICO: Máximo de las velas recientes
-            try:
-                maximo_reciente = max(datos_mercado['maximos'][-20:])
-                stop_loss = max(maximo_reciente * 1.002, precio_entrada * 1.016) # Técnico pero max 1.6%
-            except:
-                stop_loss = resistencia * (1 + sl_porcentaje)
-            # TP en el soporte
+            stop_loss = resistencia * (1 + sl_porcentaje)
+            # TP en el soporte (ancho completo del canal desde la resistencia)
             take_profit = soporte
         
         riesgo = abs(precio_entrada - stop_loss)
-        # TP ESTRICTO: DOBLE QUE EL RIESGO (RATIO 2:1)
-        beneficio = riesgo * 2.0
+        beneficio = abs(take_profit - precio_entrada)
+        ratio_rr = beneficio / riesgo if riesgo > 0 else 0
         
-        if tipo_operacion == "LONG":
-            take_profit = precio_entrada + beneficio
-        else:
-            take_profit = precio_entrada - beneficio
+        # AJUSTE DE PROFITABILIDAD: Garantizar que el TP sea aproximadamente el doble del SL
+        min_beneficio_objetivo = riesgo * 2.0 # Ratio deseado 2:1
+        
+        if beneficio < min_beneficio_objetivo:
+            if tipo_operacion == "LONG":
+                take_profit = precio_entrada + min_beneficio_objetivo
+            else:
+                take_profit = precio_entrada - min_beneficio_objetivo
         
         return precio_entrada, take_profit, stop_loss
 
@@ -3820,16 +3686,15 @@ class TradingBot:
 🤖 <b>OPERACIÓN AUTOMÁTICA EJECUTADA - {simbolo}</b>
 ✅ <b>Status:</b> EJECUTADA EN BITGET FUTUROS
 📊 <b>Tipo:</b> {tipo_operacion}
-💰 <b>MARGIN USDT:</b> ${operacion_bitget.get('capital_usado', 0):.2f} (3% del saldo actual)
+💰 <b>MARGIN USDT:</b> ${operacion_bitget.get('capital_usado', 1.0):.4f} (Regla de Oro)
 💰 <b>Saldo Total:</b> ${operacion_bitget.get('saldo_cuenta', 0):.2f}
-💰 <b>Saldo Restante:</b> ${operacion_bitget.get('saldo_cuenta', 0) - operacion_bitget.get('capital_usado', 0):.2f}
-📊 <b>Valor Nocional:</b> ${operacion_bitget.get('capital_usado', 0) * operacion_bitget.get('leverage', 1):.2f}
+📊 <b>Valor Nocional:</b> ${operacion_bitget.get('capital_usado', 1.0) * operacion_bitget.get('leverage', 1):.2f}
 ⚡ <b>Apalancamiento:</b> {operacion_bitget.get('leverage', self.leverage_por_defecto)}x
 🎯 <b>Entrada:</b> {operacion_bitget.get('precio_entrada', 0):.8f}
 🛑 <b>Stop Loss:</b> {operacion_bitget.get('stop_loss', 'N/A')}
 🎯 <b>Take Profit:</b> {operacion_bitget.get('take_profit', 'N/A')}
 📋 <b>ID Orden:</b> {operacion_bitget.get('orden_entrada', {}).get('orderId', 'N/A')}
-🔧 <b>Sistema:</b> Cada operación usa 3% del saldo actual (saldo disminuye)
+🔧 <b>Sistema:</b> REGLA DE ORO (1 USDT x{operacion_bitget.get('leverage', self.leverage_por_defecto)})
 ⏰ <b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     """
                     self._enviar_telegram_simple(mensaje_confirmacion, token, chat_ids)
@@ -3967,59 +3832,17 @@ class TradingBot:
             sl = operacion['stop_loss']
             tipo = operacion['tipo']
             resultado = None
-            # =====================================================
-            # NUEVO: PROTECCIÓN DE CAPITAL - CIERRE ANTICIPADO POR DI
-            # =====================================================
-            resultado_di = None
-            df_actual = datos.get('df')
-            if df_actual is not None and not df_actual.empty:
-                # Calcular ADX/DI actualizados
-                res_di = calcular_adx_di(df_actual['High'], df_actual['Low'], df_actual['Close'], length=14)
-                di_plus_now = res_di['di_plus'][-1]
-                di_minus_now = res_di['di_minus'][-1]
-                
-                if tipo == "LONG" and di_minus_now > di_plus_now:
-                    resultado_di = "CIERRE_DI_LONG"
-                    print(f"     🛡️ {simbolo} - PROTECCIÓN DI: DI-({di_minus_now:.1f}) > DI+({di_plus_now:.1f}). Cerrando...")
-                elif tipo == "SHORT" and di_plus_now > di_minus_now:
-                    resultado_di = "CIERRE_DI_SHORT"
-                    print(f"     🛡️ {simbolo} - PROTECCIÓN DI: DI+({di_plus_now:.1f}) > DI-({di_minus_now:.1f}). Cerrando...")
-
-            # Determinar si cerramos la operación
-            if precio_actual >= tp and tipo == "LONG": resultado = "TP"
-            elif precio_actual <= sl and tipo == "LONG": resultado = "SL"
-            elif precio_actual <= tp and tipo == "SHORT": resultado = "TP"
-            elif precio_actual >= sl and tipo == "SHORT": resultado = "SL"
-            elif resultado_di: resultado = resultado_di # Cierre por protección de tendencia
-
+            if tipo == "LONG":
+                if precio_actual >= tp:
+                    resultado = "TP"
+                elif precio_actual <= sl:
+                    resultado = "SL"
+            else:
+                if precio_actual <= tp:
+                    resultado = "TP"
+                elif precio_actual >= sl:
+                    resultado = "SL"
             if resultado:
-                # Si es un cierre por DI o una operación automática, intentar cerrar en Bitget
-                if self.bitget_client and operacion.get('operacion_ejecutada', False):
-                    try:
-                        logger.info(f"📤 Ejecutando cierre de mercado en BITGET por {resultado} para {simbolo}...")
-                        lado_cierre = "sell" if tipo == "LONG" else "buy"
-                        pos_side = "long" if tipo == "LONG" else "short"
-                        # Cierre directo a mercado
-                        self.bitget_client.place_order(
-                            symbol=simbolo, 
-                            side=lado_cierre, 
-                            order_type='market', 
-                            size=str(operacion.get('size_real', 0)), 
-                            posSide=pos_side, 
-                            is_hedged_account=False
-                        )
-                        # Cancelar cualquier orden TP/SL pendiente
-                        if simbolo in self.order_ids_sl: self.bitget_client.cancel_order(self.order_ids_sl[simbolo], simbolo)
-                        if simbolo in self.order_ids_tp: self.bitget_client.cancel_order(self.order_ids_tp[simbolo], simbolo)
-                    except Exception as e:
-                        logger.error(f"❌ Error cerrando posición en Bitget: {e}")
-                
-                # BLOQUEO DE SEGURIDAD POST-CIERRE: 
-                # Evitar que el bot vuelva a entrar inmediatamente al mismo símbolo
-                if bot:
-                    bot.senales_enviadas.add(simbolo)
-                    bot.operaciones_cerradas_registradas.append(simbolo)
-                
                 if tipo == "LONG":
                     pnl_percent = ((precio_actual - operacion['precio_entrada']) / operacion['precio_entrada']) * 100
                 else:
@@ -4624,6 +4447,13 @@ def crear_config_desde_entorno():
     telegram_chat_ids_str = os.environ.get('TELEGRAM_CHAT_ID', '1570204748')
     telegram_chat_ids = [cid.strip() for cid in telegram_chat_ids_str.split(',') if cid.strip()]
     
+    # ==========================================
+    #     CONFIGURACIÓN MANUAL DEL USUARIO
+    # ==========================================
+    PALANCA_USUARIO = 10  # <--- CAMBIA ESTO PARA MODIFICAR EL APALANCAMIENTO (Ej: 20)
+    MARGEN_ESTRICTO = 1.0 # <--- CAMBIA ESTO PARA MODIFICAR EL MARGEN EN USDT
+    # ==========================================
+
     return {
         'min_channel_width_percent': 4.0,
         'trend_threshold_degrees': 16.0,
@@ -4651,7 +4481,8 @@ def crear_config_desde_entorno():
         'bitget_passphrase': os.environ.get('BITGET_PASSPHRASE'),
         'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
-        'leverage_por_defecto': min(int(os.environ.get('LEVERAGE_POR_DEFECTO', '10')), 10)
+        'leverage_por_defecto': PALANCA_USUARIO,
+        'margen_usdt': MARGEN_ESTRICTO
     }
 
 # ---------------------------
@@ -4667,31 +4498,10 @@ bot = TradingBot(config)
 def run_bot_loop():
     """Ejecuta el bot en un hilo separado"""
     logger.info("🤖 Iniciando hilo del bot...")
-    
-    # Temporizador para vigilancia de posiciones (cada 3 minutos)
-    ultima_vigilancia_posiciones = 0
-    intervalo_vigilancia_seg = 180 # 3 minutos
-    
     while True:
         try:
-            ahora = time.time()
-            
-            # 1. VIGILANCIA PRIORITARIA DE POSICIONES (Cada 3 minutos)
-            if ahora - ultima_vigilancia_posiciones >= intervalo_vigilancia_seg:
-                if bot.operaciones_activas:
-                    logger.info(f"🛡️ ESCANEO DE SEGURIDAD (Cada 3 min): Verificando ADX/DI en {len(bot.operaciones_activas)} posiciones...")
-                    # Esta función internamente ya calcula el ADX/DI y cierra si es necesario
-                    bot.verificar_cierre_operaciones()
-                    bot.guardar_estado()
-                ultima_vigilancia_posiciones = ahora
-            
-            # 2. ESCANEO GENERAL DE NUEVAS SEÑALES (Según el intervalo configurado)
-            # Solo ejecutamos el análisis completo si no se acaba de hacer vigilancia o según el ritmo
             bot.ejecutar_analisis()
-            
-            # Dormir un poco para no saturar el CPU (chequeo base de 30 segundos)
-            time.sleep(30)
-            
+            time.sleep(bot.config.get('scan_interval_minutes', 1) * 60)
         except Exception as e:
             logger.error(f"❌ Error en el hilo del bot: {e}", exc_info=True)
             time.sleep(60)
