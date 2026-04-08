@@ -3416,7 +3416,7 @@ class TradingBot:
         
         return None
 
-    def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual):
+    def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual, breakout_info=None):
         """Calcula niveles de entrada, SL y TP.
         
         El TP se coloca en el ANCHO COMPLETO DEL CANAL (lado opuesto):
@@ -3428,31 +3428,41 @@ class TradingBot:
         resistencia = info_canal['resistencia']
         soporte = info_canal['soporte']
         ancho_canal = resistencia - soporte
+        
+        # SL INTELIGENTE: Usar extremo estructural si está disponible, sino 2% fijo
+        sl_estructural = None
+        if breakout_info and 'extremo_breakout' in breakout_info:
+            sl_estructural = breakout_info['extremo_breakout']
+            logger.info(f"🧠 Usando SL Estructural Inteligente: {sl_estructural}")
+        
         sl_porcentaje = 0.02
         
         if tipo_operacion == "LONG":
             precio_entrada = precio_actual
-            stop_loss = precio_entrada * (1 - sl_porcentaje)
+            # Para LONG, el SL es el Low más bajo del breakout con un respiro de 0.1%
+            if sl_estructural:
+                stop_loss = sl_estructural * 0.999
+            else:
+                stop_loss = precio_entrada * (1 - sl_porcentaje)
             # TP en la resistencia (ancho completo del canal desde el soporte)
             take_profit = resistencia
         else:
             precio_entrada = precio_actual
-            stop_loss = resistencia * (1 + sl_porcentaje)
-            # TP en el soporte (ancho completo del canal desde la resistencia)
-            take_profit = soporte
-        
-        riesgo = abs(precio_entrada - stop_loss)
-        beneficio = abs(take_profit - precio_entrada)
-        ratio_rr = beneficio / riesgo if riesgo > 0 else 0
-        
-        # AJUSTE DE PROFITABILIDAD: Garantizar que el TP sea aproximadamente el doble del SL
-        min_beneficio_objetivo = riesgo * 2.0 # Ratio deseado 2:1
-        
-        if beneficio < min_beneficio_objetivo:
-            if tipo_operacion == "LONG":
-                take_profit = precio_entrada + min_beneficio_objetivo
+            # Para SHORT, el SL es el High más alto del breakout con un respiro de 0.1%
+            if sl_estructural:
+                stop_loss = sl_estructural * 1.001
             else:
-                take_profit = precio_entrada - min_beneficio_objetivo
+                stop_loss = resistencia * (1 + sl_porcentaje)
+            # TP en el soporte (ancho completo del canal desde la resistencia)
+        riesgo = abs(precio_entrada - stop_loss)
+        
+        # TP FIJO 2:1 (Regla Estricta)
+        if tipo_operacion == "LONG":
+            take_profit = precio_entrada + (riesgo * 2.0)
+        else:
+            take_profit = precio_entrada - (riesgo * 2.0)
+        
+        logger.info(f"🎯 TP Fijo 2:1 calculado: {take_profit} (Riesgo: {riesgo:.6f})")
         
         return precio_entrada, take_profit, stop_loss
 
@@ -3544,7 +3554,8 @@ class TradingBot:
                             'tipo': tipo_breakout,
                             'timestamp': datetime.now(),
                             'precio_breakout': precio_actual,
-                            'config': config_optima
+                            'config': config_optima,
+                            'extremo_breakout': precio_actual # Inicializar con el precio de ruptura
                         }
                         self.breakouts_detectados[simbolo] = {
                             'tipo': tipo_breakout,
@@ -3554,11 +3565,28 @@ class TradingBot:
                         print(f"     🎯 {simbolo} - Breakout registrado, esperando reingreso...")
                         self.enviar_alerta_breakout(simbolo, tipo_breakout, info_canal, datos_mercado, config_optima)
                         continue
+                
+                # ACTUALIZAR EXTREMO ESTRUCTURAL MIENTRAS ESPERAMOS REENTRY
+                if simbolo in self.esperando_reentry:
+                    info_re = self.esperando_reentry[simbolo]
+                    df_reciente = datos_mercado.get('df')
+                    if df_reciente is not None and not df_reciente.empty:
+                        low_actual = float(df_reciente['Low'].iloc[-1])
+                        high_actual = float(df_reciente['High'].iloc[-1])
+                        if info_re['tipo'] == "BREAKOUT_LONG":
+                            # En LONG (breakout hacia abajo), buscamos el Low más bajo
+                            info_re['extremo_breakout'] = min(info_re.get('extremo_breakout', low_actual), low_actual)
+                        else:
+                            # En SHORT (breakout hacia arriba), buscamos el High más alto
+                            info_re['extremo_breakout'] = max(info_re.get('extremo_breakout', high_actual), high_actual)
+
                 tipo_operacion = self.detectar_reentry(simbolo, info_canal, datos_mercado)
                 if not tipo_operacion:
                     continue
+                
+                breakout_info = self.esperando_reentry[simbolo]
                 precio_entrada, tp, sl = self.calcular_niveles_entrada(
-                    tipo_operacion, info_canal, datos_mercado['precio_actual']
+                    tipo_operacion, info_canal, datos_mercado['precio_actual'], breakout_info
                 )
                 if not precio_entrada or not tp or not sl:
                     continue
@@ -3629,6 +3657,7 @@ class TradingBot:
 🚀 <b>BREAKOUT + REENTRY DETECTADO:</b>
 ⏰ Tiempo desde breakout: {tiempo_breakout:.1f} minutos
 💰 Precio breakout: {breakout_info['precio_breakout']:.8f}
+🧠 extremo breakout: {breakout_info.get('extremo_breakout', 0):.8f} (SL Estructural)
 """
         mensaje = f"""
 🎯 <b>SEÑAL DE {tipo_operacion} - {simbolo}</b>
@@ -3691,7 +3720,7 @@ class TradingBot:
 📊 <b>Valor Nocional:</b> ${operacion_bitget.get('capital_usado', 1.0) * operacion_bitget.get('leverage', 1):.2f}
 ⚡ <b>Apalancamiento:</b> {operacion_bitget.get('leverage', self.leverage_por_defecto)}x
 🎯 <b>Entrada:</b> {operacion_bitget.get('precio_entrada', 0):.8f}
-🛑 <b>Stop Loss:</b> {operacion_bitget.get('stop_loss', 'N/A')}
+🛑 <b>Stop Loss:</b> {operacion_bitget.get('stop_loss', 'N/A')} (🧠 Estructural)
 🎯 <b>Take Profit:</b> {operacion_bitget.get('take_profit', 'N/A')}
 📋 <b>ID Orden:</b> {operacion_bitget.get('orden_entrada', {}).get('orderId', 'N/A')}
 🔧 <b>Sistema:</b> REGLA DE ORO (1 USDT x{operacion_bitget.get('leverage', self.leverage_por_defecto)})
@@ -4461,7 +4490,7 @@ def crear_config_desde_entorno():
         'entry_margin': 0.001,
         'min_rr_ratio': 2.0,
         'scan_interval_minutes': 15,  
-        'timeframes': ['15m', '30m', '1h', '4h'],
+        'timeframes': ['15m', '30m', '1h'],
         'velas_options': [80, 100, 120, 150, 200],
         # Símbolos vacíos - Se generarán dinámicamente en actualizar_moned()
         'symbols': [],
