@@ -298,13 +298,22 @@ class OptimizadorIA:
                         r2 = float(row.get('r2_score', 0))
                         ancho_relativo = float(row.get('ancho_canal_relativo', 0))
                         nivel_fuerza = int(row.get('nivel_fuerza', 1))
+                        
+                        timestamp_str = row.get('timestamp', '')
+                        if timestamp_str:
+                            dt = datetime.fromisoformat(timestamp_str)
+                        else:
+                            # Fallback si no hay timestamp
+                            dt = datetime.now() - timedelta(days=random.randint(1, 30))
+                            
                         datos.append({
                             'pnl': pnl, 
                             'angulo': angulo, 
                             'pearson': pearson, 
                             'r2': r2,
                             'ancho_relativo': ancho_relativo,
-                            'nivel_fuerza': nivel_fuerza
+                            'nivel_fuerza': nivel_fuerza,
+                            'timestamp': dt
                         })
                     except Exception:
                         continue
@@ -312,34 +321,101 @@ class OptimizadorIA:
             print("⚠ No se encontró operaciones_log.csv (optimizador)")
         return datos
 
-    def evaluar_configuracion(self, trend_threshold, min_strength, entry_margin):
+    def clasificar_regimen_actual(self):
         if not self.datos:
+            return "alta_volatilidad"
+            
+        anchos = [op['ancho_relativo'] for op in self.datos]
+        mediana_historica = statistics.median(anchos) if anchos else 0
+        
+        # Volatilidad reciente (últimos 3 días) - Walk-Forward adaptativo
+        ahora = datetime.now()
+        recientes = [op['ancho_relativo'] for op in self.datos if (ahora - op['timestamp']).total_seconds() <= 3 * 86400]
+        
+        mediana_reciente = statistics.median(recientes) if recientes else (anchos[-1] if anchos else 0)
+        return "alta_volatilidad" if mediana_reciente >= mediana_historica else "baja_volatilidad"
+
+    def evaluar_configuracion(self, datos_filtrados, trend_threshold, min_strength, entry_margin):
+        if not datos_filtrados:
             return -99999
-        filtradas = [
-            op for op in self.datos
-            if abs(op['angulo']) >= trend_threshold
-            and abs(op['angulo']) >= min_strength
-            and abs(op['pearson']) >= 0.4
-            and op.get('nivel_fuerza', 1) >= 2
-            and op.get('r2', 0) >= 0.4
-        ]
-        n = len(filtradas)
-        if n < max(8, int(0.15 * len(self.datos))):
+            
+        n_indicador = 14 # Muestra para p-value
+        operaciones_validas = []
+        
+        for op in datos_filtrados:
+            if abs(op['angulo']) < trend_threshold or abs(op['angulo']) < min_strength:
+                continue
+                
+            # Significancia Estadística (P-Value proxy) de Pearson
+            r = abs(op['pearson'])
+            if r >= 0.999: r = 0.999
+            t_stat = r * math.sqrt(n_indicador - 2) / max(math.sqrt(1 - r**2), 1e-5)
+            # Aproximación p < 0.05
+            if t_stat < 2.179:
+                continue
+                
+            # R2 Ajustado
+            r2 = op.get('r2', 0)
+            r2_adj = 1 - (1 - r2) * (n_indicador - 1) / max(n_indicador - 2, 1)
+            if r2_adj < 0.3:
+                continue
+                
+            operaciones_validas.append(op)
+
+        n = len(operaciones_validas)
+        if n < max(8, int(0.15 * len(datos_filtrados))):
             return -10000 - n
-        pnls = [op['pnl'] for op in filtradas]
-        pnl_mean = statistics.mean(pnls) if filtradas else 0
-        pnl_std = statistics.stdev(pnls) if len(pnls) > 1 else 0
-        winrate = sum(1 for op in filtradas if op['pnl'] > 0) / n if n > 0 else 0
-        score = (pnl_mean - 0.5 * pnl_std) * winrate * math.sqrt(n)
-        ops_calidad = [op for op in filtradas if op.get('r2', 0) >= 0.6 and op.get('nivel_fuerza', 1) >= 3]
-        if ops_calidad:
-            score *= 1.2
+
+        # Time Decay: Mayor peso a operaciones recientes
+        ahora = datetime.now()
+        pnls, pesos = [], []
+        for op in operaciones_validas:
+            dias_antig = max(0, (ahora - op['timestamp']).total_seconds() / 86400)
+            peso = math.exp(-dias_antig / 14.0) # Vida media 14 días
+            pnls.append(op['pnl'])
+            pesos.append(peso)
+            
+        suma_pesos = sum(pesos)
+        if suma_pesos == 0: return -99999
+        
+        # 1. Expected Value (EV) ponderado
+        ev = sum(p * w for p, w in zip(pnls, pesos)) / suma_pesos
+        
+        # 2. Sortino Ratio
+        downside_sq = sum(w * (min(0, p - ev)**2) for p, w in zip(pnls, pesos)) / suma_pesos
+        downside_dev = math.sqrt(downside_sq) if downside_sq > 0 else 1e-5
+        sortino = ev / downside_dev
+        
+        # 3. Límite Inferior del EV (Confidence Interval)
+        var_pnls = sum(w * ((p - ev)**2) for p, w in zip(pnls, pesos)) / suma_pesos
+        std_pnls = math.sqrt(var_pnls)
+        margen_error = 1.96 * (std_pnls / math.sqrt(n))
+        ev_lower_bound = ev - margen_error
+        
+        if ev_lower_bound <= 0 or sortino <= 0:
+            score = ev_lower_bound + sortino
+        else:
+            score = ev_lower_bound * sortino
+            
         return score
 
     def buscar_mejores_parametros(self):
         if not self.datos or len(self.datos) < self.min_samples:
             print(f"ℹ️ No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
             return None
+            
+        regimen_actual = self.clasificar_regimen_actual()
+        anchos = [op['ancho_relativo'] for op in self.datos]
+        mediana_historica = statistics.median(anchos) if anchos else 0
+        
+        if regimen_actual == "alta_volatilidad":
+            datos_regimen = [op for op in self.datos if op['ancho_relativo'] >= mediana_historica]
+        else:
+            datos_regimen = [op for op in self.datos if op['ancho_relativo'] < mediana_historica]
+            
+        if len(datos_regimen) < self.min_samples // 2:
+             datos_regimen = self.datos
+
         mejor_score = -1e9
         mejores_param = None
         trend_values = [3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40]
@@ -347,9 +423,11 @@ class OptimizadorIA:
         margin_values = [0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003, 0.004, 0.005, 0.008, 0.01]
         combos = list(itertools.product(trend_values, strength_values, margin_values))
         total = len(combos)
-        print(f"🔎 Optimizador: probando {total} combinaciones...")
+        
+        print(f"🔎 Optimizador WFO: Probando {total} combinaciones para el régimen '{regimen_actual}'...")
+        
         for idx, (t, s, m) in enumerate(combos, start=1):
-            score = self.evaluar_configuracion(t, s, m)
+            score = self.evaluar_configuracion(datos_regimen, t, s, m)
             if idx % 100 == 0 or idx == total:
                 print(f"   · probado {idx}/{total} combos (mejor score actual: {mejor_score:.4f})")
             if score > mejor_score:
@@ -359,11 +437,13 @@ class OptimizadorIA:
                     'min_trend_strength_degrees': s,
                     'entry_margin': m,
                     'score': score,
-                    'evaluated_samples': len(self.datos),
+                    'regimen_mercado': regimen_actual,
+                    'evaluated_samples': len(datos_regimen),
                     'total_combinations': total
                 }
+                
         if mejores_param:
-            print("✅ Optimizador: mejores parámetros encontrados:", mejores_param)
+            print("✅ WFO Optimizador: mejores parámetros encontrados:", mejores_param)
             try:
                 with open("mejores_parametros.json", "w", encoding='utf-8') as f:
                     json.dump(mejores_param, f, indent=2)
@@ -371,6 +451,7 @@ class OptimizadorIA:
                 print("⚠ Error guardando mejores_parametros.json:", e)
         else:
             print("⚠ No se encontró una configuración mejor")
+            
         return mejores_param
 
 # ---------------------------
@@ -4291,7 +4372,7 @@ class TradingBot:
 
     def reoptimizar_periodicamente(self):
         try:
-            horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 7200
+            horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 3600
             if self.operaciones_desde_optimizacion >= 8 or horas_desde_opt >= self.config.get('reevaluacion_horas', 24):
                 print("🔄 Iniciando re-optimización automática...")
                 ia = OptimizadorIA(log_path=self.log_path, min_samples=self.config.get('min_samples_optimizacion', 30))
