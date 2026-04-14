@@ -280,7 +280,7 @@ def calcular_adx_di_pandas(df, high_col='High', low_col='Low', close_col='Close'
 # OPTIMIZADOR IA
 # ---------------------------
 class OptimizadorIA:
-    def __init__(self, log_path="operaciones_log.csv", min_samples=15):
+    def __init__(self, log_path="operaciones_log.csv", min_samples=50):
         self.log_path = log_path
         self.min_samples = min_samples
         self.datos = self.cargar_datos()
@@ -335,7 +335,7 @@ class OptimizadorIA:
         mediana_reciente = statistics.median(recientes) if recientes else (anchos[-1] if anchos else 0)
         return "alta_volatilidad" if mediana_reciente >= mediana_historica else "baja_volatilidad"
 
-    def evaluar_configuracion(self, datos_filtrados, trend_threshold, min_strength, entry_margin):
+    def evaluar_configuracion(self, datos_filtrados, trend_threshold, min_strength, entry_margin, min_ops=30):
         if not datos_filtrados:
             return -99999
             
@@ -363,7 +363,7 @@ class OptimizadorIA:
             operaciones_validas.append(op)
 
         n = len(operaciones_validas)
-        if n < max(8, int(0.15 * len(datos_filtrados))):
+        if n < max(min_ops, int(0.15 * len(datos_filtrados))):
             return -10000 - n
 
         # Time Decay: Mayor peso a operaciones recientes
@@ -404,6 +404,9 @@ class OptimizadorIA:
             print(f"ℹ️ No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
             return None
             
+        # Ordenar cronológicamente para Walk-Forward Validation
+        self.datos.sort(key=lambda x: x['timestamp'])
+            
         regimen_actual = self.clasificar_regimen_actual()
         anchos = [op['ancho_relativo'] for op in self.datos]
         mediana_historica = statistics.median(anchos) if anchos else 0
@@ -413,8 +416,13 @@ class OptimizadorIA:
         else:
             datos_regimen = [op for op in self.datos if op['ancho_relativo'] < mediana_historica]
             
-        if len(datos_regimen) < self.min_samples // 2:
+        if len(datos_regimen) < self.min_samples:
              datos_regimen = self.datos
+
+        # OOS / Walk-Forward Split: 70% Train, 30% Test chronologically
+        split_idx = int(0.7 * len(datos_regimen))
+        datos_train = datos_regimen[:split_idx]
+        datos_test = datos_regimen[split_idx:]
 
         mejor_score = -1e9
         mejores_param = None
@@ -424,23 +432,32 @@ class OptimizadorIA:
         combos = list(itertools.product(trend_values, strength_values, margin_values))
         total = len(combos)
         
-        print(f"🔎 Optimizador WFO: Probando {total} combinaciones para el régimen '{regimen_actual}'...")
+        print(f"🔎 Optimizador WFO REAL: Probando {total} combinaciones para el régimen '{regimen_actual}'...")
         
         for idx, (t, s, m) in enumerate(combos, start=1):
-            score = self.evaluar_configuracion(datos_regimen, t, s, m)
+            score_train = self.evaluar_configuracion(datos_train, t, s, m, min_ops=30)
+            
+            if score_train > mejor_score:
+                # Validar en Out-Of-Sample (OOS)
+                score_test = self.evaluar_configuracion(datos_test, t, s, m, min_ops=10)
+                
+                # Exigir ganancia positiva en OOS para aceptar la combinación
+                if score_test > 0:
+                    mejor_score = score_train
+                    mejores_param = {
+                        'trend_threshold_degrees': t,
+                        'min_trend_strength_degrees': s,
+                        'entry_margin': m,
+                        'score': score_train,
+                        'oos_score': score_test,
+                        'regimen_mercado': regimen_actual,
+                        'evaluated_samples': len(datos_train),
+                        'oos_samples': len(datos_test),
+                        'total_combinations': total
+                    }
+                
             if idx % 100 == 0 or idx == total:
-                print(f"   · probado {idx}/{total} combos (mejor score actual: {mejor_score:.4f})")
-            if score > mejor_score:
-                mejor_score = score
-                mejores_param = {
-                    'trend_threshold_degrees': t,
-                    'min_trend_strength_degrees': s,
-                    'entry_margin': m,
-                    'score': score,
-                    'regimen_mercado': regimen_actual,
-                    'evaluated_samples': len(datos_regimen),
-                    'total_combinations': total
-                }
+                print(f"   · probado {idx}/{total} combos (mejor score train: {mejor_score:.4f})")
                 
         if mejores_param:
             print("✅ WFO Optimizador: mejores parámetros encontrados:", mejores_param)
@@ -450,7 +467,7 @@ class OptimizadorIA:
             except Exception as e:
                 print("⚠ Error guardando mejores_parametros.json:", e)
         else:
-            print("⚠ No se encontró una configuración mejor")
+            print("⚠ No se encontró una configuración que sobreviva el Test Set (OOS)")
             
         return mejores_param
 
@@ -1046,31 +1063,6 @@ class BitgetClient:
         except:
             pass
         return None
-
-    def cancel_order(self, symbol, order_id):
-        """Cancela una orden específica en Bitget Futuros"""
-        request_path = '/api/v2/mix/order/cancel-order'
-        body = {
-            "symbol": symbol,
-            "productType": "USDT-FUTURES",
-            "marginCoin": "USDT",
-            "orderId": str(order_id)
-        }
-        body_json = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
-        headers = self._get_headers('POST', request_path, body_json)
-        response = requests.post(
-            self.base_url + request_path,
-            headers=headers,
-            data=body_json,
-            timeout=10
-        )
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('code') == '00000':
-                logger.info(f"✅ Orden {order_id} cancelada correctamente para {symbol}")
-                return True
-        logger.error(f"❌ Error cancelando orden {order_id}: {response.status_code} - {response.text}")
-        return False
 
     def obtener_precision_precio(self, symbol):
         """Obtiene la precisión de precio para un símbolo específico"""
@@ -1836,7 +1828,6 @@ class TradingBot:
         # Tracking de breakouts y reingresos
         self.breakouts_detectados = {}
         self.esperando_reentry = {}
-        self.enfriamiento_por_crossover = {}
         self.estado_file = config.get('estado_file', 'estado_bot.json')
         self.cargar_estado()
         
@@ -3023,7 +3014,6 @@ class TradingBot:
                     cierres.append(float(candle[4]))  # close
                     tiempos.append(i)
                 
-                adx_res = calcular_adx_di(maximos, minimos, cierres, length=14)
                 return {
                     'maximos': maximos,
                     'minimos': minimos,
@@ -3031,10 +3021,7 @@ class TradingBot:
                     'tiempos': tiempos,
                     'precio_actual': cierres[-1] if cierres else 0,
                     'timeframe': timeframe,
-                    'num_velas': num_velas,
-                    'di_plus': adx_res['di_plus'][-1] if len(adx_res['di_plus']) > 0 else 0,
-                    'di_minus': adx_res['di_minus'][-1] if len(adx_res['di_minus']) > 0 else 0,
-                    'adx': adx_res['adx'][-1] if len(adx_res['adx']) > 0 else 0
+                    'num_velas': num_velas
                 }
             except Exception as e:
                 print(f"   ⚠️ Error obteniendo datos de BITGET FUTUROS para {simbolo}: {e}")
@@ -3053,7 +3040,6 @@ class TradingBot:
             minimos = [float(vela[3]) for vela in datos]
             cierres = [float(vela[4]) for vela in datos]
             tiempos = list(range(len(datos)))
-            adx_res = calcular_adx_di(maximos, minimos, cierres, length=14)
             return {
                 'maximos': maximos,
                 'minimos': minimos,
@@ -3061,10 +3047,7 @@ class TradingBot:
                 'tiempos': tiempos,
                 'precio_actual': cierres[-1] if cierres else 0,
                 'timeframe': timeframe,
-                'num_velas': num_velas,
-                'di_plus': adx_res['di_plus'][-1] if len(adx_res['di_plus']) > 0 else 0,
-                'di_minus': adx_res['di_minus'][-1] if len(adx_res['di_minus']) > 0 else 0,
-                'adx': adx_res['adx'][-1] if len(adx_res['adx']) > 0 else 0
+                'num_velas': num_velas
             }
         except Exception:
             return None
@@ -3120,6 +3103,25 @@ class TradingBot:
         precio_medio = (resistencia_superior + soporte_inferior) / 2
         ancho_canal_absoluto = resistencia_superior - soporte_inferior
         ancho_canal_porcentual = (ancho_canal_absoluto / precio_medio) * 100
+        
+        # === FILTRO DE VOLATILIDAD Y ANCHO RELATIVO ATR ===
+        # Calcular ATR(14)
+        highs = df_indicadores['High'].values
+        lows = df_indicadores['Low'].values
+        closes = df_indicadores['Close'].values
+        tr = np.zeros(len(closes))
+        for i in range(1, len(closes)):
+            tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        
+        # Promedio simple de los últimos 14 True Range
+        tr_14 = tr[-14:] if len(tr) >= 14 else tr
+        atr_14 = np.mean(tr_14) if len(tr_14) > 0 else 1e-5
+        if np.isnan(atr_14) or atr_14 == 0:
+            atr_14 = 1e-5
+            
+        atr_relativo_porcentual = (atr_14 / precio_actual) * 100 if precio_actual > 0 else 0
+        ancho_canal_relativo_atr = ancho_canal_absoluto / atr_14 if atr_14 > 0 else 0
+
         return {
             'resistencia': resistencia_superior,
             'soporte': soporte_inferior,
@@ -3130,6 +3132,8 @@ class TradingBot:
             'precio_actual': precio_actual,
             'ancho_canal': ancho_canal_absoluto,
             'ancho_canal_porcentual': ancho_canal_porcentual,
+            'atr_relativo_porcentual': atr_relativo_porcentual,
+            'ancho_canal_relativo_atr': ancho_canal_relativo_atr,
             'angulo_tendencia': angulo_tendencia,
             'coeficiente_pearson': pearson,
             'fuerza_texto': fuerza_texto,
@@ -3140,6 +3144,7 @@ class TradingBot:
             'pendiente_soporte': pendiente_min,
             'stoch_k': stoch_k,
             'stoch_d': stoch_d,
+            'adx': adx,
             'di_plus': di_plus,
             'di_minus': di_minus,
             'timeframe': datos_mercado.get('timeframe', 'N/A'),
@@ -3386,7 +3391,23 @@ class TradingBot:
         """Detecta si el precio ha ROTO el canal"""
         if not info_canal:
             return None
-        if info_canal['ancho_canal_porcentual'] < self.config.get('min_channel_width_percent', 4.0):
+            
+        # === FILTRO DE TENDENCIA INSTITUCIONAL ===
+        # Exigir tendencia estructural demostrable
+        if info_canal.get('adx', 0) < 20:
+            print(f"     ⏳ {simbolo} - ADX muy bajo ({info_canal.get('adx', 0):.1f} < 20). Choppiness detectado.")
+            return None
+            
+        # === FILTRO DE VOLATILIDAD Y CONVEXIDAD ===
+        # El canal debe contener al menos 1.5 veces el movimiento errático de una vela (ATR)
+        # Si no, el canal es simplemente "ruido comprimido" no estructural
+        ancho_relativo = info_canal.get('ancho_canal_relativo_atr', 0)
+        if ancho_relativo < 1.5:
+            print(f"     ✂️ {simbolo} - Canal muy estrecho respecto a ATR ({ancho_relativo:.1f} < 1.5). Abortando.")
+            return None
+            
+        # Proteger contra períodos de extrema iliquidez (navidades, fines de semana sin volumen)
+        if info_canal.get('atr_relativo_porcentual', 100) < 0.1:
             return None
         precio_cierre = datos_mercado['cierres'][-1]
         resistencia = info_canal['resistencia']
@@ -3462,6 +3483,19 @@ class TradingBot:
         di_minus = info_canal.get('di_minus', 25)
         angulo = info_canal['angulo_tendencia']
         
+        # Filtros de ORO adicionales: ADX y Volatilidad persistente
+        adx = info_canal.get('adx', 0)
+        ancho_relativo = info_canal.get('ancho_canal_relativo_atr', 0)
+        atr_relativo = info_canal.get('atr_relativo_porcentual', 100)
+        
+        if adx < 20:
+            print(f"     ⏳ {simbolo} - Reentry abortado: ADX decayó ({adx:.1f} < 20).")
+            return None
+            
+        if ancho_relativo < 1.5 or atr_relativo < 0.1:
+            print(f"     ✂️ {simbolo} - Reentry abortado: Volatilidad insuficiente (ATR Rel: {atr_relativo:.2f} | Ancho ATR: {ancho_relativo:.1f}).")
+            return None
+            
         # Verificar condiciones de Stochastic
         es_long_stoch = stoch_k > stoch_d
         es_short_stoch = stoch_k < stoch_d
@@ -3589,11 +3623,6 @@ class TradingBot:
         senales_encontradas = 0
         for simbolo in simbolos_a_analizar:
             try:
-                en_enfriamiento, minutos_restantes = self.verificar_enfriamiento_crossover(simbolo)
-                if en_enfriamiento:
-                    # Omitir análisis porque está en enfriamiento
-                    continue
-
                 if simbolo in self.operaciones_activas:
                     # Verificar si es operación manual del usuario
                     es_manual = self.operaciones_activas[simbolo].get('operacion_manual_usuario', False)
@@ -3660,7 +3689,9 @@ class TradingBot:
                 print(
     f"📊 {simbolo} - {config_optima['timeframe']} - {config_optima['num_velas']}v | "
     f"{info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) | "
-    f"Ancho: {info_canal['ancho_canal_porcentual']:.1f}% - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch} | "
+    f"ADX: {info_canal.get('adx', 0):.1f} | "
+    f"Ancho ATR: {info_canal.get('ancho_canal_relativo_atr', 0):.1f} | "
+    f"Stoch: {info_canal['stoch_k']:.1f} {estado_stoch} | "
     f"Precio: {posicion}"
                 )
                 if (info_canal['nivel_fuerza'] < 2 or 
@@ -3960,209 +3991,6 @@ class TradingBot:
                 datos_operacion.get('breakout_usado', False),
                 datos_operacion.get('operacion_ejecutada', False)
             ])
-
-    def _limpiar_estructuras_despues_crossover(self, simbolo):
-        estructuras_a_limpiar = [
-            ('breakouts_detectados', 'breakout'),
-            ('esperando_reentry', 'reentry'),
-            ('breakout_history', 'history')
-        ]
-        for estructura, nombre in estructuras_a_limpiar:
-            if simbolo in getattr(self, estructura, {}):
-                del getattr(self, estructura)[simbolo]
-                logger.info(f"   🗑️ {simbolo} eliminado de {nombre}_history")
-
-    def verificar_enfriamiento_crossover(self, simbolo):
-        if simbolo not in self.enfriamiento_por_crossover:
-            return False, 0
-        tiempo_cierre = self.enfriamiento_por_crossover[simbolo]
-        minutos_enfriamiento = self.config.get('enfriamiento_crossover_minutos', 60)
-        tiempo_transcurrido = (datetime.now() - tiempo_cierre).total_seconds() / 60
-        if tiempo_transcurrido < minutos_enfriamiento:
-            return True, int(minutos_enfriamiento - tiempo_transcurrido)
-        else:
-            del self.enfriamiento_por_crossover[simbolo]
-            return False, 0
-
-    def _cerrar_operacion_bitget_limpio(self, simbolo, operacion):
-        try:
-            order_ids_a_cancelar = []
-            if operacion.get('order_id_tp'):
-                order_ids_a_cancelar.append(operacion['order_id_tp'])
-            if operacion.get('order_id_sl'):
-                order_ids_a_cancelar.append(operacion['order_id_sl'])
-            for order_id in order_ids_a_cancelar:
-                if order_id:
-                    try:
-                        if hasattr(self.bitget_client, 'cancel_order'):
-                            self.bitget_client.cancel_order(simbolo, order_id)
-                        elif hasattr(self.bitget_client, 'cancelar_orden'):
-                            self.bitget_client.cancelar_orden(order_id, simbolo)
-                        logger.info(f"   🗑️ Orden {order_id} cancelada para {simbolo}")
-                    except Exception as e:
-                        logger.warning(f"   ⚠️ No se pudo cancelar orden {order_id}: {e}")
-            tipo_operacion = operacion.get('tipo')
-            lado_cierre = 'sell' if tipo_operacion == 'LONG' else 'buy'
-            pos_side = 'long' if tipo_operacion == 'LONG' else 'short'
-            
-            posiciones = self.bitget_client.get_positions(simbolo)
-            if posiciones:
-                for pos in posiciones:
-                    pos_size = abs(float(pos.get('available', pos.get('availableVol', 0))))
-                    if pos_size > 0:
-                        resultado_cierre = self.bitget_client.place_order(
-                            symbol=simbolo,
-                            side=lado_cierre,
-                            size=int(pos_size) if pos_size.is_integer() else pos_size,
-                            order_type='market',
-                            posSide=pos_side
-                        )
-                        if resultado_cierre:
-                            logger.info(f"   ✅ Posición {simbolo} cerrada correctamente")
-                        else:
-                            logger.error(f"   ❌ Error cerrando posición {simbolo}")
-        except Exception as e:
-            logger.error(f"❌ Error en cierre limpio de {simbolo}: {e}")
-
-    def _enviar_notificacion_crossover(self, datos_operacion, razon):
-        token = self.config.get('telegram_token')
-        chats = self.config.get('telegram_chat_ids', [])
-        if not token or not chats:
-            return
-        if datos_operacion['tipo'] == 'LONG':
-            pnl_absoluto = datos_operacion['precio_salida'] - datos_operacion['precio_entrada']
-        else:
-            pnl_absoluto = datos_operacion['precio_entrada'] - datos_operacion['precio_salida']
-        mensaje = f"""
-⚠️ <b>OPERACIÓN CERRADA POR CROSSOVER DI - {datos_operacion['symbol']}</b>
-
-🔄 <b>RAZÓN:</b> {razon}
-
-📊 Tipo: {datos_operacion['tipo']}
-💰 Entrada: {datos_operacion['precio_entrada']:.8f}
-🎯 Salida: {datos_operacion['precio_salida']:.8f}
-💵 PnL Absoluto: {pnl_absoluto:.8f}
-📈 PnL %: {datos_operacion['pnl_percent']:.2f}%
-⏰ Duración: {datos_operacion['duracion_minutos']:.1f} minutos
-
-🧠 <b>NOTA:</b> El mercado cambió de dirección según DI+/DI-
-   Se cerró la posición para proteger capital
-
-📊 DI+ Actual: {datos_operacion.get('di_plus', 0):.2f}
-📉 DI- Actual: {datos_operacion.get('di_minus', 0):.2f}
-📈 ADX Actual: {datos_operacion.get('adx', 0):.2f}
-
-🕒 {datos_operacion['timestamp']}
-"""
-        try:
-            self._enviar_telegram_simple(mensaje, token, chats)
-        except Exception as e:
-            logger.error(f"Error enviando notificación crossover: {e}")
-
-    def _registrar_operacion_crossover(self, simbolo, operacion, precio_salida, razon, datos_mercado):
-        try:
-            tipo = operacion.get('tipo')
-            precio_entrada = operacion.get('precio_entrada', 0)
-            if tipo == 'LONG':
-                pnl_percent = ((precio_salida - precio_entrada) / precio_entrada) * 100
-            else:
-                pnl_percent = ((precio_entrada - precio_salida) / precio_entrada) * 100
-            tiempo_entrada = datetime.fromisoformat(operacion['timestamp_entrada'])
-            duracion_minutos = (datetime.now() - tiempo_entrada).total_seconds() / 60
-            
-            adx_actual = datos_mercado.get('adx', 0)
-            
-            datos_operacion = {
-                'timestamp': datetime.now().isoformat(),
-                'symbol': simbolo,
-                'tipo': tipo,
-                'precio_entrada': precio_entrada,
-                'take_profit': operacion.get('take_profit'),
-                'stop_loss': operacion.get('stop_loss'),
-                'precio_salida': precio_salida,
-                'resultado': 'CROSSOVER',
-                'razon_cierre': razon,
-                'pnl_percent': pnl_percent,
-                'duracion_minutos': duracion_minutos,
-                'angulo_tendencia': operacion.get('angulo_tendencia', 0),
-                'pearson': operacion.get('pearson', 0),
-                'r2_score': operacion.get('r2_score', 0),
-                'ancho_canal_relativo': operacion.get('ancho_canal_relativo', 0),
-                'ancho_canal_porcentual': operacion.get('ancho_canal_porcentual', 0),
-                'nivel_fuerza': operacion.get('nivel_fuerza', 1),
-                'timeframe_utilizado': operacion.get('timeframe_utilizado', 'N/A'),
-                'velas_utilizadas': operacion.get('velas_utilizadas', 0),
-                'stoch_k': operacion.get('stoch_k', 0),
-                'stoch_d': operacion.get('stoch_d', 0),
-                'di_plus': datos_mercado.get('di_plus', 0),
-                'di_minus': datos_mercado.get('di_minus', 0),
-                'adx': adx_actual,
-                'breakout_usado': operacion.get('breakout_usado', False),
-                'operacion_ejecutada': operacion.get('operacion_ejecutada', False)
-            }
-            self.registrar_operacion(datos_operacion)
-            self._enviar_notificacion_crossover(datos_operacion, razon)
-            
-            self._limpiar_estructuras_despues_crossover(simbolo)
-            minutos_enfriamiento = self.config.get('enfriamiento_crossover_minutos', 60)
-            self.enfriamiento_por_crossover[simbolo] = datetime.now()
-            logger.info(f"   🔒 {simbolo} en enfriamiento por {minutos_enfriamiento} min")
-            
-            if simbolo in self.operaciones_activas:
-                del self.operaciones_activas[simbolo]
-            if simbolo in self.senales_enviadas:
-                self.senales_enviadas.remove(simbolo)
-            
-            self.guardar_estado()
-            print(f"   📊 {simbolo} Operación CROSSOVER - PnL: {pnl_percent:.2f}%")
-        except Exception as e:
-            logger.error(f"❌ Error registrando operación crossover: {e}")
-
-    def verificar_cierre_por_crossover_di(self):
-        if not self.config.get('crossover_cierre_habilitado', True) or not self.operaciones_activas:
-            return []
-            
-        operaciones_cerradas = []
-        umbral_adx = self.config.get('crossover_umbral_adx', 20.0)
-        umbral_dif = self.config.get('crossover_umbral_diferencia', 5.0)
-        
-        for simbolo, operacion in list(self.operaciones_activas.items()):
-            tipo_operacion = operacion.get('tipo')
-            if 'take_profit' not in operacion or 'stop_loss' not in operacion:
-                continue
-            config_optima = self.config_optima_por_simbolo.get(simbolo)
-            if not config_optima:
-                continue
-            datos = self.obtener_datos_mercado_config(simbolo, config_optima['timeframe'], config_optima['num_velas'])
-            if not datos:
-                continue
-            
-            di_plus_actual = datos.get('di_plus', 0)
-            di_minus_actual = datos.get('di_minus', 0)
-            adx_actual = datos.get('adx', 0)
-            
-            cerrar_por_crossover = False
-            razon_cierre = ""
-            dif_actual = abs(di_minus_actual - di_plus_actual)
-            
-            if adx_actual >= umbral_adx and dif_actual >= umbral_dif:
-                if tipo_operacion == "LONG":
-                    if di_minus_actual > di_plus_actual:
-                        cerrar_por_crossover = True
-                        razon_cierre = f"DI-({di_minus_actual:.2f}) > DI+({di_plus_actual:.2f}) [ADX: {adx_actual:.2f}]"
-                elif tipo_operacion == "SHORT":
-                    if di_plus_actual > di_minus_actual:
-                        cerrar_por_crossover = True
-                        razon_cierre = f"DI+({di_plus_actual:.2f}) > DI-({di_minus_actual:.2f}) [ADX: {adx_actual:.2f}]"
-            
-            if cerrar_por_crossover:
-                logger.info(f"⚠️ CIERRE POR CROSSOVER {simbolo}: {razon_cierre}")
-                if self.bitget_client:
-                    self._cerrar_operacion_bitget_limpio(simbolo, operacion)
-                self._registrar_operacion_crossover(simbolo, operacion, datos.get('precio_actual', 0), razon_cierre, datos)
-                operaciones_cerradas.append(simbolo)
-                
-        return operaciones_cerradas
 
     def verificar_cierre_operaciones(self):
         if not self.operaciones_activas:
@@ -4661,12 +4489,7 @@ class TradingBot:
                     print("\n🔄 Actualización programada de monedas dinámicas...")
                     self.actualizar_moned()
             
-            # 5. Verificar cierres de operaciones locales y por crossover DI+/DI-
-            if self.bitget_client:
-                cierres_crossover = self.verificar_cierre_por_crossover_di()
-                if cierres_crossover:
-                    print(f"     ⚠️ Operaciones cerradas por crossover DI: {', '.join(cierres_crossover)}")
-            
+            # 5. Verificar cierres de operaciones locales
             cierres = self.verificar_cierre_operaciones()
             if cierres:
                 print(f"     📊 Operaciones cerradas: {', '.join(cierres)}")
@@ -4839,12 +4662,7 @@ def crear_config_desde_entorno():
         'webhook_url': os.environ.get('WEBHOOK_URL'),
         'ejecutar_operaciones_automaticas': os.environ.get('EJECUTAR_OPERACIONES_AUTOMATICAS', 'false').lower() == 'true',
         'leverage_por_defecto': PALANCA_USUARIO,
-        'margen_usdt': MARGEN_ESTRICTO,
-        'enfriamiento_crossover_minutos': 60,
-        'crossover_cierre_habilitado': True,
-        'crossover_umbral_diferencia': 5.0,
-        'crossover_umbral_adx': 20.0,
-        'reentry_despues_crossover': False
+        'margen_usdt': MARGEN_ESTRICTO
     }
 
 # ---------------------------
