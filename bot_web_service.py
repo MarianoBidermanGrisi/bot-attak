@@ -3161,19 +3161,19 @@ class TradingBot:
         direccion_canal = info_canal['direccion']
         # Determinar tipo de ruptura
         if tipo_breakout == "BREAKOUT_LONG":
-            emoji_principal = "🚀"
-            tipo_texto = "RUPTURA de SOPORTE"
+            emoji_principal = "📉"
+            tipo_texto = "RUPTURA BAJISTA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
             direccion_emoji = "⬇️"
-            contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
-            expectativa = "posible entrada en LONG"
+            contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE hacia ABAJO"
+            expectativa = "posible entrada en SHORT (Estrategia Invertida)"
         else:  # BREAKOUT_SHORT
-            emoji_principal = "📉"
-            tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
+            emoji_principal = "🚀"
+            tipo_texto = "RUPTURA ALCISTA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
-            contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
-            expectativa = "posible entrada en SHORT"
+            contexto = f"Canal {direccion_canal} → Ruptura de RESISTENCIA hacia ARRIBA"
+            expectativa = "posible entrada en LONG (Estrategia Invertida)"
         # Mensaje de alerta
         mensaje = f"""
 {emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
@@ -3777,7 +3777,7 @@ class TradingBot:
                 niveles = self.calcular_niveles_invertidos(
                     tipo_operacion=tipo_operacion,
                     precio_entrada=precio_entrada,
-                    riesgo_percent=1.8,
+                    riesgo_percent=0.5,
                     ratio_rr=2.0
                 )
                 
