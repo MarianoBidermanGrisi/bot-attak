@@ -3615,6 +3615,28 @@ class TradingBot:
         
         return precio_entrada, take_profit, stop_loss
 
+    def calcular_niveles_invertidos(self, tipo_operacion, precio_entrada, riesgo_percent=0.5, ratio_rr=2.0):
+        """
+        Calcula SL y TP según la regla:
+        - SHORT: SL ARRIBA, TP ABAJO (ratio 2:1)
+        - LONG: SL ABAJO, TP ARRIBA (ratio 2:1)
+        """
+        distancia_sl = precio_entrada * (riesgo_percent / 100)
+        
+        if tipo_operacion == 'SHORT':
+            sl = precio_entrada + distancia_sl  # ARRIBA
+            tp = precio_entrada - (distancia_sl * ratio_rr)  # ABAJO
+        else:  # LONG
+            sl = precio_entrada - distancia_sl  # ABAJO
+            tp = precio_entrada + (distancia_sl * ratio_rr)  # ARRIBA
+        
+        return {
+            'sl': sl,
+            'tp': tp,
+            'distancia_sl': distancia_sl,
+            'ratio_real': ratio_rr
+        }
+
     def escanear_mercado(self):
         """Escanea el mercado con estrategia Breakout + Reentry"""
         # Usar símbolos dinámicos o fallback a configuración
@@ -3698,6 +3720,11 @@ class TradingBot:
                     abs(info_canal['coeficiente_pearson']) < 0.4 or 
                     info_canal['r2_score'] < 0.4):
                     continue
+                
+                # Verificar ADX mínimo
+                adx_actual = info_canal.get('adx', 0)
+                if adx_actual < 20:
+                    continue
                 if simbolo not in self.esperando_reentry:
                     tipo_breakout = self.detectar_breakout(simbolo, info_canal, datos_mercado)
                     if tipo_breakout:
@@ -3731,14 +3758,32 @@ class TradingBot:
                             # En SHORT (breakout hacia arriba), buscamos el High más alto
                             info_re['extremo_breakout'] = max(info_re.get('extremo_breakout', high_actual), high_actual)
 
-                tipo_operacion = self.detectar_reentry(simbolo, info_canal, datos_mercado)
-                if not tipo_operacion:
+                tipo_operacion_original = self.detectar_reentry(simbolo, info_canal, datos_mercado)
+                if not tipo_operacion_original:
                     continue
                 
                 breakout_info = self.esperando_reentry[simbolo]
-                precio_entrada, tp, sl = self.calcular_niveles_entrada(
-                    tipo_operacion, info_canal, datos_mercado['precio_actual'], breakout_info
+                
+                # AQUÍ ESTÁ EL CAMBIO: Invertir la operación
+                if tipo_operacion_original == "LONG":
+                    tipo_operacion = "SHORT"  # CANAL ALCISTA + ROMPE ABAJO = SHORT
+                elif tipo_operacion_original == "SHORT":
+                    tipo_operacion = "LONG"   # CANAL BAJISTA + ROMPE ARRIBA = LONG
+                else:
+                    continue
+                
+                # Calcular niveles con la regla correcta
+                precio_entrada = datos_mercado['precio_actual']
+                niveles = self.calcular_niveles_invertidos(
+                    tipo_operacion=tipo_operacion,
+                    precio_entrada=precio_entrada,
+                    riesgo_percent=1.8,
+                    ratio_rr=2.0
                 )
+                
+                sl = niveles['sl']
+                tp = niveles['tp']
+                
                 if not precio_entrada or not tp or not sl:
                     continue
                 
