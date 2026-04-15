@@ -3777,7 +3777,7 @@ class TradingBot:
                 niveles = self.calcular_niveles_invertidos(
                     tipo_operacion=tipo_operacion,
                     precio_entrada=precio_entrada,
-                    riesgo_percent=0.5,
+                    riesgo_percent=1.8,
                     ratio_rr=2.0
                 )
                 
