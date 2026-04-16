@@ -1515,7 +1515,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             
         COOLDOWN_OPERACION = 180
         TOLERANCIA_MAX = 0.04
-        stopFijo = 0.016
+        stopFijo = 0.02
 
         # FILTRO COOLDOWN
         if bot:
@@ -3423,7 +3423,7 @@ class TradingBot:
         - SHORT: SL ARRIBA, TP ABAJO (ratio 2:1)
         - LONG: SL ABAJO, TP ARRIBA (ratio 2:1)
         """
-        riesgo_percent = 0.5
+        riesgo_percent = 0.8
         ratio_rr = 2.0
         
         precio_entrada = precio_actual
