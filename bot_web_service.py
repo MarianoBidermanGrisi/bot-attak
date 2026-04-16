@@ -280,7 +280,7 @@ def calcular_adx_di_pandas(df, high_col='High', low_col='Low', close_col='Close'
 # OPTIMIZADOR IA
 # ---------------------------
 class OptimizadorIA:
-    def __init__(self, log_path="operaciones_log.csv", min_samples=50):
+    def __init__(self, log_path="operaciones_log.csv", min_samples=15):
         self.log_path = log_path
         self.min_samples = min_samples
         self.datos = self.cargar_datos()
@@ -298,22 +298,13 @@ class OptimizadorIA:
                         r2 = float(row.get('r2_score', 0))
                         ancho_relativo = float(row.get('ancho_canal_relativo', 0))
                         nivel_fuerza = int(row.get('nivel_fuerza', 1))
-                        
-                        timestamp_str = row.get('timestamp', '')
-                        if timestamp_str:
-                            dt = datetime.fromisoformat(timestamp_str)
-                        else:
-                            # Fallback si no hay timestamp
-                            dt = datetime.now() - timedelta(days=random.randint(1, 30))
-                            
                         datos.append({
                             'pnl': pnl, 
                             'angulo': angulo, 
                             'pearson': pearson, 
                             'r2': r2,
                             'ancho_relativo': ancho_relativo,
-                            'nivel_fuerza': nivel_fuerza,
-                            'timestamp': dt
+                            'nivel_fuerza': nivel_fuerza
                         })
                     except Exception:
                         continue
@@ -321,109 +312,34 @@ class OptimizadorIA:
             print("⚠ No se encontró operaciones_log.csv (optimizador)")
         return datos
 
-    def clasificar_regimen_actual(self):
+    def evaluar_configuracion(self, trend_threshold, min_strength, entry_margin):
         if not self.datos:
-            return "alta_volatilidad"
-            
-        anchos = [op['ancho_relativo'] for op in self.datos]
-        mediana_historica = statistics.median(anchos) if anchos else 0
-        
-        # Volatilidad reciente (últimos 3 días) - Walk-Forward adaptativo
-        ahora = datetime.now()
-        recientes = [op['ancho_relativo'] for op in self.datos if (ahora - op['timestamp']).total_seconds() <= 3 * 86400]
-        
-        mediana_reciente = statistics.median(recientes) if recientes else (anchos[-1] if anchos else 0)
-        return "alta_volatilidad" if mediana_reciente >= mediana_historica else "baja_volatilidad"
-
-    def evaluar_configuracion(self, datos_filtrados, trend_threshold, min_strength, entry_margin, min_ops=30):
-        if not datos_filtrados:
             return -99999
-            
-        n_indicador = 14 # Muestra para p-value
-        operaciones_validas = []
-        
-        for op in datos_filtrados:
-            if abs(op['angulo']) < trend_threshold or abs(op['angulo']) < min_strength:
-                continue
-                
-            # Significancia Estadística (P-Value proxy) de Pearson
-            r = abs(op['pearson'])
-            if r >= 0.999: r = 0.999
-            t_stat = r * math.sqrt(n_indicador - 2) / max(math.sqrt(1 - r**2), 1e-5)
-            # Aproximación p < 0.05
-            if t_stat < 2.179:
-                continue
-                
-            # R2 Ajustado
-            r2 = op.get('r2', 0)
-            r2_adj = 1 - (1 - r2) * (n_indicador - 1) / max(n_indicador - 2, 1)
-            if r2_adj < 0.3:
-                continue
-                
-            operaciones_validas.append(op)
-
-        n = len(operaciones_validas)
-        if n < max(min_ops, int(0.15 * len(datos_filtrados))):
+        filtradas = [
+            op for op in self.datos
+            if abs(op['angulo']) >= trend_threshold
+            and abs(op['angulo']) >= min_strength
+            and abs(op['pearson']) >= 0.4
+            and op.get('nivel_fuerza', 1) >= 2
+            and op.get('r2', 0) >= 0.4
+        ]
+        n = len(filtradas)
+        if n < max(8, int(0.15 * len(self.datos))):
             return -10000 - n
-
-        # Time Decay: Mayor peso a operaciones recientes
-        ahora = datetime.now()
-        pnls, pesos = [], []
-        for op in operaciones_validas:
-            dias_antig = max(0, (ahora - op['timestamp']).total_seconds() / 86400)
-            peso = math.exp(-dias_antig / 14.0) # Vida media 14 días
-            pnls.append(op['pnl'])
-            pesos.append(peso)
-            
-        suma_pesos = sum(pesos)
-        if suma_pesos == 0: return -99999
-        
-        # 1. Expected Value (EV) ponderado
-        ev = sum(p * w for p, w in zip(pnls, pesos)) / suma_pesos
-        
-        # 2. Sortino Ratio
-        downside_sq = sum(w * (min(0, p - ev)**2) for p, w in zip(pnls, pesos)) / suma_pesos
-        downside_dev = math.sqrt(downside_sq) if downside_sq > 0 else 1e-5
-        sortino = ev / downside_dev
-        
-        # 3. Límite Inferior del EV (Confidence Interval)
-        var_pnls = sum(w * ((p - ev)**2) for p, w in zip(pnls, pesos)) / suma_pesos
-        std_pnls = math.sqrt(var_pnls)
-        margen_error = 1.96 * (std_pnls / math.sqrt(n))
-        ev_lower_bound = ev - margen_error
-        
-        if ev_lower_bound <= 0 or sortino <= 0:
-            score = ev_lower_bound + sortino
-        else:
-            score = ev_lower_bound * sortino
-            
+        pnls = [op['pnl'] for op in filtradas]
+        pnl_mean = statistics.mean(pnls) if filtradas else 0
+        pnl_std = statistics.stdev(pnls) if len(pnls) > 1 else 0
+        winrate = sum(1 for op in filtradas if op['pnl'] > 0) / n if n > 0 else 0
+        score = (pnl_mean - 0.5 * pnl_std) * winrate * math.sqrt(n)
+        ops_calidad = [op for op in filtradas if op.get('r2', 0) >= 0.6 and op.get('nivel_fuerza', 1) >= 3]
+        if ops_calidad:
+            score *= 1.2
         return score
 
     def buscar_mejores_parametros(self):
         if not self.datos or len(self.datos) < self.min_samples:
             print(f"ℹ️ No hay suficientes datos para optimizar (se requieren {self.min_samples}, hay {len(self.datos)})")
             return None
-            
-        # Ordenar cronológicamente para Walk-Forward Validation
-        self.datos.sort(key=lambda x: x['timestamp'])
-            
-        regimen_actual = self.clasificar_regimen_actual()
-        anchos = [op['ancho_relativo'] for op in self.datos]
-        mediana_historica = statistics.median(anchos) if anchos else 0
-        
-        if regimen_actual == "alta_volatilidad":
-            datos_regimen = [op for op in self.datos if op['ancho_relativo'] >= mediana_historica]
-        else:
-            datos_regimen = [op for op in self.datos if op['ancho_relativo'] < mediana_historica]
-            
-        if len(datos_regimen) < self.min_samples:
-             datos_regimen = self.datos
-
-        # OOS / Walk-Forward Split: 70% Train, 30% Test chronologically
-        split_idx = int(0.7 * len(datos_regimen))
-        datos_train = datos_regimen[:split_idx]
-        datos_test = datos_regimen[split_idx:]
-
         mejor_score = -1e9
         mejores_param = None
         trend_values = [3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40]
@@ -431,44 +347,30 @@ class OptimizadorIA:
         margin_values = [0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003, 0.004, 0.005, 0.008, 0.01]
         combos = list(itertools.product(trend_values, strength_values, margin_values))
         total = len(combos)
-        
-        print(f"🔎 Optimizador WFO REAL: Probando {total} combinaciones para el régimen '{regimen_actual}'...")
-        
+        print(f"🔎 Optimizador: probando {total} combinaciones...")
         for idx, (t, s, m) in enumerate(combos, start=1):
-            score_train = self.evaluar_configuracion(datos_train, t, s, m, min_ops=30)
-            
-            if score_train > mejor_score:
-                # Validar en Out-Of-Sample (OOS)
-                score_test = self.evaluar_configuracion(datos_test, t, s, m, min_ops=10)
-                
-                # Exigir ganancia positiva en OOS para aceptar la combinación
-                if score_test > 0:
-                    mejor_score = score_train
-                    mejores_param = {
-                        'trend_threshold_degrees': t,
-                        'min_trend_strength_degrees': s,
-                        'entry_margin': m,
-                        'score': score_train,
-                        'oos_score': score_test,
-                        'regimen_mercado': regimen_actual,
-                        'evaluated_samples': len(datos_train),
-                        'oos_samples': len(datos_test),
-                        'total_combinations': total
-                    }
-                
+            score = self.evaluar_configuracion(t, s, m)
             if idx % 100 == 0 or idx == total:
-                print(f"   · probado {idx}/{total} combos (mejor score train: {mejor_score:.4f})")
-                
+                print(f"   · probado {idx}/{total} combos (mejor score actual: {mejor_score:.4f})")
+            if score > mejor_score:
+                mejor_score = score
+                mejores_param = {
+                    'trend_threshold_degrees': t,
+                    'min_trend_strength_degrees': s,
+                    'entry_margin': m,
+                    'score': score,
+                    'evaluated_samples': len(self.datos),
+                    'total_combinations': total
+                }
         if mejores_param:
-            print("✅ WFO Optimizador: mejores parámetros encontrados:", mejores_param)
+            print("✅ Optimizador: mejores parámetros encontrados:", mejores_param)
             try:
                 with open("mejores_parametros.json", "w", encoding='utf-8') as f:
                     json.dump(mejores_param, f, indent=2)
             except Exception as e:
                 print("⚠ Error guardando mejores_parametros.json:", e)
         else:
-            print("⚠ No se encontró una configuración que sobreviva el Test Set (OOS)")
-            
+            print("⚠ No se encontró una configuración mejor")
         return mejores_param
 
 # ---------------------------
@@ -3103,25 +3005,6 @@ class TradingBot:
         precio_medio = (resistencia_superior + soporte_inferior) / 2
         ancho_canal_absoluto = resistencia_superior - soporte_inferior
         ancho_canal_porcentual = (ancho_canal_absoluto / precio_medio) * 100
-        
-        # === FILTRO DE VOLATILIDAD Y ANCHO RELATIVO ATR ===
-        # Calcular ATR(14)
-        highs = df_indicadores['High'].values
-        lows = df_indicadores['Low'].values
-        closes = df_indicadores['Close'].values
-        tr = np.zeros(len(closes))
-        for i in range(1, len(closes)):
-            tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        
-        # Promedio simple de los últimos 14 True Range
-        tr_14 = tr[-14:] if len(tr) >= 14 else tr
-        atr_14 = np.mean(tr_14) if len(tr_14) > 0 else 1e-5
-        if np.isnan(atr_14) or atr_14 == 0:
-            atr_14 = 1e-5
-            
-        atr_relativo_porcentual = (atr_14 / precio_actual) * 100 if precio_actual > 0 else 0
-        ancho_canal_relativo_atr = ancho_canal_absoluto / atr_14 if atr_14 > 0 else 0
-
         return {
             'resistencia': resistencia_superior,
             'soporte': soporte_inferior,
@@ -3132,8 +3015,6 @@ class TradingBot:
             'precio_actual': precio_actual,
             'ancho_canal': ancho_canal_absoluto,
             'ancho_canal_porcentual': ancho_canal_porcentual,
-            'atr_relativo_porcentual': atr_relativo_porcentual,
-            'ancho_canal_relativo_atr': ancho_canal_relativo_atr,
             'angulo_tendencia': angulo_tendencia,
             'coeficiente_pearson': pearson,
             'fuerza_texto': fuerza_texto,
@@ -3144,9 +3025,9 @@ class TradingBot:
             'pendiente_soporte': pendiente_min,
             'stoch_k': stoch_k,
             'stoch_d': stoch_d,
-            'adx': adx,
             'di_plus': di_plus,
             'di_minus': di_minus,
+            'adx': float(adx) if not np.isnan(adx) else 0.0,
             'timeframe': datos_mercado.get('timeframe', 'N/A'),
             'num_velas': candle_period
         }
@@ -3161,19 +3042,19 @@ class TradingBot:
         direccion_canal = info_canal['direccion']
         # Determinar tipo de ruptura
         if tipo_breakout == "BREAKOUT_LONG":
-            emoji_principal = "📉"
-            tipo_texto = "RUPTURA BAJISTA de SOPORTE"
+            emoji_principal = "🚀"
+            tipo_texto = "RUPTURA de SOPORTE"
             nivel_roto = f"Soporte: {soporte:.8f}"
             direccion_emoji = "⬇️"
-            contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE hacia ABAJO"
-            expectativa = "posible entrada en SHORT (Estrategia Invertida)"
+            contexto = f"Canal {direccion_canal} → Ruptura de SOPORTE"
+            expectativa = "posible entrada en LONG"
         else:  # BREAKOUT_SHORT
-            emoji_principal = "🚀"
-            tipo_texto = "RUPTURA ALCISTA de RESISTENCIA"
+            emoji_principal = "📉"
+            tipo_texto = "RUPTURA BAJISTA de RESISTENCIA"
             nivel_roto = f"Resistencia: {resistencia:.8f}"
             direccion_emoji = "⬆️"
-            contexto = f"Canal {direccion_canal} → Ruptura de RESISTENCIA hacia ARRIBA"
-            expectativa = "posible entrada en LONG (Estrategia Invertida)"
+            contexto = f"Canal {direccion_canal} → Rechazo desde RESISTENCIA"
+            expectativa = "posible entrada en SHORT"
         # Mensaje de alerta
         mensaje = f"""
 {emoji_principal} <b>¡BREAKOUT DETECTADO! - {simbolo}</b>
@@ -3391,23 +3272,7 @@ class TradingBot:
         """Detecta si el precio ha ROTO el canal"""
         if not info_canal:
             return None
-            
-        # === FILTRO DE TENDENCIA INSTITUCIONAL ===
-        # Exigir tendencia estructural demostrable
-        if info_canal.get('adx', 0) < 20:
-            print(f"     ⏳ {simbolo} - ADX muy bajo ({info_canal.get('adx', 0):.1f} < 20). Choppiness detectado.")
-            return None
-            
-        # === FILTRO DE VOLATILIDAD Y CONVEXIDAD ===
-        # El canal debe contener al menos 1.5 veces el movimiento errático de una vela (ATR)
-        # Si no, el canal es simplemente "ruido comprimido" no estructural
-        ancho_relativo = info_canal.get('ancho_canal_relativo_atr', 0)
-        if ancho_relativo < 1.5:
-            print(f"     ✂️ {simbolo} - Canal muy estrecho respecto a ATR ({ancho_relativo:.1f} < 1.5). Abortando.")
-            return None
-            
-        # Proteger contra períodos de extrema iliquidez (navidades, fines de semana sin volumen)
-        if info_canal.get('atr_relativo_porcentual', 100) < 0.1:
+        if info_canal['ancho_canal_porcentual'] < self.config.get('min_channel_width_percent', 4.0):
             return None
         precio_cierre = datos_mercado['cierres'][-1]
         resistencia = info_canal['resistencia']
@@ -3431,11 +3296,11 @@ class TradingBot:
         # CORREGIR LÓGICA DE DETECCIÓN DE BREAKOUT
         if direccion == "ALCISTA" and nivel_fuerza >= 2:
             if precio_cierre < soporte:  # Precio rompió hacia abajo el soporte
-                print(f"     🚀 {simbolo} - BREAKOUT LONG: {precio_cierre:.8f} < Soporte: {soporte:.8f}")
+                print(f"     📉 {simbolo} - BREAKOUT_LONG (canal ALCISTA rompe ABAJO → futura SHORT): {precio_cierre:.8f} < Soporte: {soporte:.8f}")
                 return "BREAKOUT_LONG"
         elif direccion == "BAJISTA" and nivel_fuerza >= 2:
             if precio_cierre > resistencia:  # Precio rompió hacia arriba la resistencia
-                print(f"     📉 {simbolo} - BREAKOUT SHORT: {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
+                print(f"     📈 {simbolo} - BREAKOUT_SHORT (canal BAJISTA rompe ARRIBA → futura LONG): {precio_cierre:.8f} > Resistencia: {resistencia:.8f}")
                 return "BREAKOUT_SHORT"
         return None
 
@@ -3483,19 +3348,6 @@ class TradingBot:
         di_minus = info_canal.get('di_minus', 25)
         angulo = info_canal['angulo_tendencia']
         
-        # Filtros de ORO adicionales: ADX y Volatilidad persistente
-        adx = info_canal.get('adx', 0)
-        ancho_relativo = info_canal.get('ancho_canal_relativo_atr', 0)
-        atr_relativo = info_canal.get('atr_relativo_porcentual', 100)
-        
-        if adx < 20:
-            print(f"     ⏳ {simbolo} - Reentry abortado: ADX decayó ({adx:.1f} < 20).")
-            return None
-            
-        if ancho_relativo < 1.5 or atr_relativo < 0.1:
-            print(f"     ✂️ {simbolo} - Reentry abortado: Volatilidad insuficiente (ATR Rel: {atr_relativo:.2f} | Ancho ATR: {ancho_relativo:.1f}).")
-            return None
-            
         # Verificar condiciones de Stochastic
         es_long_stoch = stoch_k > stoch_d
         es_short_stoch = stoch_k < stoch_d
@@ -3523,11 +3375,11 @@ class TradingBot:
             if distancia_soporte <= tolerancia:
                 # Confirmar con REGLAS DE ORO
                 if es_long_stoch and es_long_tendencia:
-                    print(f"     ✅ {simbolo} - REENTRY LONG CONFIRMADO!")
-                    print(f"         📊 Soporte + DI+>{di_plus:.2f}>{di_minus:.2f}=DI- + Stoch K>{stoch_k:.2f}>{stoch_d:.2f}=D")
+                    print(f"     ✅ {simbolo} - REENTRY CONFIRMADO (BREAKOUT_LONG → operará SHORT)")
+                    print(f"         📊 Canal ALCISTA roto abajo + DI+>{di_plus:.2f}>{di_minus:.2f}=DI- + Stoch K>{stoch_k:.2f}>{stoch_d:.2f}=D")
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
-                    return "LONG"
+                    return "LONG"  # Valor interno (se invertirá a SHORT en escanear_mercado)
                 else:
                     if not es_long_stoch:
                         print(f"     ❌ {simbolo} - REENTRY LONG RECHAZADO: Stoch K NO > D ({stoch_k:.2f} <= {stoch_d:.2f})")
@@ -3537,7 +3389,7 @@ class TradingBot:
                         if angulo <= 0:
                             print(f"     ❌ {simbolo} - REENTRY LONG RECHAZADO: Ángulo NO positivo ({angulo:.2f}°)")
             else:
-                print(f"     ⏳ {simbolo} - REENTRY LONG ESPERANDO: Precio muy lejos del soporte. Distancia={distancia_soporte:.4f} > Tolerancia={tolerancia:.4f}")
+                print(f"     ⏳ {simbolo} - REENTRY (BREAKOUT_LONG→SHORT) ESPERANDO: Precio lejos del soporte. Dist={distancia_soporte:.4f} > Tol={tolerancia:.4f}")
         
         elif tipo_breakout == "BREAKOUT_SHORT":
             # Para SHORT: reingreso cerca de la resistencia + DI- > DI+ + Stoch K < D
@@ -3547,11 +3399,11 @@ class TradingBot:
             if distancia_resistencia <= tolerancia:
                 # Confirmar con REGLAS DE ORO
                 if es_short_stoch and es_short_tendencia:
-                    print(f"     ✅ {simbolo} - REENTRY SHORT CONFIRMADO!")
-                    print(f"         📊 Resistencia + DI->{di_minus:.2f}>{di_plus:.2f}=DI+ + Stoch K<{stoch_k:.2f}<{stoch_d:.2f}=D")
+                    print(f"     ✅ {simbolo} - REENTRY CONFIRMADO (BREAKOUT_SHORT → operará LONG)")
+                    print(f"         📊 Canal BAJISTA roto arriba + DI->{di_minus:.2f}>{di_plus:.2f}=DI+ + Stoch K<{stoch_k:.2f}<{stoch_d:.2f}=D")
                     if simbolo in self.breakouts_detectados:
                         del self.breakouts_detectados[simbolo]
-                    return "SHORT"
+                    return "SHORT"  # Valor interno (se invertirá a LONG en escanear_mercado)
                 else:
                     if not es_short_stoch:
                         print(f"     ❌ {simbolo} - REENTRY SHORT RECHAZADO: Stoch K NO < D ({stoch_k:.2f} >= {stoch_d:.2f})")
@@ -3561,66 +3413,20 @@ class TradingBot:
                         if angulo >= 0:
                             print(f"     ❌ {simbolo} - REENTRY SHORT RECHAZADO: Ángulo NO negativo ({angulo:.2f}°)")
             else:
-                print(f"     ⏳ {simbolo} - REENTRY SHORT ESPERANDO: Precio muy lejos de la resistencia. Distancia={distancia_resistencia:.4f} > Tolerancia={tolerancia:.4f}")
+                print(f"     ⏳ {simbolo} - REENTRY (BREAKOUT_SHORT→LONG) ESPERANDO: Precio lejos de la resistencia. Dist={distancia_resistencia:.4f} > Tol={tolerancia:.4f}")
         
         return None
 
     def calcular_niveles_entrada(self, tipo_operacion, info_canal, precio_actual, breakout_info=None):
-        """Calcula niveles de entrada, SL y TP.
-        
-        El TP se coloca en el ANCHO COMPLETO DEL CANAL (lado opuesto):
-        - LONG: TP en la resistencia (límite superior del canal)
-        - SHORT: TP en el soporte (límite inferior del canal)
-        """
-        if not info_canal:
-            return None, None, None
-        resistencia = info_canal['resistencia']
-        soporte = info_canal['soporte']
-        ancho_canal = resistencia - soporte
-        
-        # SL INTELIGENTE: Usar extremo estructural si está disponible, sino 2% fijo
-        sl_estructural = None
-        if breakout_info and 'extremo_breakout' in breakout_info:
-            sl_estructural = breakout_info['extremo_breakout']
-            logger.info(f"🧠 Usando SL Estructural Inteligente: {sl_estructural}")
-        
-        sl_porcentaje = 0.02
-        
-        if tipo_operacion == "LONG":
-            precio_entrada = precio_actual
-            # Para LONG, el SL es el Low más bajo del breakout con un respiro de 0.1%
-            if sl_estructural:
-                stop_loss = sl_estructural * 0.999
-            else:
-                stop_loss = precio_entrada * (1 - sl_porcentaje)
-            # TP en la resistencia (ancho completo del canal desde el soporte)
-            take_profit = resistencia
-        else:
-            precio_entrada = precio_actual
-            # Para SHORT, el SL es el High más alto del breakout con un respiro de 0.1%
-            if sl_estructural:
-                stop_loss = sl_estructural * 1.001
-            else:
-                stop_loss = resistencia * (1 + sl_porcentaje)
-            # TP en el soporte (ancho completo del canal desde la resistencia)
-        riesgo = abs(precio_entrada - stop_loss)
-        
-        # TP FIJO 2:1 (Regla Estricta)
-        if tipo_operacion == "LONG":
-            take_profit = precio_entrada + (riesgo * 2.0)
-        else:
-            take_profit = precio_entrada - (riesgo * 2.0)
-        
-        logger.info(f"🎯 TP Fijo 2:1 calculado: {take_profit} (Riesgo: {riesgo:.6f})")
-        
-        return precio_entrada, take_profit, stop_loss
-
-    def calcular_niveles_invertidos(self, tipo_operacion, precio_entrada, riesgo_percent=0.5, ratio_rr=2.0):
         """
         Calcula SL y TP según la regla:
         - SHORT: SL ARRIBA, TP ABAJO (ratio 2:1)
         - LONG: SL ABAJO, TP ARRIBA (ratio 2:1)
         """
+        riesgo_percent = 0.5
+        ratio_rr = 2.0
+        
+        precio_entrada = precio_actual
         distancia_sl = precio_entrada * (riesgo_percent / 100)
         
         if tipo_operacion == 'SHORT':
@@ -3629,13 +3435,10 @@ class TradingBot:
         else:  # LONG
             sl = precio_entrada - distancia_sl  # ABAJO
             tp = precio_entrada + (distancia_sl * ratio_rr)  # ARRIBA
+            
+        logger.info(f"🎯 TP/SL Invertidos (Riesgo {riesgo_percent}% - RR {ratio_rr}:1): TP={tp:.8f}, SL={sl:.8f}")
         
-        return {
-            'sl': sl,
-            'tp': tp,
-            'distancia_sl': distancia_sl,
-            'ratio_real': ratio_rr
-        }
+        return precio_entrada, tp, sl
 
     def escanear_mercado(self):
         """Escanea el mercado con estrategia Breakout + Reentry"""
@@ -3663,11 +3466,6 @@ class TradingBot:
                 if not datos_mercado:
                     print(f"   ❌ {simbolo} - Error obteniendo datos")
                     continue
-                info_canal = self.calcular_canal_regresion_config(datos_mercado, config_optima['num_velas'])
-                if not info_canal:
-                    print(f"   ❌ {simbolo} - Error calculando canal")
-                    continue
-                                    # ... (código anterior) ...
                 info_canal = self.calcular_canal_regresion_config(datos_mercado, config_optima['num_velas'])
                 if not info_canal:
                     print(f"   ❌ {simbolo} - Error calculando canal")
@@ -3711,19 +3509,12 @@ class TradingBot:
                 print(
     f"📊 {simbolo} - {config_optima['timeframe']} - {config_optima['num_velas']}v | "
     f"{info_canal['direccion']} ({info_canal['angulo_tendencia']:.1f}° - {info_canal['fuerza_texto']}) | "
-    f"ADX: {info_canal.get('adx', 0):.1f} | "
-    f"Ancho ATR: {info_canal.get('ancho_canal_relativo_atr', 0):.1f} | "
-    f"Stoch: {info_canal['stoch_k']:.1f} {estado_stoch} | "
+    f"Ancho: {info_canal['ancho_canal_porcentual']:.1f}% - Stoch: {info_canal['stoch_k']:.1f}/{info_canal['stoch_d']:.1f} {estado_stoch} | "
     f"Precio: {posicion}"
                 )
                 if (info_canal['nivel_fuerza'] < 2 or 
                     abs(info_canal['coeficiente_pearson']) < 0.4 or 
                     info_canal['r2_score'] < 0.4):
-                    continue
-                
-                # Verificar ADX mínimo
-                adx_actual = info_canal.get('adx', 0)
-                if adx_actual < 20:
                     continue
                 if simbolo not in self.esperando_reentry:
                     tipo_breakout = self.detectar_breakout(simbolo, info_canal, datos_mercado)
@@ -3752,38 +3543,35 @@ class TradingBot:
                         low_actual = float(df_reciente['Low'].iloc[-1])
                         high_actual = float(df_reciente['High'].iloc[-1])
                         if info_re['tipo'] == "BREAKOUT_LONG":
-                            # En LONG (breakout hacia abajo), buscamos el Low más bajo
+                            # BREAKOUT_LONG = canal ALCISTA roto abajo → futura SHORT: trackear el Low más bajo
                             info_re['extremo_breakout'] = min(info_re.get('extremo_breakout', low_actual), low_actual)
                         else:
-                            # En SHORT (breakout hacia arriba), buscamos el High más alto
+                            # BREAKOUT_SHORT = canal BAJISTA roto arriba → futura LONG: trackear el High más alto
                             info_re['extremo_breakout'] = max(info_re.get('extremo_breakout', high_actual), high_actual)
 
-                tipo_operacion_original = self.detectar_reentry(simbolo, info_canal, datos_mercado)
-                if not tipo_operacion_original:
+                tipo_operacion = self.detectar_reentry(simbolo, info_canal, datos_mercado)
+                if not tipo_operacion:
+                    continue
+                
+                # Verificar ADX mínimo antes de continuar
+                adx_actual = info_canal.get('adx', 0)
+                if adx_actual < 20:
+                    print(f"     ⏳ {simbolo} - ADX muy bajo ({adx_actual:.2f} < 20), sin tendencia fuerte")
                     continue
                 
                 breakout_info = self.esperando_reentry[simbolo]
                 
-                # AQUÍ ESTÁ EL CAMBIO: Invertir la operación
-                if tipo_operacion_original == "LONG":
-                    tipo_operacion = "SHORT"  # CANAL ALCISTA + ROMPE ABAJO = SHORT
-                elif tipo_operacion_original == "SHORT":
-                    tipo_operacion = "LONG"   # CANAL BAJISTA + ROMPE ARRIBA = LONG
+                # INVERTIR LA OPERACIÓN
+                if info_canal['direccion'] == 'ALCISTA' and breakout_info['tipo'] == 'BREAKOUT_LONG':
+                    tipo_operacion = 'SHORT'  # CANAL ALCISTA + ROMPE ABAJO = SHORT
+                elif info_canal['direccion'] == 'BAJISTA' and breakout_info['tipo'] == 'BREAKOUT_SHORT':
+                    tipo_operacion = 'LONG'   # CANAL BAJISTA + ROMPE ARRIBA = LONG
                 else:
-                    continue
+                    continue  # No coincide con patrón
                 
-                # Calcular niveles con la regla correcta
-                precio_entrada = datos_mercado['precio_actual']
-                niveles = self.calcular_niveles_invertidos(
-                    tipo_operacion=tipo_operacion,
-                    precio_entrada=precio_entrada,
-                    riesgo_percent=0.7,
-                    ratio_rr=2.0
+                precio_entrada, tp, sl = self.calcular_niveles_entrada(
+                    tipo_operacion, info_canal, datos_mercado['precio_actual'], breakout_info
                 )
-                
-                sl = niveles['sl']
-                tp = niveles['tp']
-                
                 if not precio_entrada or not tp or not sl:
                     continue
                 
@@ -4487,7 +4275,7 @@ class TradingBot:
 
     def reoptimizar_periodicamente(self):
         try:
-            horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 3600
+            horas_desde_opt = (datetime.now() - self.ultima_optimizacion).total_seconds() / 7200
             if self.operaciones_desde_optimizacion >= 8 or horas_desde_opt >= self.config.get('reevaluacion_horas', 24):
                 print("🔄 Iniciando re-optimización automática...")
                 ia = OptimizadorIA(log_path=self.log_path, min_samples=self.config.get('min_samples_optimizacion', 30))
