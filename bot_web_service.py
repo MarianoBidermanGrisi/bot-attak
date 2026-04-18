@@ -3423,7 +3423,7 @@ class TradingBot:
         - SHORT: SL ARRIBA, TP ABAJO (ratio 2:1)
         - LONG: SL ABAJO, TP ARRIBA (ratio 2:1)
         """
-        riesgo_percent = 0.8
+        riesgo_percent = 1.6
         ratio_rr = 2.0
         
         precio_entrada = precio_actual
