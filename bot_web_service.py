@@ -1515,7 +1515,7 @@ def ejecutar_operacion_bitget(bitget_client, simbolo, tipo_operacion, capital_us
             
         COOLDOWN_OPERACION = 180
         TOLERANCIA_MAX = 0.04
-        stopFijo = 0.02
+        stopFijo = 0.016
 
         # FILTRO COOLDOWN
         if bot:
