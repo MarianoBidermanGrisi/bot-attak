@@ -394,7 +394,9 @@ if __name__ == "__main__":
                         busy_symbols.add(symbol)
                         SESSION_ACTIVE_SYMBOLS.add(symbol)
 
-                except: continue
+                except Exception as e:
+                    log.error(f"⚠️ Error analizando/abriendo {symbol}: {e}")
+                    continue
 
             time.sleep(60)
         except Exception as e: log.error(f"Error ciclo: {e}"); time.sleep(60)
