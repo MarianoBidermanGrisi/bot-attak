@@ -232,7 +232,7 @@ if __name__ == "__main__":
             log.info(f"🔄 CICLO [{now.strftime('%H:%M:%S')}] | Balance: {balance:.2f} | Ocupados: [{occupied_str}]")
             
             if len(busy_symbols) >= MAX_OPEN_POSITIONS:
-                time.sleep(15); continue
+                time.sleep(60); continue
 
             tickers = exchange.fetch_tickers()
             top_50 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:50]]
@@ -396,8 +396,8 @@ if __name__ == "__main__":
 
                 except: continue
 
-            time.sleep(15)
-        except Exception as e: log.error(f"Error ciclo: {e}"); time.sleep(15)
+            time.sleep(60)
+        except Exception as e: log.error(f"Error ciclo: {e}"); time.sleep(60)
 
 
 
