@@ -47,10 +47,10 @@ STC_SLOW           = 50
 STC_CYCLE          = 10
 STC_UPPER          = 75  # Para Shorts
 STC_LOWER          = 25  # Para Longs
-BE_TRIGGER_PCT     = 0.014  # BE al 2%
-TRAILING_DIST_PCT  = 0.019  # Trail 2%
+BE_TRIGGER_PCT     = 0.020  # BE al 2%
+TRAILING_DIST_PCT  = 0.020  # Trail 2%
 MAX_OPEN_POSITIONS = 5
-RISK_PERCENT       = 0.10   # 10% riesgo
+RISK_PERCENT       = 0.07   # 10% riesgo
 LEVERAGE           = 10.0
 
 # ==========================================================
@@ -224,7 +224,12 @@ def manage_escudo_pro():
                     log.info(f"🚨 SALIDA ANTICIPADA {symbol} ({side}): {reason}")
                     close_side = 'sell' if side == 'long' else 'buy'
                     qty = float(pos['contracts'])
-                    params_close = {'marginCoin': 'USDT', 'tradeSide': 'close'}
+                    params_close = {
+                        'marginCoin': 'USDT', 
+                        'marginMode': 'isolated', 
+                        'tradeSide': 'close',
+                        'reduceOnly': True
+                    }
                     exchange.create_order(symbol, 'market', close_side, qty, params=params_close)
                     
                     send_telegram(f"🚨 *{symbol} CERRANDO (Anticipada)*\nMotivo: {reason}\nPnL aprox: {profit_pct*100:.2f}%")
