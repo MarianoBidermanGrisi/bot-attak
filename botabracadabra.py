@@ -39,7 +39,7 @@ PASSPHRASE = os.environ.get('BITGET_PASSPHRASE')
 TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-TIMEFRAME          = '30m'
+TIMEFRAME          = '5m'
 EMA_MACRO          = 200 # Filtro de tendencia diaria
 HMA_SIGNAL         = 25  # Dirección inmediata (Optimizado)
 STC_FAST           = 23
@@ -245,7 +245,7 @@ if __name__ == "__main__":
 
                 try:
                     # Obtenemos 1H para la tendencia y 5m para el POC preciso
-                    ohlcv_1h = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=150)
+                    ohlcv_1h = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
                     ohlcv_5m = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=288) # 24h = 288 velas de 5m
                     
                     df = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
