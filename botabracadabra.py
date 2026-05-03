@@ -47,8 +47,8 @@ STC_SLOW           = 50
 STC_CYCLE          = 10
 STC_UPPER          = 75  # Para Shorts
 STC_LOWER          = 25  # Para Longs
-BE_TRIGGER_PCT     = 0.020  # BE al 2%
-TRAILING_DIST_PCT  = 0.020  # Trail 2%
+BE_TRIGGER_PCT     = 0.014  # BE al 2%
+TRAILING_DIST_PCT  = 0.019  # Trail 2%
 MAX_OPEN_POSITIONS = 5
 RISK_PERCENT       = 0.10   # 10% riesgo
 LEVERAGE           = 10.0
@@ -185,8 +185,57 @@ def manage_escudo_pro():
             entry, mark = float(pos['entryPrice']), float(pos['markPrice'])
             profit_pct = (mark - entry) / entry if side == 'long' else (entry - mark) / entry
             
+            # Inicializar o actualizar PEAK_PRICES siempre antes de evaluar salidas
             if symbol not in PEAK_PRICES: PEAK_PRICES[symbol] = mark
             else: PEAK_PRICES[symbol] = max(PEAK_PRICES[symbol], mark) if side == 'long' else min(PEAK_PRICES[symbol], mark)
+            
+            # --- 🚀 NUEVA LÓGICA: SALIDA ANTICIPADA (HMA + STC) ---
+            try:
+                # 1. Descargar datos para calcular indicadores
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
+                df_ee = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                
+                # 2. Calcular indicadores
+                df_ee['hma_25'] = calculate_hma(df_ee['close'], HMA_SIGNAL)
+                df_ee['stc'] = calculate_stc(df_ee['close'], STC_FAST, STC_SLOW, STC_CYCLE)
+                
+                last_ee, prev_ee = df_ee.iloc[-1], df_ee.iloc[-2]
+                current_stc = last_ee['stc']
+                current_hma = last_ee['hma_25']
+                prev_hma = prev_ee['hma_25']
+                
+                close_position = False
+                reason = ""
+                
+                # 3. Evaluación del Doble Check
+                if side == 'long':
+                    # STC < 75 Y (Precio < HMA Y Pendiente Negativa)
+                    if current_stc < 75 and (mark < current_hma and current_hma < prev_hma):
+                        close_position = True
+                        reason = f"STC ({current_stc:.1f} < 75) + HMA Negativa"
+                elif side == 'short':
+                    # STC > 25 Y (Precio > HMA Y Pendiente Positiva)
+                    if current_stc > 25 and (mark > current_hma and current_hma > prev_hma):
+                        close_position = True
+                        reason = f"STC ({current_stc:.1f} > 25) + HMA Positiva"
+                        
+                # 4. Ejecución del Cierre
+                if close_position:
+                    log.info(f"🚨 SALIDA ANTICIPADA {symbol} ({side}): {reason}")
+                    close_side = 'sell' if side == 'long' else 'buy'
+                    qty = float(pos['contracts'])
+                    params_close = {'marginCoin': 'USDT', 'tradeSide': 'close'}
+                    exchange.create_order(symbol, 'market', close_side, qty, params=params_close)
+                    
+                    send_telegram(f"🚨 *{symbol} CERRANDO (Anticipada)*\nMotivo: {reason}\nPnL aprox: {profit_pct*100:.2f}%")
+                    
+                    # Dejamos que el sistema nativo del bot se encargue de limpiar la memoria 
+                    # en el próximo ciclo para que aplique el Cooldown de 1h correctamente.
+                    continue # Saltar a la siguiente posición
+            except Exception as e:
+                log.error(f"⚠️ Error evaluando Salida Anticipada para {symbol}: {e}")
+            # --- FIN LÓGICA SALIDA ANTICIPADA ---
+
 
             if profit_pct >= BE_TRIGGER_PCT and ALERTS_HISTORY.get(symbol) != 'BE':
                 if update_stop_loss(symbol, side, entry):
