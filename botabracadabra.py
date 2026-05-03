@@ -235,7 +235,7 @@ if __name__ == "__main__":
                 time.sleep(15); continue
 
             tickers = exchange.fetch_tickers()
-            top_30 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:30]]
+            top_50 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:50]]
 
             for symbol in top_30:
                 if symbol in busy_symbols or len(busy_symbols) >= MAX_OPEN_POSITIONS: continue
