@@ -50,7 +50,7 @@ STC_LOWER          = 25  # Para Longs
 BE_TRIGGER_PCT     = 0.020  # BE al 2%
 TRAILING_DIST_PCT  = 0.020  # Trail 2%
 MAX_OPEN_POSITIONS = 5
-RISK_PERCENT       = 0.07   # 10% riesgo
+RISK_PERCENT       = 0.10   # 10% riesgo
 LEVERAGE           = 10.0
 
 # ==========================================================
@@ -228,6 +228,7 @@ def manage_escudo_pro():
                         'marginCoin': 'USDT', 
                         'marginMode': 'isolated', 
                         'tradeSide': 'close',
+                        'holdSide': side, # 'long' o 'short'
                         'reduceOnly': True
                     }
                     exchange.create_order(symbol, 'market', close_side, qty, params=params_close)
