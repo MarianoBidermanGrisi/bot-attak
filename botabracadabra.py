@@ -50,7 +50,7 @@ STC_LOWER          = 25  # Para Longs
 BE_TRIGGER_PCT     = 0.020  # BE al 2%
 TRAILING_DIST_PCT  = 0.020  # Trail 2%
 MAX_OPEN_POSITIONS = 5
-RISK_PERCENT       = 0.03   # 3% riesgo
+RISK_PERCENT       = 0.10   # 10% riesgo
 LEVERAGE           = 10.0
 
 # ==========================================================
