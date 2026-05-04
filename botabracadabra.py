@@ -222,16 +222,16 @@ def manage_escudo_pro():
                 # 4. Ejecución del Cierre
                 if close_position:
                     log.info(f"🚨 SALIDA ANTICIPADA {symbol} ({side}): {reason}")
-                    close_side = 'sell' if side == 'long' else 'buy'
-                    qty = float(pos['contracts'])
+                    
+                    # Llamada directa a la API nativa de Bitget V2 para cerrar toda la posición
+                    clean_symbol = symbol.split(':')[0].replace('/', '')
                     params_close = {
-                        'marginCoin': 'USDT', 
-                        'marginMode': 'isolated', 
-                        'tradeSide': 'close',
-                        'holdSide': side, # 'long' o 'short'
-                        'reduceOnly': True
+                        'symbol': clean_symbol,
+                        'productType': 'USDT-FUTURES',
+                        'marginCoin': 'USDT',
+                        'holdSide': side
                     }
-                    exchange.create_order(symbol, 'market', close_side, qty, params=params_close)
+                    exchange.private_mix_post_v2_mix_order_close_positions(params_close)
                     
                     send_telegram(f"🚨 *{symbol} CERRANDO (Anticipada)*\nMotivo: {reason}\nPnL aprox: {profit_pct*100:.2f}%")
                     
