@@ -56,12 +56,12 @@ LEVERAGE           = 10.0
 # ==============================================================================
 # PARÁMETROS DE FILTRADO DE CALIDAD DE OPERACIÓN (CONFIGURABLE)
 # ==============================================================================
-# Regla 2: Distancia máxima al Stop Loss (en porcentaje del precio de entrada-30%)
+# Regla 2: Distancia máxima al Stop Loss (en porcentaje del precio de entrada)
 MAX_SL_DISTANCE_PCT = 0.03
-# Regla 3: Distancia mínima al Take Profit (en porcentaje del precio de entrada +20%)
+# Regla 3: Distancia mínima al Take Profit (en porcentaje del precio de entrada)
 MIN_TP_DISTANCE_PCT = 0.015
 # Adicional: Ratio Riesgo-Beneficio mínimo (opcional)
-MIN_RISK_REWARD_RATIO = 1.0
+MIN_RISK_REWARD_RATIO = 1.5
 
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
@@ -156,7 +156,9 @@ def update_stop_loss(symbol, side, new_sl):
         }
         exchange.private_mix_post_v2_mix_order_place_pos_tpsl(params)
         return True
-    except: return False
+    except Exception as e: 
+        log.error(f"❌ Fallo al actualizar SL para {symbol}: {e}")
+        return False
 
 def manage_escudo_pro():
     global ALERTS_HISTORY, PEAK_PRICES, COOLDOWNS
@@ -266,7 +268,8 @@ def manage_escudo_pro():
                     if (side == 'long' and trail_sl > last_trail * 1.001) or (side == 'short' and trail_sl < last_trail * 0.999):
                         if update_stop_loss(symbol, side, trail_sl):
                             send_telegram(f"📈 *{symbol} TRAILING*: SL @ {trail_sl:.2f}"); ALERTS_HISTORY[f"{symbol}_trail"] = trail_sl
-    except: pass
+    except Exception as e: 
+        log.error(f"❌ Error crítico en manage_escudo_pro: {e}")
 
 # ==========================================================
 # 5. BUCLE PRINCIPAL
