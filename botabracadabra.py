@@ -59,7 +59,7 @@ LEVERAGE           = 10.0
 # Regla 2: Distancia máxima al Stop Loss (en porcentaje del precio de entrada-30%)
 MAX_SL_DISTANCE_PCT = 0.03
 # Regla 3: Distancia mínima al Take Profit (en porcentaje del precio de entrada +20%)
-MIN_TP_DISTANCE_PCT = 0.02
+MIN_TP_DISTANCE_PCT = 0.015
 # Adicional: Ratio Riesgo-Beneficio mínimo (opcional)
 MIN_RISK_REWARD_RATIO = 1.0
 
