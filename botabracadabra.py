@@ -47,11 +47,21 @@ STC_SLOW           = 50
 STC_CYCLE          = 10
 STC_UPPER          = 75  # Para Shorts
 STC_LOWER          = 25  # Para Longs
-BE_TRIGGER_PCT     = 0.012  # BE al 2%
-TRAILING_DIST_PCT  = 0.018  # Trail 2%
+BE_TRIGGER_PCT     = 0.014# BE al 2%
+TRAILING_DIST_PCT  = 0.019# Trail 2%
 MAX_OPEN_POSITIONS = 5
-RISK_PERCENT       = 0.07  # 10% riesgo
+RISK_PERCENT       = 0.07  # % riesgo
 LEVERAGE           = 10.0
+
+# ==============================================================================
+# PARÁMETROS DE FILTRADO DE CALIDAD DE OPERACIÓN (CONFIGURABLE)
+# ==============================================================================
+# Regla 2: Distancia máxima al Stop Loss (en porcentaje del precio de entrada-30%)
+MAX_SL_DISTANCE_PCT = 0.03
+# Regla 3: Distancia mínima al Take Profit (en porcentaje del precio de entrada +20%)
+MIN_TP_DISTANCE_PCT = 0.02
+# Adicional: Ratio Riesgo-Beneficio mínimo (opcional)
+MIN_RISK_REWARD_RATIO = 1.0
 
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
@@ -97,6 +107,7 @@ def calculate_poc(df_5m):
     if df_5m.empty: return 0
     # Redondeamos al tick size promedio para agrupar niveles de precio
     tick_size = df_5m['close'].diff().abs().median()
+    if tick_size == 0: return 0  # Guard: evita división por cero si todos los precios son iguales
     df_5m['price_level'] = (df_5m['close'] / tick_size).round() * tick_size
     poc = df_5m.groupby('price_level')['volume'].sum().idxmax()
     return poc
@@ -106,7 +117,7 @@ def detect_order_blocks(df, lookback=100):
     obs = {'bullish': [], 'bearish': []}
     avg_vol = df['volume'].rolling(20).mean()
     
-    for i in range(len(df) - 5, 20, -1):
+    for i in range(len(df) - 6, 20, -1):  # -6 para que iloc[i+2] nunca salga del rango
         # 1. ¿Hay volumen inusual? (1.5x el promedio)
         if df['volume'].iloc[i] > avg_vol.iloc[i] * 1.5:
             # 2. ¿Hubo un Imbalance (FVG) inmediato?
@@ -249,9 +260,10 @@ def manage_escudo_pro():
 
             if ALERTS_HISTORY.get(symbol) == 'BE':
                 trail_sl = PEAK_PRICES[symbol] * (1 - TRAILING_DIST_PCT) if side == 'long' else PEAK_PRICES[symbol] * (1 + TRAILING_DIST_PCT)
-                if (side == 'long' and trail_sl > entry * 1.005) or (side == 'short' and trail_sl < entry * 0.995):
+                # Filtro de ruido reducido al 0.1% (1.001 / 0.999) para un trailing más fluido
+                if (side == 'long' and trail_sl > entry * 1.001) or (side == 'short' and trail_sl < entry * 0.999):
                     last_trail = ALERTS_HISTORY.get(f"{symbol}_trail", 0 if side == 'long' else 999999)
-                    if (side == 'long' and trail_sl > last_trail * 1.005) or (side == 'short' and trail_sl < last_trail * 0.995):
+                    if (side == 'long' and trail_sl > last_trail * 1.001) or (side == 'short' and trail_sl < last_trail * 0.999):
                         if update_stop_loss(symbol, side, trail_sl):
                             send_telegram(f"📈 *{symbol} TRAILING*: SL @ {trail_sl:.2f}"); ALERTS_HISTORY[f"{symbol}_trail"] = trail_sl
     except: pass
@@ -398,9 +410,39 @@ if __name__ == "__main__":
                             else:
                                 tp = price - (sl - price) * 2.0 # Fallback RR 1:2
 
-                        # Verificación de seguridad para SL/TP
+                        # Verificación de seguridad para SL/TP básica
                         if buy and (tp <= price or sl >= price): continue
                         if sell and (tp >= price or sl <= price): continue
+
+                        # ==============================================================================
+                        # REGLAS DE FILTRADO DE CALIDAD DE OPERACIÓN
+                        # ==============================================================================
+                        
+                        # Cálculo simplificado de distancias en valor absoluto
+                        sl_distance_pct = abs(price - sl) / price
+                        tp_distance_pct = abs(price - tp) / price
+
+                        # Regla 1: Rechazar si distancia de SL >= distancia de TP (relación riesgo-beneficio invertida numéricamente)
+                        if sl_distance_pct >= tp_distance_pct:
+                            log.warning(f"⚠️ {symbol} RECHAZADA ({side.upper()}): Distancia SL ({sl_distance_pct*100:.2f}%) >= TP ({tp_distance_pct*100:.2f}%) - R/R inválido")
+                            continue
+
+                        # Regla 2: Rechazar si distancia al SL > MAX_SL_DISTANCE_PCT
+                        if sl_distance_pct > MAX_SL_DISTANCE_PCT:
+                            log.warning(f"⚠️ {symbol} RECHAZADA ({side.upper()}): Distancia SL ({sl_distance_pct*100:.2f}%) > {MAX_SL_DISTANCE_PCT*100:.1f}% (MAX)")
+                            continue
+
+                        # Regla 3: Rechazar si distancia al TP < MIN_TP_DISTANCE_PCT
+                        if tp_distance_pct < MIN_TP_DISTANCE_PCT:
+                            log.warning(f"⚠️ {symbol} RECHAZADA ({side.upper()}): Distancia TP ({tp_distance_pct*100:.2f}%) < {MIN_TP_DISTANCE_PCT*100:.1f}% (MIN)")
+                            continue
+
+                        # Validación adicional: Ratio Riesgo-Beneficio mínimo
+                        if MIN_RISK_REWARD_RATIO > 0:
+                            risk_reward_ratio = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
+                            if risk_reward_ratio < MIN_RISK_REWARD_RATIO:
+                                log.warning(f"⚠️ {symbol} RECHAZADA ({side.upper()}): R/R ({risk_reward_ratio:.2f}) < {MIN_RISK_REWARD_RATIO:.1f} (MIN)")
+                                continue
                         
                         # Cálculo de cantidad con redondeo estricto hacia abajo (floor)
                         target_margin = balance * RISK_PERCENT
@@ -410,7 +452,7 @@ if __name__ == "__main__":
                         # Obtenemos la precisión del lote para este símbolo
                         market = exchange.market(symbol)
                         precision = market['precision']['amount']
-                        step = market['limits']['amount']['min'] or (10**-precision)
+                        step = market['limits']['amount']['min'] or (10**(-int(precision)))  # int() evita resultado incorrecto con floats
                         
                         # Forzamos redondeo hacia abajo (floor) al step más cercano
                         qty_precision = (raw_qty // step) * step
