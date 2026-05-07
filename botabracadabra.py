@@ -63,6 +63,13 @@ MIN_TP_DISTANCE_PCT = 0.015
 # Adicional: Ratio Riesgo-Beneficio mínimo (opcional)
 MIN_RISK_REWARD_RATIO = 1.0
 
+# ==============================================================================
+# CONTROL DE FUNCIONALIDADES (INTERRUPTORES OPERACIONALES)
+# ==============================================================================
+# True  → El bot evalúa STC + HMA en cada ciclo y puede cerrar posiciones anticipadamente
+# False → Las posiciones solo se cierran por SL/TP o Trailing Stop (sin interferencia)
+ENABLE_EARLY_EXIT = False  # Cambiar a False para desactivar
+
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
 # ==========================================================
@@ -91,14 +98,14 @@ def calculate_stc(series, fast=23, slow=50, length=10):
     macd_min = macd.rolling(window=length).min()
     macd_max = macd.rolling(window=length).max()
     stoch_macd = 100 * (macd - macd_min) / (macd_max - macd_min).replace(0, np.nan)
-    stoch_macd = stoch_macd.ffill().fillna(0)
+    stoch_macd = stoch_macd.ffill().fillna(50)  # 50 = neutro: evita falsa señal oversold en warm-up
     
     smoothed_stoch = stoch_macd.ewm(alpha=0.5, adjust=False).mean()
     
     stoch_min = smoothed_stoch.rolling(window=length).min()
     stoch_max = smoothed_stoch.rolling(window=length).max()
     stoch_stoch = 100 * (smoothed_stoch - stoch_min) / (stoch_max - stoch_min).replace(0, np.nan)
-    stoch_stoch = stoch_stoch.ffill().fillna(0)
+    stoch_stoch = stoch_stoch.ffill().fillna(50)  # 50 = neutro: evita falsa señal overbought en warm-up
     
     return stoch_stoch.ewm(alpha=0.5, adjust=False).mean()
 
@@ -143,6 +150,7 @@ def detect_order_blocks(df, lookback=100):
 try:
     exchange = ccxt.bitget({'apiKey': API_KEY, 'secret': SECRET_KEY, 'password': PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
     log.info("✅ CONEXIÓN EXITOSA — ESPERANDO NUEVA ESTRATEGIA.")
+    log.info(f"{'✅' if ENABLE_EARLY_EXIT else '⏸️'} Salida Anticipada: {'ACTIVADA' if ENABLE_EARLY_EXIT else 'DESACTIVADA'}")
 except Exception as e: log.critical(f"❌ ERROR: {e}"); sys.exit(1)
 
 def update_stop_loss(symbol, side, new_sl):
@@ -202,57 +210,58 @@ def manage_escudo_pro():
             if symbol not in PEAK_PRICES: PEAK_PRICES[symbol] = mark
             else: PEAK_PRICES[symbol] = max(PEAK_PRICES[symbol], mark) if side == 'long' else min(PEAK_PRICES[symbol], mark)
             
-            # --- 🚀 NUEVA LÓGICA: SALIDA ANTICIPADA (HMA + STC) ---
-            try:
-                # 1. Descargar datos para calcular indicadores
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
-                df_ee = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                
-                # 2. Calcular indicadores
-                df_ee['hma_25'] = calculate_hma(df_ee['close'], HMA_SIGNAL)
-                df_ee['stc'] = calculate_stc(df_ee['close'], STC_FAST, STC_SLOW, STC_CYCLE)
-                
-                last_ee, prev_ee = df_ee.iloc[-1], df_ee.iloc[-2]
-                current_stc = last_ee['stc']
-                current_hma = last_ee['hma_25']
-                prev_hma = prev_ee['hma_25']
-                
-                close_position = False
-                reason = ""
-                
-                # 3. Evaluación del Doble Check
-                if side == 'long':
-                    # STC < 75 Y (Precio < HMA Y Pendiente Negativa)
-                    if current_stc < 75 and (mark < current_hma and current_hma < prev_hma):
-                        close_position = True
-                        reason = f"STC ({current_stc:.1f} < 75) + HMA Negativa"
-                elif side == 'short':
-                    # STC > 25 Y (Precio > HMA Y Pendiente Positiva)
-                    if current_stc > 25 and (mark > current_hma and current_hma > prev_hma):
-                        close_position = True
-                        reason = f"STC ({current_stc:.1f} > 25) + HMA Positiva"
+            # --- 🚀 SALIDA ANTICIPADA (HMA + STC) ---
+            if ENABLE_EARLY_EXIT:
+                try:
+                    # 1. Descargar datos para calcular indicadores
+                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
+                    df_ee = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    
+                    # 2. Calcular indicadores
+                    df_ee['hma_25'] = calculate_hma(df_ee['close'], HMA_SIGNAL)
+                    df_ee['stc'] = calculate_stc(df_ee['close'], STC_FAST, STC_SLOW, STC_CYCLE)
+                    
+                    last_ee, prev_ee = df_ee.iloc[-1], df_ee.iloc[-2]
+                    current_stc = last_ee['stc']
+                    current_hma = last_ee['hma_25']
+                    prev_hma = prev_ee['hma_25']
+                    
+                    close_position = False
+                    reason = ""
+                    
+                    # 3. Evaluación del Doble Check
+                    if side == 'long':
+                        # STC < 75 Y (Precio < HMA Y Pendiente Negativa)
+                        if current_stc < 75 and (mark < current_hma and current_hma < prev_hma):
+                            close_position = True
+                            reason = f"STC ({current_stc:.1f} < 75) + HMA Negativa"
+                    elif side == 'short':
+                        # STC > 25 Y (Precio > HMA Y Pendiente Positiva)
+                        if current_stc > 25 and (mark > current_hma and current_hma > prev_hma):
+                            close_position = True
+                            reason = f"STC ({current_stc:.1f} > 25) + HMA Positiva"
+                            
+                    # 4. Ejecución del Cierre
+                    if close_position:
+                        log.info(f"🚨 SALIDA ANTICIPADA {symbol} ({side}): {reason}")
                         
-                # 4. Ejecución del Cierre
-                if close_position:
-                    log.info(f"🚨 SALIDA ANTICIPADA {symbol} ({side}): {reason}")
-                    
-                    # Llamada directa a la API nativa de Bitget V2 para cerrar toda la posición
-                    clean_symbol = symbol.split(':')[0].replace('/', '')
-                    params_close = {
-                        'symbol': clean_symbol,
-                        'productType': 'USDT-FUTURES',
-                        'marginCoin': 'USDT',
-                        'holdSide': side
-                    }
-                    exchange.private_mix_post_v2_mix_order_close_positions(params_close)
-                    
-                    send_telegram(f"🚨 *{symbol} CERRANDO (Anticipada)*\nMotivo: {reason}\nPnL aprox: {profit_pct*100:.2f}%")
-                    
-                    # Dejamos que el sistema nativo del bot se encargue de limpiar la memoria 
-                    # en el próximo ciclo para que aplique el Cooldown de 1h correctamente.
-                    continue # Saltar a la siguiente posición
-            except Exception as e:
-                log.error(f"⚠️ Error evaluando Salida Anticipada para {symbol}: {e}")
+                        # Llamada directa a la API nativa de Bitget V2 para cerrar toda la posición
+                        clean_symbol = symbol.split(':')[0].replace('/', '')
+                        params_close = {
+                            'symbol': clean_symbol,
+                            'productType': 'USDT-FUTURES',
+                            'marginCoin': 'USDT',
+                            'holdSide': side
+                        }
+                        exchange.private_mix_post_v2_mix_order_close_positions(params_close)
+                        
+                        send_telegram(f"🚨 *{symbol} CERRANDO (Anticipada)*\nMotivo: {reason}\nPnL aprox: {profit_pct*100:.2f}%")
+                        
+                        # Dejamos que el sistema nativo del bot se encargue de limpiar la memoria
+                        # en el próximo ciclo para que aplique el Cooldown de 1h correctamente.
+                        continue # Saltar a la siguiente posición
+                except Exception as e:
+                    log.error(f"⚠️ Error evaluando Salida Anticipada para {symbol}: {e}")
             # --- FIN LÓGICA SALIDA ANTICIPADA ---
 
 
