@@ -40,8 +40,8 @@ TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 TIMEFRAME          = '15m'
-EMA_MACRO          = 400 # Filtro de tendencia diaria
-HMA_SIGNAL         = 35  # Dirección inmediata (Optimizado)
+EMA_MACRO          = 400# Filtro de tendencia diaria
+HMA_SIGNAL         = 35 # Dirección inmediata (Optimizado)
 STC_FAST           = 23
 STC_SLOW           = 50
 STC_CYCLE          = 10
@@ -68,7 +68,11 @@ MIN_RISK_REWARD_RATIO = 1.0
 # ==============================================================================
 # True  → El bot evalúa STC + HMA en cada ciclo y puede cerrar posiciones anticipadamente
 # False → Las posiciones solo se cierran por SL/TP o Trailing Stop (sin interferencia)
-ENABLE_EARLY_EXIT = False  # Cambiar a False para desactivar
+ENABLE_EARLY_EXIT = True  # Cambiar a True para activar
+# Tiempo máximo que una posición puede permanecer abierta antes de cierre forzoso
+# Con TIMEFRAME='15m': 4h=16 velas | 6h=24 velas | 8h=32 velas
+# Calibrar entre 4.0 y 8.0 según resultados observados
+MAX_POSITION_AGE_HOURS = 6.0
 
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
@@ -210,11 +214,34 @@ def manage_escudo_pro():
             if symbol not in PEAK_PRICES: PEAK_PRICES[symbol] = mark
             else: PEAK_PRICES[symbol] = max(PEAK_PRICES[symbol], mark) if side == 'long' else min(PEAK_PRICES[symbol], mark)
             
+            # --- ⏰ CIERRE POR TIEMPO MÁXIMO ---
+            try:
+                # CCXT normaliza el timestamp en milisegundos, fallback a cTime (Bitget v2)
+                open_ms = float(pos.get('timestamp') or pos['info'].get('cTime') or 0)
+                if open_ms > 0:
+                    age_hours = (time.time() - open_ms / 1000) / 3600
+                    if age_hours >= MAX_POSITION_AGE_HOURS:
+                        log.info(f"⏰ {symbol}: {age_hours:.1f}h >= {MAX_POSITION_AGE_HOURS}h máx — cerrando por tiempo.")
+                        clean_symbol = symbol.split(':')[0].replace('/', '')
+                        exchange.private_mix_post_v2_mix_order_close_positions({
+                            'symbol': clean_symbol,
+                            'productType': 'USDT-FUTURES',
+                            'marginCoin': 'USDT',
+                            'holdSide': side
+                        })
+                        send_telegram(f"⏰ *{symbol} CERRADA (Tiempo máx)*\n"
+                                      f"Edad: {age_hours:.1f}h\n"
+                                      f"PnL aprox: {profit_pct*100:.2f}%")
+                        continue  # Saltar al siguiente símbolo
+            except Exception as e:
+                log.error(f"⚠️ Error evaluando tiempo máximo para {symbol}: {e}")
+            # --- FIN CIERRE POR TIEMPO MÁXIMO ---
+
             # --- 🚀 SALIDA ANTICIPADA (HMA + STC) ---
             if ENABLE_EARLY_EXIT:
                 try:
-                    # 1. Descargar datos para calcular indicadores
-                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
+                    # 1. Descargar datos para calcular indicadores (limit=450 para EMA-400)
+                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=450)
                     df_ee = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
                     # 2. Calcular indicadores
@@ -314,17 +341,17 @@ if __name__ == "__main__":
                 time.sleep(60); continue
 
             tickers = exchange.fetch_tickers()
-            top_100 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:100]]
+            top_50 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:50]]
 
-            for symbol in top_100:
+            for symbol in top_50:
                 if symbol in busy_symbols or len(busy_symbols) >= MAX_OPEN_POSITIONS: continue
                 if symbol in COOLDOWNS:
                     if time.time() < COOLDOWNS[symbol]: continue
                     else: del COOLDOWNS[symbol]
 
                 try:
-                    # Obtenemos 1H para la tendencia y 5m para el POC preciso
-                    ohlcv_1h = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
+                    # Obtenemos datos para la tendencia (limit=450 para EMA-400) y 5m para el POC preciso
+                    ohlcv_1h = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=450)
                     ohlcv_5m = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=288) # 24h = 288 velas de 5m
                     
                     df = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
