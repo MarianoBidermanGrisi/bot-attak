@@ -40,7 +40,7 @@ TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 TIMEFRAME          = '30m'
-EMA_MACRO          = 400# Filtro de tendencia diaria
+EMA_MACRO          = 200# Filtro de tendencia diaria
 HMA_SIGNAL         = 25 # Dirección inmediata (Optimizado)
 STC_FAST           = 23
 STC_SLOW           = 50
