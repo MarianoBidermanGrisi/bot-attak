@@ -42,15 +42,15 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 TIMEFRAME          = '30m'
 EMA_MACRO          = 300# Filtro de tendencia diaria
 HMA_SIGNAL         = 25 # Dirección inmediata (Optimizado)
-STC_FAST           = 23
-STC_SLOW           = 50
+STC_FAST           = 21
+STC_SLOW           = 45
 STC_CYCLE          = 10
-STC_UPPER          = 75  # Para Shorts
-STC_LOWER          = 25  # Para Longs
-BE_TRIGGER_PCT     = 0.014# BE al 2%
-TRAILING_DIST_PCT  = 0.019# Trail 2%
-MAX_OPEN_POSITIONS = 5
-RISK_PERCENT       = 0.07  # % riesgo
+STC_UPPER          = 65  # Para Shorts
+STC_LOWER          = 35  # Para Longs
+BE_TRIGGER_PCT     = 0.008# BE al 2%
+TRAILING_DIST_PCT  = 0.010# Trail 2%
+MAX_OPEN_POSITIONS = 4
+RISK_PERCENT       = 0.06  # % riesgo
 LEVERAGE           = 10.0
 
 # ==============================================================================
@@ -61,18 +61,18 @@ MAX_SL_DISTANCE_PCT = 0.03
 # Regla 3: Distancia mínima al Take Profit (en porcentaje del precio de entrada)
 MIN_TP_DISTANCE_PCT = 0.015
 # Adicional: Ratio Riesgo-Beneficio mínimo (opcional)
-MIN_RISK_REWARD_RATIO = 1.0
+MIN_RISK_REWARD_RATIO = 1.5
 
 # ==============================================================================
 # CONTROL DE FUNCIONALIDADES (INTERRUPTORES OPERACIONALES)
 # ==============================================================================
 # True  → El bot evalúa STC + HMA en cada ciclo y puede cerrar posiciones anticipadamente
 # False → Las posiciones solo se cierran por SL/TP o Trailing Stop (sin interferencia)
-ENABLE_EARLY_EXIT = True  # Cambiar a True para activar
+ENABLE_EARLY_EXIT = False  # Cambiar a True para activar
 # Tiempo máximo que una posición puede permanecer abierta antes de cierre forzoso
 # Con TIMEFRAME='15m': 4h=16 velas | 6h=24 velas | 8h=32 velas
 # Calibrar entre 4.0 y 8.0 según resultados observados
-MAX_POSITION_AGE_HOURS = 6.0
+MAX_POSITION_AGE_HOURS = 4.0
 
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
