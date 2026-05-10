@@ -47,8 +47,8 @@ STC_SLOW           = 45
 STC_CYCLE          = 10
 STC_UPPER          = 65  # Para Shorts
 STC_LOWER          = 35  # Para Longs
-BE_TRIGGER_PCT     = 0.010# BE al 2%
-TRAILING_DIST_PCT  = 0.012# Trail 2%
+BE_TRIGGER_PCT     = 0.015# BE al 2%
+TRAILING_DIST_PCT  = 0.019# Trail 2%
 MAX_OPEN_POSITIONS = 4
 RISK_PERCENT       = 0.07  # % riesgo
 LEVERAGE           = 10.0
@@ -72,7 +72,7 @@ ENABLE_EARLY_EXIT = True  # Cambiar a True para activar
 # Tiempo máximo que una posición puede permanecer abierta antes de cierre forzoso
 # Con TIMEFRAME='15m': 4h=16 velas | 6h=24 velas | 8h=32 velas
 # Calibrar entre 4.0 y 8.0 según resultados observados
-MAX_POSITION_AGE_HOURS = 12.0
+MAX_POSITION_AGE_HOURS = 24.0
 
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
@@ -341,9 +341,9 @@ if __name__ == "__main__":
                 time.sleep(60); continue
 
             tickers = exchange.fetch_tickers()
-            top_200 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:200]]
+            top_100 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:100]]
 
-            for symbol in top_200:
+            for symbol in top_100:
                 if symbol in busy_symbols or len(busy_symbols) >= MAX_OPEN_POSITIONS: continue
                 if symbol in COOLDOWNS:
                     if time.time() < COOLDOWNS[symbol]: continue
