@@ -40,15 +40,15 @@ TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 TIMEFRAME          = '1h'
-EMA_MACRO          = 200# Filtro de tendencia diaria
-HMA_SIGNAL         = 34 # Dirección inmediata (Optimizado)
-STC_FAST           = 23
-STC_SLOW           = 50
-STC_CYCLE          = 12
-STC_UPPER          = 70  # Para Shorts
-STC_LOWER          = 30  # Para Longs
-BE_TRIGGER_PCT     = 0.015# BE al 2%
-TRAILING_DIST_PCT  = 0.015# Trail 2%
+EMA_MACRO          = 250# Filtro de tendencia diaria
+HMA_SIGNAL         = 25 # Dirección inmediata (Optimizado)
+STC_FAST           = 20
+STC_SLOW           = 45
+STC_CYCLE          = 10
+STC_UPPER          = 65  # Para Shorts
+STC_LOWER          = 35  # Para Longs
+BE_TRIGGER_PCT     = 0.010# BE al 2%
+TRAILING_DIST_PCT  = 0.012# Trail 2%
 MAX_OPEN_POSITIONS = 4
 RISK_PERCENT       = 0.07  # % riesgo
 LEVERAGE           = 10.0
@@ -57,22 +57,22 @@ LEVERAGE           = 10.0
 # PARÁMETROS DE FILTRADO DE CALIDAD DE OPERACIÓN (CONFIGURABLE)
 # ==============================================================================
 # Regla 2: Distancia máxima al Stop Loss (en porcentaje del precio de entrada)
-MAX_SL_DISTANCE_PCT = 0.025
+MAX_SL_DISTANCE_PCT = 0.035
 # Regla 3: Distancia mínima al Take Profit (en porcentaje del precio de entrada)
-MIN_TP_DISTANCE_PCT = 0.025
+MIN_TP_DISTANCE_PCT = 0.020
 # Adicional: Ratio Riesgo-Beneficio mínimo (opcional)
-MIN_RISK_REWARD_RATIO = 2.5
+MIN_RISK_REWARD_RATIO = 1.8
 
 # ==============================================================================
 # CONTROL DE FUNCIONALIDADES (INTERRUPTORES OPERACIONALES)
 # ==============================================================================
 # True  → El bot evalúa STC + HMA en cada ciclo y puede cerrar posiciones anticipadamente
 # False → Las posiciones solo se cierran por SL/TP o Trailing Stop (sin interferencia)
-ENABLE_EARLY_EXIT = False  # Cambiar a True para activar
+ENABLE_EARLY_EXIT = True  # Cambiar a True para activar
 # Tiempo máximo que una posición puede permanecer abierta antes de cierre forzoso
 # Con TIMEFRAME='15m': 4h=16 velas | 6h=24 velas | 8h=32 velas
 # Calibrar entre 4.0 y 8.0 según resultados observados
-MAX_POSITION_AGE_HOURS = 8.0
+MAX_POSITION_AGE_HOURS = 12.0
 
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
@@ -259,14 +259,14 @@ def manage_escudo_pro():
                     # 3. Evaluación del Doble Check
                     if side == 'long':
                         # STC < 75 Y (Precio < HMA Y Pendiente Negativa)
-                        if current_stc < 75 and (mark < current_hma and current_hma < prev_hma):
+                        if current_stc < STC_UPPER and (mark < current_hma and current_hma < prev_hma):
                             close_position = True
-                            reason = f"STC ({current_stc:.1f} < 75) + HMA Negativa"
+                            reason = f"STC ({current_stc:.1f} < {STC_UPPER}) + HMA Negativa"
                     elif side == 'short':
                         # STC > 25 Y (Precio > HMA Y Pendiente Positiva)
-                        if current_stc > 25 and (mark > current_hma and current_hma > prev_hma):
+                        if current_stc > STC_LOWER and (mark > current_hma and current_hma > prev_hma):
                             close_position = True
-                            reason = f"STC ({current_stc:.1f} > 25) + HMA Positiva"
+                            reason = f"STC ({current_stc:.1f} > {STC_LOWER}) + HMA Positiva"
                             
                     # 4. Ejecución del Cierre
                     if close_position:
