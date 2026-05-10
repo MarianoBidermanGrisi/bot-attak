@@ -39,29 +39,29 @@ PASSPHRASE = os.environ.get('BITGET_PASSPHRASE')
 TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-TIMEFRAME          = '30m'
-EMA_MACRO          = 300# Filtro de tendencia diaria
-HMA_SIGNAL         = 25 # Dirección inmediata (Optimizado)
-STC_FAST           = 21
-STC_SLOW           = 45
-STC_CYCLE          = 10
-STC_UPPER          = 65  # Para Shorts
-STC_LOWER          = 35  # Para Longs
-BE_TRIGGER_PCT     = 0.008# BE al 2%
-TRAILING_DIST_PCT  = 0.010# Trail 2%
+TIMEFRAME          = '1h'
+EMA_MACRO          = 200# Filtro de tendencia diaria
+HMA_SIGNAL         = 34 # Dirección inmediata (Optimizado)
+STC_FAST           = 23
+STC_SLOW           = 50
+STC_CYCLE          = 12
+STC_UPPER          = 70  # Para Shorts
+STC_LOWER          = 30  # Para Longs
+BE_TRIGGER_PCT     = 0.015# BE al 2%
+TRAILING_DIST_PCT  = 0.015# Trail 2%
 MAX_OPEN_POSITIONS = 4
-RISK_PERCENT       = 0.06  # % riesgo
+RISK_PERCENT       = 0.07  # % riesgo
 LEVERAGE           = 10.0
 
 # ==============================================================================
 # PARÁMETROS DE FILTRADO DE CALIDAD DE OPERACIÓN (CONFIGURABLE)
 # ==============================================================================
 # Regla 2: Distancia máxima al Stop Loss (en porcentaje del precio de entrada)
-MAX_SL_DISTANCE_PCT = 0.03
+MAX_SL_DISTANCE_PCT = 0.025
 # Regla 3: Distancia mínima al Take Profit (en porcentaje del precio de entrada)
-MIN_TP_DISTANCE_PCT = 0.015
+MIN_TP_DISTANCE_PCT = 0.025
 # Adicional: Ratio Riesgo-Beneficio mínimo (opcional)
-MIN_RISK_REWARD_RATIO = 1.5
+MIN_RISK_REWARD_RATIO = 2.5
 
 # ==============================================================================
 # CONTROL DE FUNCIONALIDADES (INTERRUPTORES OPERACIONALES)
@@ -72,7 +72,7 @@ ENABLE_EARLY_EXIT = False  # Cambiar a True para activar
 # Tiempo máximo que una posición puede permanecer abierta antes de cierre forzoso
 # Con TIMEFRAME='15m': 4h=16 velas | 6h=24 velas | 8h=32 velas
 # Calibrar entre 4.0 y 8.0 según resultados observados
-MAX_POSITION_AGE_HOURS = 4.0
+MAX_POSITION_AGE_HOURS = 8.0
 
 # ==========================================================
 # 3. FUNCIONES AUXILIARES
@@ -341,9 +341,9 @@ if __name__ == "__main__":
                 time.sleep(60); continue
 
             tickers = exchange.fetch_tickers()
-            top_150 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:150]]
+            top_200 = [p[0] for p in sorted([(s, float(t.get('quoteVolume', 0))) for s, t in tickers.items() if s.endswith('/USDT:USDT')], key=lambda x: x[1], reverse=True)[:200]]
 
-            for symbol in top_150:
+            for symbol in top_200:
                 if symbol in busy_symbols or len(busy_symbols) >= MAX_OPEN_POSITIONS: continue
                 if symbol in COOLDOWNS:
                     if time.time() < COOLDOWNS[symbol]: continue
