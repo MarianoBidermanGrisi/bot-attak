@@ -125,8 +125,8 @@ def run_bot():
         logger.info(f"Iniciando {script_path} en background...")
         try:
             # Ejecutamos el bot en un proceso hijo. 
-            # Omitimos stdout/stderr explícitos para heredar los de Flask/Render correctamente.
-            BOT_PROCESS = subprocess.Popen([sys.executable, script_path], cwd=os.path.dirname(script_path))
+            # Agregamos -u para desactivar buffering y ver logs en tiempo real en Render.
+            BOT_PROCESS = subprocess.Popen([sys.executable, "-u", script_path], cwd=os.path.dirname(script_path))
             BOT_STARTED_AT = time.time()
             
             # Esperamos a que el proceso termine
@@ -136,7 +136,7 @@ def run_bot():
             logger.error(f"Error al intentar ejecutar el bot: {e}")
         finally:
             BOT_PROCESS = None
-             
+            
         time.sleep(10)
 
 # Iniciar el hilo del bot automáticamente (compatible con Gunicorn en Render)
