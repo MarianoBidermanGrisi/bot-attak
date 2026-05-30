@@ -32,8 +32,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_logged_bar_closes: dict[str, float] = {}
-
 
 class _ConsoleFilter(logging.Filter):
     """Solo muestra en consola: orden limit, posicion abierta, cierre, BE/trailing."""
@@ -434,33 +432,8 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             signals_found += 1
             side = "long" if bool(last_closed["Master_Buy"]) else "short"
 
-            close_key = round(last_closed["close"], 6)
-            is_new_bar = _logged_bar_closes.get(symbol) != close_key
-            if is_new_bar:
-                _logged_bar_closes[symbol] = close_key
-                log.info("--- INDICATORS [%s] %s ---", symbol, side.upper())
-                log.info("  Price: close=%.6f | VMA=%.6f | ST_dir=%s | MACD=%.6f | MACD_sig=%.6f",
-                         last_closed["close"], last_closed["VMA"], last_closed["ST_dir"],
-                         last_closed["MACD"], last_closed["MACD_sig"])
-                log.info("  ZLEMA=%.6f | ZL_Upper=%.6f | ZL_Lower=%.6f | zl_trend_state=%s",
-                         last_closed["ZLEMA"], last_closed["ZL_Upper"], last_closed["ZL_Lower"],
-                         last_closed.get("zl_trend_state", "N/A"))
-                log.info("  Two_P=%.6f | Two_PP=%.6f | ATR14=%.6f | Vol_Anomaly=%s",
-                         last_closed["Two_P"], last_closed["Two_PP"], last_closed["ATR14"],
-                         bool(last_closed["Vol_Anomaly"]))
-                log.info("  st_buy=%s st_sell=%s | zl_buy=%s zl_sell=%s | tp_buy=%s tp_sell=%s",
-                         bool(last_closed["st_buy"]), bool(last_closed["st_sell"]),
-                         bool(last_closed["zl_buy"]), bool(last_closed["zl_sell"]),
-                         bool(last_closed["tp_buy"]), bool(last_closed["tp_sell"]))
-                log.info("  Master_Buy=%s | Master_Sell=%s | Signal_Trigger=%s",
-                         bool(last_closed["Master_Buy"]), bool(last_closed["Master_Sell"]),
-                         last_closed["Signal_Trigger"])
-                log.info("  => SIGNAL DETECTED: Trigger: %s", last_closed["Signal_Trigger"])
-
             ticker = exchange.fetch_ticker(symbol)
             live_price = float(ticker["last"])
-            if is_new_bar:
-                log.info("  Live price: %.6f (vs signal bar close: %.6f)", live_price, last_closed["close"])
 
             market = exchange.market(symbol)
             min_amount = float(((market.get("limits") or {}).get("amount") or {}).get("min") or 1e-8)
@@ -473,6 +446,26 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             if order_qty <= 0:
                 log.info("  => TRADE REJECTED: %s | amount_to_precision rounded qty to zero (raw=%.8f)", symbol, plan.qty)
                 continue
+
+            log.info("--- INDICATORS [%s] %s ---", symbol, side.upper())
+            log.info("  Price: close=%.6f | VMA=%.6f | ST_dir=%s | MACD=%.6f | MACD_sig=%.6f",
+                     last_closed["close"], last_closed["VMA"], last_closed["ST_dir"],
+                     last_closed["MACD"], last_closed["MACD_sig"])
+            log.info("  ZLEMA=%.6f | ZL_Upper=%.6f | ZL_Lower=%.6f | zl_trend_state=%s",
+                     last_closed["ZLEMA"], last_closed["ZL_Upper"], last_closed["ZL_Lower"],
+                     last_closed.get("zl_trend_state", "N/A"))
+            log.info("  Two_P=%.6f | Two_PP=%.6f | ATR14=%.6f | Vol_Anomaly=%s",
+                     last_closed["Two_P"], last_closed["Two_PP"], last_closed["ATR14"],
+                     bool(last_closed["Vol_Anomaly"]))
+            log.info("  st_buy=%s st_sell=%s | zl_buy=%s zl_sell=%s | tp_buy=%s tp_sell=%s",
+                     bool(last_closed["st_buy"]), bool(last_closed["st_sell"]),
+                     bool(last_closed["zl_buy"]), bool(last_closed["zl_sell"]),
+                     bool(last_closed["tp_buy"]), bool(last_closed["tp_sell"]))
+            log.info("  Master_Buy=%s | Master_Sell=%s | Signal_Trigger=%s",
+                     bool(last_closed["Master_Buy"]), bool(last_closed["Master_Sell"]),
+                     last_closed["Signal_Trigger"])
+            log.info("  => SIGNAL DETECTED: Trigger: %s", last_closed["Signal_Trigger"])
+            log.info("  Live price: %.6f (vs signal bar close: %.6f)", live_price, last_closed["close"])
 
             # --- Log trade plan details ---
             log.info("  => TRADE PLAN ACCEPTED: %s %s", symbol, side.upper())
