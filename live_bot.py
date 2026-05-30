@@ -33,6 +33,35 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+class _ConsoleFilter(logging.Filter):
+    """Solo muestra en consola: orden limit, posicion abierta, cierre, BE/trailing."""
+    def filter(self, record):
+        msg = record.getMessage()
+        skip = (
+            ">>> CYCLE", "<<< CYCLE",
+            "SCAN CYCLE", "SCAN SKIP", "SCAN STOP",
+            "--- OPEN ORDERS",
+            "insufficient data",
+            "NO SIGNAL for",
+            "Another bot instance owns the lock",
+            "Order still within expiry window",
+            "Skipped: not a",
+            "POSITION MANAGEMENT",
+            "--- POSITION [",
+            "| Mark:",
+            "  Indicators:",
+            "  Cond:",
+            "CLEANUP:",
+            "=====", "-----",
+        )
+        return not any(p in msg for p in skip)
+
+
+for _h in logging.root.handlers:
+    if isinstance(_h, logging.StreamHandler):
+        _h.addFilter(_ConsoleFilter())
+
+
 def send_telegram(msg: str) -> None:
     token = os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -257,6 +286,15 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             log.warning("Indicator fetch failed %s: %s", symbol, exc)
             atr = 0.0
             live = None
+
+        if current.get("peak_price") is None:
+            log.info("  => POSITION OPENED: %s | side=%s | entry=%.6f | contracts=%.8f | mark=%.6f | age=%.2fh | PnL=%+.4f%%",
+                     symbol, side, entry, contracts, mark, age_h, profit_pct * 100)
+            if live is not None:
+                log.info("     [i] close=%.6f | ZLEMA=%.6f | Two_P=%.6f | Two_PP=%.6f | ATR=%.6f",
+                         live["close"], live["ZLEMA"], live["Two_P"], live["Two_PP"], atr)
+                log.info("     [c] close>ZLEMA=%s | Two_P>Two_PP=%s",
+                         bool(live["close"] > live["ZLEMA"]), bool(live["Two_P"] > live["Two_PP"]))
 
         # --- Early exit check ---
         if cfg.enable_early_exit and live is not None and profit_pct < -0.005:
