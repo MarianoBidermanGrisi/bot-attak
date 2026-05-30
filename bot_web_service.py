@@ -16,6 +16,9 @@ import subprocess
 import requests
 from flask import Flask, request, jsonify
 
+# Silenciar logs de health checks de Render (GET / y /health cada 5s)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 # Configuración de Logging
 logging.basicConfig(
     level=logging.INFO,
