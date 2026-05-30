@@ -37,6 +37,8 @@ class _ConsoleFilter(logging.Filter):
     """Solo muestra en consola: orden limit, posicion abierta, cierre, BE/trailing."""
     def filter(self, record):
         msg = record.getMessage()
+        if not msg:
+            return False
         skip = (
             ">>> CYCLE", "<<< CYCLE",
             "SCAN CYCLE", "SCAN SKIP", "SCAN STOP",
@@ -53,6 +55,10 @@ class _ConsoleFilter(logging.Filter):
             "  Cond:",
             "CLEANUP:",
             "=====", "-----",
+            "  Order:",
+            "BE check:",
+            "Bot limit order",
+            "TRADE REJECTED",
         )
         return not any(p in msg for p in skip)
 
