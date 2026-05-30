@@ -419,8 +419,12 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             last_closed = df.iloc[-2]
             last_row = df.iloc[-1]
 
-            # --- Log indicator values for evaluation ---
-            log.info("--- INDICATORS [%s] ---", symbol)
+            if not bool(last_closed["Master_Buy"]) and not bool(last_closed["Master_Sell"]):
+                continue
+
+            signals_found += 1
+            side = "long" if bool(last_closed["Master_Buy"]) else "short"
+            log.info("--- INDICATORS [%s] %s ---", symbol, side.upper())
             log.info("  Price: close=%.6f | VMA=%.6f | ST_dir=%s | MACD=%.6f | MACD_sig=%.6f",
                      last_closed["close"], last_closed["VMA"], last_closed["ST_dir"],
                      last_closed["MACD"], last_closed["MACD_sig"])
@@ -437,15 +441,7 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             log.info("  Master_Buy=%s | Master_Sell=%s | Signal_Trigger=%s",
                      bool(last_closed["Master_Buy"]), bool(last_closed["Master_Sell"]),
                      last_closed["Signal_Trigger"])
-
-            if not bool(last_closed["Master_Buy"]) and not bool(last_closed["Master_Sell"]):
-                log.info("  => NO SIGNAL for %s", symbol)
-                continue
-
-            signals_found += 1
-            side = "long" if bool(last_closed["Master_Buy"]) else "short"
-            log.info("  => SIGNAL DETECTED: %s %s | Trigger: %s",
-                     symbol, side.upper(), last_closed["Signal_Trigger"])
+            log.info("  => SIGNAL DETECTED: Trigger: %s", last_closed["Signal_Trigger"])
 
             ticker = exchange.fetch_ticker(symbol)
             live_price = float(ticker["last"])
