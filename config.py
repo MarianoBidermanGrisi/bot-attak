@@ -25,13 +25,13 @@ class BotConfig:
 
     enable_early_exit: bool = True
     max_position_age_hours: float = 6.0
-    limit_discount_pct: float = 0.01
+    limit_discount_pct: float = 0.02
     limit_order_expiry_minutes: int = 30
     use_volume_filter: bool = os.environ.get("BOT_USE_VOLUME_FILTER", "true").lower() in {"1", "true", "yes", "on"}
 
     max_sl_distance_pct: float = 0.035
     min_tp_distance_pct: float = 0.020
-    min_risk_reward_ratio: float = 1.8
+    min_risk_reward_ratio: float = 2.0
 
     diy_st_length: int = 10
     diy_st_mult: float = 3.0
