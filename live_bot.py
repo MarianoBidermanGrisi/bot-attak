@@ -61,6 +61,12 @@ class _ConsoleFilter(logging.Filter):
             "BE/Trail check skipped",
             "Bot limit order",
             "TRADE REJECTED",
+            "  Trailing:",
+            "    peak=",
+            "    trail_dist=",
+            "    moved=",
+            "    new_trail_sl=",
+            "    last_trail_sl=",
         )
         return not any(p in msg for p in skip)
 
