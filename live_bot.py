@@ -232,12 +232,24 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
         if symbol in active_syms:
             continue
         last_pnl = saved.get("last_known_pnl")
-        won_or_protected = saved.get("status") == "be" or (last_pnl is not None and float(last_pnl) > 0)
+        entry_price = saved.get("entry_price")
+        side = saved.get("side")
+        open_ms = saved.get("open_time") or 0
+        age_h = (time.time() - open_ms / 1000) / 3600 if open_ms else 0
+        status = saved.get("status")
+        won_or_protected = status == "be" or (last_pnl is not None and float(last_pnl) > 0)
         cooldown = 3600 if won_or_protected else 14400
         state.set_cooldown(symbol, cooldown)
         state.clear_runtime_state(symbol)
-        log.info("CLEANUP: %s no longer active | last_pnl=%s | status=%s | cooldown=%ds",
-                 symbol, last_pnl, saved.get("status"), cooldown)
+
+        pnl_str = f"{float(last_pnl) * 100:.4f}%" if last_pnl is not None else "N/A"
+        entry_str = f"{float(entry_price):.6f}" if entry_price else "N/A"
+        side_str = side.upper() if side else "N/A"
+        reason = "stop loss" if won_or_protected is False and last_pnl is not None and float(last_pnl) < -0.01 else \
+                 "take profit" if last_pnl is not None and float(last_pnl) > 0.02 else \
+                 "manual/external"
+        log.info("  => POSITION CLOSED: %s | side=%s | entry=%s | PnL=%s | status=%s | age=%.2fh | reason=%s",
+                 symbol, side_str, entry_str, pnl_str, status or "N/A", age_h, reason)
 
     # --- Manage each active position ---
     for pos in positions:
@@ -256,10 +268,11 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             peak = mark
         peak = max(float(peak), mark) if side == "long" else min(float(peak), mark)
         preserved_status = current.get("status") if current.get("status") in {"open", "be"} else "open"
-        state.upsert_symbol_state(symbol, peak_price=peak, last_known_pnl=profit_pct, status=preserved_status)
 
         open_ms = float(pos.get("timestamp") or (pos.get("info") or {}).get("cTime") or 0)
         age_h = (time.time() - open_ms / 1000) / 3600 if open_ms else 0
+        state.upsert_symbol_state(symbol, peak_price=peak, last_known_pnl=profit_pct, status=preserved_status,
+                                  entry_price=entry, side=side, open_time=open_ms)
 
         log.info("--- POSITION [%s] %s ---", symbol, side.upper())
         log.info("  Entry: %.6f | Mark: %.6f | PnL: %+.4f%% | Peak: %.6f | Age: %.2fh",
@@ -270,6 +283,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             log.info("  => MAX AGE TRIGGERED: age=%.2fh >= %.2fh | closing...", age_h, cfg.max_position_age_hours)
             if close_position(exchange, cfg, symbol, side, "max_age"):
                 state.set_cooldown(symbol, 14400)
+                state.clear_runtime_state(symbol)
                 log.info("  => CLOSED by max age | Symbol=%s | PnL=%+.4f%%", symbol, profit_pct * 100)
                 send_telegram(f"*{symbol} closed by max age* PnL: {profit_pct * 100:.2f}%")
             else:
@@ -319,6 +333,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                              live["Two_P"], live["Two_PP"], bool(live["Two_P"] > live["Two_PP"]))
                 if close_position(exchange, cfg, symbol, side, "early_exit"):
                     state.set_cooldown(symbol, 14400)
+                    state.clear_runtime_state(symbol)
                     log.info("  => CLOSED by early exit | %s | PnL=%+.4f%%", symbol, profit_pct * 100)
                 continue
             else:
