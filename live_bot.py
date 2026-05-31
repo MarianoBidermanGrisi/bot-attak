@@ -14,13 +14,13 @@ try:
     from .config import BotConfig, validate_live_env
     from .indicators import calc_two_pole, calc_zlema, calculate_all_indicators
     from .risk import build_trade_plan
-    from .signals import generate_signals
+    from .signals import build_signal_options, generate_signals
     from .state import StateStore
 except ImportError:
     from config import BotConfig, validate_live_env
     from indicators import calc_two_pole, calc_zlema, calculate_all_indicators
     from risk import build_trade_plan
-    from signals import generate_signals
+    from signals import build_signal_options, generate_signals
     from state import StateStore
 
 
@@ -422,7 +422,8 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             if len(df) < 300:
                 log.debug("SKIP %s: insufficient data (%d bars)", symbol, len(df))
                 continue
-            df = generate_signals(calculate_all_indicators(df, cfg), cfg)
+            opts = build_signal_options(use_volume=cfg.use_volume_filter)
+            df = generate_signals(calculate_all_indicators(df, cfg), cfg, options=opts)
             last_closed = df.iloc[-2]
             last_row = df.iloc[-1]
 
@@ -457,14 +458,12 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             log.info("  Two_P=%.6f | Two_PP=%.6f | ATR14=%.6f | Vol_Anomaly=%s",
                      last_closed["Two_P"], last_closed["Two_PP"], last_closed["ATR14"],
                      bool(last_closed["Vol_Anomaly"]))
-            log.info("  st_buy=%s st_sell=%s | zl_buy=%s zl_sell=%s | tp_buy=%s tp_sell=%s",
-                     bool(last_closed["st_buy"]), bool(last_closed["st_sell"]),
-                     bool(last_closed["zl_buy"]), bool(last_closed["zl_sell"]),
-                     bool(last_closed["tp_buy"]), bool(last_closed["tp_sell"]))
-            log.info("  Master_Buy=%s | Master_Sell=%s | Signal_Trigger=%s",
+            log.info("  => SIGNAL DETECTED: Trigger=%s | st_buy=%s zl_buy=%s tp_buy=%s st_sell=%s zl_sell=%s tp_sell=%s | Master_Buy=%s Master_Sell=%s | Vol_Anomaly=%s",
+                     last_closed["Signal_Trigger"],
+                     bool(last_closed["st_buy"]), bool(last_closed["zl_buy"]), bool(last_closed["tp_buy"]),
+                     bool(last_closed["st_sell"]), bool(last_closed["zl_sell"]), bool(last_closed["tp_sell"]),
                      bool(last_closed["Master_Buy"]), bool(last_closed["Master_Sell"]),
-                     last_closed["Signal_Trigger"])
-            log.info("  => SIGNAL DETECTED: Trigger: %s", last_closed["Signal_Trigger"])
+                     bool(last_closed["Vol_Anomaly"]))
             log.info("  Live price: %.6f (vs signal bar close: %.6f)", live_price, last_closed["close"])
 
             # --- Log trade plan details ---
