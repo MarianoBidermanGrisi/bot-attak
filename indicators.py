@@ -85,5 +85,5 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
     out["ZLEMA"], out["ZL_Upper"], out["ZL_Lower"] = calc_zl_bands(out, cfg.zl_length, cfg.zl_mult)
     out["Two_P"], out["Two_PP"] = calc_two_pole(close, cfg.tp_filter_len)
     out["ATR14"] = ta.atr(out["high"], out["low"], out["close"], length=14)
-    out["Vol_Anomaly"] = out["volume"] > out["volume"].rolling(50).quantile(0.80)
+    out["Vol_Anomaly"] = out["volume"].rolling(3).mean() > out["volume"].rolling(20).mean()
     return out.dropna().copy()
