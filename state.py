@@ -44,10 +44,18 @@ class StateStore:
                     cooldown_until REAL DEFAULT 0,
                     last_known_pnl REAL,
                     status TEXT,
+                    entry_price REAL,
+                    side TEXT,
+                    open_time REAL,
                     updated_at REAL NOT NULL
                 )
                 """
             )
+            for col in ("entry_price REAL", "side TEXT", "open_time REAL"):
+                try:
+                    conn.execute(f"ALTER TABLE symbol_state ADD COLUMN {col}")
+                except sqlite3.OperationalError:
+                    pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bot_orders (
@@ -93,19 +101,25 @@ class StateStore:
             "cooldown_until": current.get("cooldown_until", 0),
             "last_known_pnl": current.get("last_known_pnl"),
             "status": current.get("status"),
+            "entry_price": current.get("entry_price"),
+            "side": current.get("side"),
+            "open_time": current.get("open_time"),
         }
         merged.update(values)
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO symbol_state(symbol, peak_price, last_trail_sl, cooldown_until, last_known_pnl, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO symbol_state(symbol, peak_price, last_trail_sl, cooldown_until, last_known_pnl, status, entry_price, side, open_time, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     peak_price=excluded.peak_price,
                     last_trail_sl=excluded.last_trail_sl,
                     cooldown_until=excluded.cooldown_until,
                     last_known_pnl=excluded.last_known_pnl,
                     status=excluded.status,
+                    entry_price=excluded.entry_price,
+                    side=excluded.side,
+                    open_time=excluded.open_time,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -115,6 +129,9 @@ class StateStore:
                     merged["cooldown_until"],
                     merged["last_known_pnl"],
                     merged["status"],
+                    merged["entry_price"],
+                    merged["side"],
+                    merged["open_time"],
                     time.time(),
                 ),
             )
@@ -122,7 +139,7 @@ class StateStore:
     def clear_runtime_state(self, symbol: str) -> None:
         with self._conn() as conn:
             conn.execute(
-                "UPDATE symbol_state SET peak_price = NULL, last_trail_sl = NULL, last_known_pnl = NULL, status = NULL, updated_at = ? WHERE symbol = ?",
+                "UPDATE symbol_state SET peak_price = NULL, last_trail_sl = NULL, last_known_pnl = NULL, status = NULL, entry_price = NULL, side = NULL, open_time = NULL, updated_at = ? WHERE symbol = ?",
                 (time.time(), symbol),
             )
 
