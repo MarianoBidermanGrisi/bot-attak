@@ -27,6 +27,7 @@ class BotConfig:
     max_position_age_hours: float = 6.0
     limit_discount_pct: float = 0.01
     limit_order_expiry_minutes: int = 30
+    use_volume_filter: bool = os.environ.get("BOT_USE_VOLUME_FILTER", "true").lower() in {"1", "true", "yes", "on"}
 
     max_sl_distance_pct: float = 0.035
     min_tp_distance_pct: float = 0.020
