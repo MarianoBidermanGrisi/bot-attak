@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -161,6 +162,37 @@ def close_position(exchange, cfg: BotConfig, symbol: str, side: str, reason: str
         return False
 
 
+def fetch_realized_pnl(exchange, symbol: str, since_timestamp: float) -> float | None:
+    """Fetch actual realized PnL (in USDT) from Bitget position history."""
+    try:
+        sym_clean = clean_bitget_symbol(symbol)
+        since_ms = int(since_timestamp * 1000)
+        response = exchange.private_mix_get_v2_mix_position_history_position({
+            "symbol": sym_clean,
+            "productType": "USDT-FUTURES",
+            "marginCoin": "USDT",
+            "startTime": str(since_ms),
+            "limit": "10",
+        })
+        data = []
+        if isinstance(response, dict):
+            resp_data = response.get("data")
+            if isinstance(resp_data, list):
+                data = resp_data
+            elif isinstance(resp_data, dict):
+                data = resp_data.get("resultList", [])
+        elif isinstance(response, list):
+            data = response
+        if data:
+            total_pnl = sum(float(pos.get("totalPnl", 0)) for pos in data)
+            if total_pnl != 0:
+                log.info("  Realized PnL from exchange: %.6f USDT (%s)", total_pnl, symbol)
+                return total_pnl
+    except Exception as exc:
+        log.warning("  fetch_realized_pnl failed for %s: %s", symbol, exc)
+    return None
+
+
 def manage_open_orders(exchange, cfg: BotConfig, state: StateStore) -> set[str]:
     busy = set()
     try:
@@ -195,7 +227,9 @@ def manage_open_orders(exchange, cfg: BotConfig, state: StateStore) -> set[str]:
         log.info("    Bot limit order age=%.1fm (expiry=%dmin)", age_min, cfg.limit_order_expiry_minutes)
 
         if age_min >= cfg.limit_order_expiry_minutes:
-            log.info("    => CANCELLING expired order: %s | age=%.1fm | clientOid=%s", symbol, age_min, client_id)
+            had_partial_fill = float(order_filled) > 0
+            log.info("    => CANCELLING expired order: %s | age=%.1fm | clientOid=%s | filled=%.4f",
+                     symbol, age_min, client_id, float(order_filled))
             if cfg.dry_run:
                 log.info("    [DRY RUN] cancel skipped")
             else:
@@ -205,6 +239,8 @@ def manage_open_orders(exchange, cfg: BotConfig, state: StateStore) -> set[str]:
                 except Exception as exc:
                     log.error("    => CANCEL FAILED: %s | id=%s | error=%s", symbol, order["id"], exc)
             state.update_order_status(client_id, "cancelled")
+            if had_partial_fill:
+                log.info("    => Partial fill detected (filled=%.4f). Position will be picked up by monitor.", float(order_filled))
         else:
             log.debug("    Order still within expiry window")
 
@@ -234,22 +270,42 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
         last_pnl = saved.get("last_known_pnl")
         entry_price = saved.get("entry_price")
         side = saved.get("side")
+        saved_qty = saved.get("qty")
         open_ms = saved.get("open_time") or 0
         age_h = (time.time() - open_ms / 1000) / 3600 if open_ms else 0
         status = saved.get("status")
-        won_or_protected = status == "be" or (last_pnl is not None and float(last_pnl) > 0)
+
+        # Fetch actual realized PnL from exchange
+        actual_abs_pnl = fetch_realized_pnl(exchange, symbol, open_ms / 1000) if open_ms else None
+        if actual_abs_pnl is not None and entry_price and saved_qty:
+            notional = float(saved_qty) * float(entry_price)
+            actual_pnl_pct = actual_abs_pnl / notional if notional > 0 else (last_pnl or 0)
+            log.info("  Real PnL fetched: %.6f USDT (%.4f%%) vs stored: %s",
+                     actual_abs_pnl, actual_pnl_pct * 100, 
+                     f"{float(last_pnl) * 100:.4f}%" if last_pnl is not None else "N/A")
+            final_pnl = actual_pnl_pct
+            final_pnl_usdt = actual_abs_pnl
+        else:
+            final_pnl = last_pnl
+            final_pnl_usdt = None
+
+        won_or_protected = status == "be" or (final_pnl is not None and float(final_pnl) > 0)
         cooldown = 3600 if won_or_protected else 14400
         state.set_cooldown(symbol, cooldown)
         state.clear_runtime_state(symbol)
 
-        pnl_str = f"{float(last_pnl) * 100:.4f}%" if last_pnl is not None else "N/A"
+        pnl_str = f"{float(final_pnl) * 100:.4f}%" if final_pnl is not None else "N/A"
         entry_str = f"{float(entry_price):.6f}" if entry_price else "N/A"
         side_str = side.upper() if side else "N/A"
-        reason = "stop loss" if won_or_protected is False and last_pnl is not None and float(last_pnl) < -0.01 else \
-                 "take profit" if last_pnl is not None and float(last_pnl) > 0.02 else \
+        reason = "stop loss" if won_or_protected is False and final_pnl is not None and float(final_pnl) < -0.01 else \
+                 "take profit" if final_pnl is not None and float(final_pnl) > 0.02 else \
                  "manual/external"
-        log.info("  => POSITION CLOSED: %s | side=%s | entry=%s | PnL=%s | status=%s | age=%.2fh | reason=%s",
-                 symbol, side_str, entry_str, pnl_str, status or "N/A", age_h, reason)
+        log.info("  => POSITION CLOSED: %s | side=%s | entry=%s | PnL=%s", symbol, side_str, entry_str, pnl_str)
+        if final_pnl_usdt is not None:
+            log.info("     Realized PnL: %.6f USDT | status=%s | age=%.2fh | reason=%s",
+                     final_pnl_usdt, status or "N/A", age_h, reason)
+        else:
+            log.info("     status=%s | age=%.2fh | reason=%s", status or "N/A", age_h, reason)
 
     # --- Manage each active position ---
     for pos in positions:
@@ -311,11 +367,17 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
         if current.get("peak_price") is None:
             log.info("  => POSITION OPENED: %s | side=%s | entry=%.6f | contracts=%.8f | mark=%.6f | age=%.2fh | PnL=%+.4f%%",
                      symbol, side, entry, contracts, mark, age_h, profit_pct * 100)
+            state.upsert_symbol_state(symbol, qty=contracts)
             if live is not None:
                 log.info("     [i] close=%.6f | ZLEMA=%.6f | Two_P=%.6f | Two_PP=%.6f | ATR=%.6f",
                          live["close"], live["ZLEMA"], live["Two_P"], live["Two_PP"], atr)
                 log.info("     [c] close>ZLEMA=%s | Two_P>Two_PP=%s",
                          bool(live["close"] > live["ZLEMA"]), bool(live["Two_P"] > live["Two_PP"]))
+            # Immediately set stop-loss at exchange level (redundant with preset, but ensures it's active)
+            if atr > 0:
+                sl_price = entry - atr * 1.5 if side == "long" else entry + atr * 1.5
+                update_stop_loss(exchange, cfg, symbol, side, sl_price)
+                log.info("  => POST-OPEN SL SET: %s | side=%s | sl=%.6f", symbol, side, sl_price)
 
         # --- Early exit check ---
         if cfg.enable_early_exit and live is not None and profit_pct < -0.005:
@@ -431,6 +493,7 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             continue
 
         symbols_scanned += 1
+        time.sleep(0.3)  # Rate limiting: avoid 429 Too Many Requests
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe=cfg.timeframe, limit=500)
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -531,6 +594,46 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
     log.info("-" * 70)
 
 
+class PositionMonitor:
+    """Monitors open positions every 5 seconds in a background thread."""
+
+    def __init__(self, exchange, cfg: BotConfig, state: StateStore):
+        self.exchange = exchange
+        self.cfg = cfg
+        self.state = state
+        self.active_symbols: set[str] = set()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def busy(self) -> set[str]:
+        with self._lock:
+            return set(self.active_symbols)
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True, name="PositionMonitor")
+        self._thread.start()
+        log.info("PositionMonitor thread started (interval=5s)")
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                active = manage_open_positions(self.exchange, self.cfg, self.state)
+                with self._lock:
+                    self.active_symbols = active
+            except Exception as exc:
+                log.error("PositionMonitor error: %s", exc, exc_info=True)
+            self._stop.wait(5)
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+
 def main() -> None:
     cfg = BotConfig()
     state = StateStore(cfg.state_db_path)
@@ -551,8 +654,13 @@ def main() -> None:
              cfg.enable_early_exit, cfg.max_position_age_hours, cfg.limit_discount_pct * 100)
     log.info("#  Risk per trade: %.2f%% | Min margin: %.2f USDT | Max margin frac: %.2f%%",
              cfg.risk_per_trade * 100, cfg.min_margin_usdt, cfg.max_margin_fraction * 100)
+    log.info("#  Real-time monitoring: ENABLED (5s interval)")
     log.info("#")
     log.info("#" * 70)
+
+    # Start real-time position monitor thread
+    monitor = PositionMonitor(exchange, cfg, state)
+    monitor.start()
 
     while True:
         cycle_num += 1
@@ -570,7 +678,8 @@ def main() -> None:
             log.info("")
             log.info(">>> CYCLE %d START <<<  %s", cycle_num, now.strftime("%Y-%m-%d %H:%M:%S"))
 
-            busy = manage_open_positions(exchange, cfg, state)
+            # Orders and scanning run every ~60s (positions handled by monitor thread)
+            busy = monitor.busy
             busy.update(manage_open_orders(exchange, cfg, state))
             scan_and_place(exchange, cfg, state, busy)
 
