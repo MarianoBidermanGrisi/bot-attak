@@ -295,6 +295,27 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             final_pnl = last_pnl
             final_pnl_usdt = None
 
+        # Compute exit price from realized PnL
+        exit_price = None
+        if final_pnl_usdt is not None and saved_qty and entry_price:
+            entry_f = float(entry_price)
+            saved_qty_f = float(saved_qty)
+            exit_price = entry_f + final_pnl_usdt / saved_qty_f if side == "long" else entry_f - final_pnl_usdt / saved_qty_f
+
+        # Peak and give-back info
+        peak_price = saved.get("peak_price")
+        give_back_str = ""
+        if peak_price and entry_price and final_pnl is not None and side:
+            entry_f = float(entry_price)
+            peak_f = float(peak_price)
+            profit_at_peak = (peak_f - entry_f) / entry_f if side == "long" else (entry_f - peak_f) / entry_f
+            given_back = (profit_at_peak - float(final_pnl)) * 100
+            give_back_str = f" | peak={peak_f:.6f} | give_back={given_back:.2f}%"
+
+        # Final active SL
+        final_sl = saved.get("last_trail_sl")
+        sl_str = f" | final_sl={float(final_sl):.6f}" if final_sl else ""
+
         won_or_protected = status == "be" or (final_pnl is not None and float(final_pnl) > 0)
         cooldown = 3600 if won_or_protected else 14400
         state.set_cooldown(symbol, cooldown)
@@ -307,11 +328,13 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                  "take profit" if final_pnl is not None and float(final_pnl) > 0.02 else \
                  "manual/external"
         log.info("  => POSITION CLOSED: %s | side=%s | entry=%s | PnL=%s", symbol, side_str, entry_str, pnl_str)
+        details = f"status={status or 'N/A'} | age={age_h:.2f}h | reason={reason}"
+        if exit_price is not None:
+            details += f" | exit={exit_price:.6f}"
         if final_pnl_usdt is not None:
-            log.info("     Realized PnL: %.6f USDT | status=%s | age=%.2fh | reason=%s",
-                     final_pnl_usdt, status or "N/A", age_h, reason)
-        else:
-            log.info("     status=%s | age=%.2fh | reason=%s", status or "N/A", age_h, reason)
+            details += f" | usdt={final_pnl_usdt:.6f}"
+        details += give_back_str + sl_str
+        log.info("     %s", details)
 
     # --- Manage each active position ---
     for pos in positions:
@@ -371,14 +394,28 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             live = None
 
         if current.get("peak_price") is None:
-            log.info("  => POSITION OPENED: %s | side=%s | entry=%.6f | contracts=%.8f | mark=%.6f | age=%.2fh | PnL=%+.4f%%",
-                     symbol, side, entry, contracts, mark, age_h, profit_pct * 100)
+            trigger_str = current.get("trigger") or "N/A"
+            log.info("  => POSITION OPENED: %s | side=%s | entry=%.6f | contracts=%.8f | mark=%.6f | age=%.2fh | PnL=%+.4f%% | trigger=%s",
+                     symbol, side, entry, contracts, mark, age_h, profit_pct * 100, trigger_str)
             state.upsert_symbol_state(symbol, qty=contracts)
             if live is not None:
                 log.info("     [i] close=%.6f | ZLEMA=%.6f | Two_P=%.6f | Two_PP=%.6f | ATR=%.6f",
                          live["close"], live["ZLEMA"], live["Two_P"], live["Two_PP"], atr)
                 log.info("     [c] close>ZLEMA=%s | Two_P>Two_PP=%s",
                          bool(live["close"] > live["ZLEMA"]), bool(live["Two_P"] > live["Two_PP"]))
+            planned_sl = current.get("planned_sl")
+            planned_tp = current.get("planned_tp")
+            entry_risk = current.get("entry_risk_usdt")
+            if planned_sl and planned_tp:
+                if side == "long":
+                    entry_rr = (float(planned_tp) - entry) / (entry - float(planned_sl)) if entry != float(planned_sl) else 0
+                else:
+                    entry_rr = (entry - float(planned_tp)) / (float(planned_sl) - entry) if float(planned_sl) != entry else 0
+                sl_dist = abs(entry - float(planned_sl)) / entry * 100
+                tp_dist = abs(float(planned_tp) - entry) / entry * 100
+                risk_str = f" | risk_usdt={float(entry_risk):.2f}" if entry_risk else ""
+                log.info("     [p] sl_planned=%.6f | tp_planned=%.6f | rr=%.2f | sl_dist=%.2f%% | tp_dist=%.2f%%%s",
+                         float(planned_sl), float(planned_tp), entry_rr, sl_dist, tp_dist, risk_str)
             # Immediately set stop-loss at exchange level (redundant with preset, but ensures it's active)
             if atr > 0:
                 sl_price = entry - atr * 1.5 if side == "long" else entry + atr * 1.5
@@ -582,6 +619,7 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                 exchange_order_id = order.get("id")
                 log.info("  => ORDER PLACED: %s | exchangeOrderId=%s", symbol, exchange_order_id)
 
+            state.upsert_symbol_state(symbol, planned_sl=plan.stop_loss, planned_tp=plan.take_profit, trigger=last_closed["Signal_Trigger"], entry_risk_usdt=plan.risk_usdt)
             state.record_order(client_id, exchange_order_id, symbol, side)
             busy_symbols.add(symbol)
             orders_placed += 1
