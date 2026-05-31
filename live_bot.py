@@ -34,6 +34,19 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def fetch_ohlcv_safe(exchange, symbol, timeframe, limit=500, max_retries=4):
+    for attempt in range(max_retries):
+        try:
+            return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        except Exception as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                wait = 2 ** attempt
+                log.warning("429 en %s, retry en %ds (intento %d/%d)", symbol, wait, attempt + 1, max_retries)
+                time.sleep(wait)
+            else:
+                raise
+
+
 class _ConsoleFilter(logging.Filter):
     """Solo muestra en consola: orden limit, posicion abierta, cierre, BE/trailing."""
     def filter(self, record):
@@ -377,7 +390,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
 
         # --- Fetch indicators for management decisions ---
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=cfg.timeframe, limit=300)
+            ohlcv = fetch_ohlcv_safe(exchange, symbol, cfg.timeframe, 300)
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
             atr = float(ta.atr(df["high"], df["low"], df["close"], length=14).iloc[-1])
             df["ZLEMA"] = calc_zlema(df["close"], cfg.zl_length)
@@ -538,7 +551,7 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
         symbols_scanned += 1
         time.sleep(0.3)  # Rate limiting: avoid 429 Too Many Requests
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=cfg.timeframe, limit=500)
+            ohlcv = fetch_ohlcv_safe(exchange, symbol, cfg.timeframe, 500)
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
             if len(df) < 300:
                 log.debug("SKIP %s: insufficient data (%d bars)", symbol, len(df))
