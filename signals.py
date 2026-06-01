@@ -104,10 +104,10 @@ def generate_signals(df: pd.DataFrame, cfg: BotConfig, options: SignalOptions | 
         if opts.use_tp_trigger and tp_sell:
             sell_triggers.append("tp")
 
-        if trend_long and buy_triggers and (volume_ok or not opts.use_volume):
+        if trend_long and len(buy_triggers) >= 2 and (volume_ok or not opts.use_volume):
             out.at[out.index[i], "Master_Buy"] = True
             out.at[out.index[i], "Signal_Trigger"] = "+".join(buy_triggers)
-        if trend_short and sell_triggers and (volume_ok or not opts.use_volume):
+        if trend_short and len(sell_triggers) >= 2 and (volume_ok or not opts.use_volume):
             out.at[out.index[i], "Master_Sell"] = True
             out.at[out.index[i], "Signal_Trigger"] = "+".join(sell_triggers)
 
