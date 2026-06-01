@@ -51,6 +51,21 @@ def resolve_bot_script():
     return os.path.join(BASE_DIR, "combined_strategy_v2", "live_bot.py")
 
 # ==============================================================
+#  HEARTBEAT INTERNO (keep-alive sin cron-job)
+# ==============================================================
+def _self_heartbeat():
+    """Ping /health cada ~4 min para mantener Render activo.
+    Sin logs en exito — solo WARNING si falla."""
+    port = os.environ.get('PORT', '5000')
+    url = f"http://localhost:{port}/health"
+    while True:
+        time.sleep(240)
+        try:
+            requests.get(url, timeout=10)
+        except Exception:
+            pass  # Silencio total en exito
+
+# ==============================================================
 #  RUTAS DEL SERVIDOR WEB (FLASK)
 # ==============================================================
 @app.route('/')
@@ -129,23 +144,23 @@ def run_bot():
     while True:
         logger.info(f"Iniciando {script_path} en background...")
         try:
-            # Ejecutamos el bot en un proceso hijo. 
-            # Agregamos -u para desactivar buffering y ver logs en tiempo real en Render.
             BOT_PROCESS = subprocess.Popen([sys.executable, "-u", script_path], cwd=os.path.dirname(script_path))
             BOT_STARTED_AT = time.time()
-            
-            # Esperamos a que el proceso termine
             return_code = BOT_PROCESS.wait()
             logger.error(f"El proceso del bot termino con codigo {return_code}. Reiniciando en 10 segundos...")
         except Exception as e:
             logger.error(f"Error al intentar ejecutar el bot: {e}")
         finally:
             BOT_PROCESS = None
-            
         time.sleep(10)
 
+# Iniciar heartbeat interno (keep-alive silencioso)
+heartbeat_thread = threading.Thread(target=_self_heartbeat, daemon=True, name="Heartbeat")
+heartbeat_thread.start()
+logger.info("Internal heartbeat thread started (interval=4min)")
+
 # Iniciar el hilo del bot automáticamente (compatible con Gunicorn en Render)
-bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread = threading.Thread(target=run_bot, daemon=True, name="BotRunner")
 bot_thread.start()
 
 # ==============================================================
