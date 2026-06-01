@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import uuid
+import signal
 from datetime import datetime
 
 import ccxt
@@ -87,6 +88,17 @@ class _ConsoleFilter(logging.Filter):
 for _h in logging.root.handlers:
     if isinstance(_h, logging.StreamHandler):
         _h.addFilter(_ConsoleFilter())
+
+# Señal de shutdown — se activa con SIGTERM (Render inactivity)
+_shutdown_ev = threading.Event()
+
+if hasattr(signal, "SIGTERM"):
+    def _sigterm_handler(signum, frame):
+        _shutdown_ev.set()
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except ValueError:
+        pass  # Windows no soporta SIGTERM
 
 
 def send_telegram(msg: str) -> None:
@@ -719,12 +731,12 @@ def main() -> None:
     monitor = PositionMonitor(exchange, cfg, state)
     monitor.start()
 
-    while True:
+    while not _shutdown_ev.is_set():
         cycle_num += 1
         try:
             if not state.acquire_lock("combined_strategy_v2", owner_id):
                 log.warning("CYCLE %d: Another bot instance owns the lock. Sleeping 60s.", cycle_num)
-                time.sleep(60)
+                _shutdown_ev.wait(60)
                 continue
 
             now = datetime.now()
@@ -743,12 +755,15 @@ def main() -> None:
             log.info("<<< CYCLE %d END >>>  Active symbols: %d | Next cycle in 60s",
                      cycle_num, len(busy))
             log.info("")
-            time.sleep(60)
+            _shutdown_ev.wait(60)
         except Exception as exc:
             log.error("CYCLE %d MAIN LOOP FAILED: %s", cycle_num, exc, exc_info=True)
-            time.sleep(60)
+            if _shutdown_ev.is_set():
+                break
+            _shutdown_ev.wait(60)
 
-    log.info("BOT FINALIZED")
+    send_telegram("*BOT SHUTDOWN* Render stopped the service due to inactivity. The bot will restart automatically.")
+    log.info("BOT FINALIZED (SIGTERM)")
 
 
 if __name__ == "__main__":
