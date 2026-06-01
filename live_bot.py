@@ -448,11 +448,11 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                 log.info("  => POST-OPEN SL SET: %s | side=%s | sl=%.6f", symbol, side, sl_price)
 
         # --- Early exit check ---
-        if cfg.enable_early_exit and live is not None and profit_pct < -0.005:
+        if cfg.enable_early_exit and live is not None and profit_pct < -0.015:
             early_long = side == "long" and (live["close"] < live["ZLEMA"] or live["Two_P"] < live["Two_PP"])
             early_short = side == "short" and (live["close"] > live["ZLEMA"] or live["Two_P"] > live["Two_PP"])
             if early_long or early_short:
-                log.info("  => EARLY EXIT TRIGGERED: PnL=%+.4f%% (below -0.5%%)", profit_pct * 100)
+                log.info("  => EARLY EXIT TRIGGERED: PnL=%+.4f%% (below -1.5%%)", profit_pct * 100)
                 if side == "long":
                     log.info("     close(%.6f) < ZLEMA(%.6f)=%s | Two_P(%.6f) < Two_PP(%.6f)=%s",
                              live["close"], live["ZLEMA"], bool(live["close"] < live["ZLEMA"]),
@@ -490,15 +490,15 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                 profit_at_peak = (peak - entry) / entry if side == "long" else (entry - peak) / entry
                 atr_profit = profit_at_peak / (atr / entry) if atr > 0 else 0
 
-                if atr_profit >= 2.7:
-                    trail_dist = (atr * 0.2) / peak
-                    trail_tier = "tight (0.2x ATR)"
-                elif atr_profit >= 2.2:
-                    trail_dist = (atr * 0.5) / peak
-                    trail_tier = "medium (0.5x ATR)"
+                if atr_profit >= 2.0:
+                    trail_dist = (atr * 0.15) / peak
+                    trail_tier = "tight (0.15x ATR)"
+                elif atr_profit >= 1.5:
+                    trail_dist = (atr * 0.30) / peak
+                    trail_tier = "medium (0.30x ATR)"
                 else:
-                    trail_dist = (atr * 1.0) / peak
-                    trail_tier = "loose (1.0x ATR)"
+                    trail_dist = (atr * 0.60) / peak
+                    trail_tier = "loose (0.60x ATR)"
 
                 trail_sl = peak * (1 - trail_dist) if side == "long" else peak * (1 + trail_dist)
                 last_trail = current.get("last_trail_sl")
@@ -683,7 +683,7 @@ class PositionMonitor:
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="PositionMonitor")
         self._thread.start()
-        log.info("PositionMonitor thread started (interval=5s)")
+        log.info("PositionMonitor thread started (interval=10s)")
 
     def stop(self) -> None:
         self._stop.set()
@@ -696,7 +696,7 @@ class PositionMonitor:
                     self.active_symbols = active
             except Exception as exc:
                 log.error("PositionMonitor error: %s", exc, exc_info=True)
-            self._stop.wait(5)
+            self._stop.wait(10)
 
     @property
     def is_alive(self) -> bool:
@@ -723,7 +723,7 @@ def main() -> None:
              cfg.enable_early_exit, cfg.max_position_age_hours, cfg.limit_discount_pct * 100)
     log.info("#  Risk per trade: %.2f%% | Min margin: %.2f USDT | Max margin frac: %.2f%%",
              cfg.risk_per_trade * 100, cfg.min_margin_usdt, cfg.max_margin_fraction * 100)
-    log.info("#  Real-time monitoring: ENABLED (5s interval)")
+    log.info("#  Real-time monitoring: ENABLED (10s interval)")
     log.info("#")
     log.info("#" * 70)
 
