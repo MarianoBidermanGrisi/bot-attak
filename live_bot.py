@@ -434,10 +434,14 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                      symbol, side, entry, contracts, mark, age_h, profit_pct * 100, trigger_str)
             state.upsert_symbol_state(symbol, qty=contracts)
             if live is not None:
-                log.info("     [i] close=%.6f | ZLEMA=%.6f | Two_P=%.6f | Two_PP=%.6f | ATR=%.6f",
-                         live["close"], live["ZLEMA"], live["Two_P"], live["Two_PP"], atr)
-                log.info("     [c] close>ZLEMA=%s | Two_P>Two_PP=%s",
-                         bool(live["close"] > live["ZLEMA"]), bool(live["Two_P"] > live["Two_PP"]))
+                if cfg.strategy_mode == "mean_rev":
+                    log.info("     [i] close=%.6f | RSI=%.2f | ATR=%.6f",
+                             live["close"], live["RSI"], atr)
+                else:
+                    log.info("     [i] close=%.6f | ZLEMA=%.6f | Two_P=%.6f | Two_PP=%.6f | ATR=%.6f",
+                             live["close"], live["ZLEMA"], live["Two_P"], live["Two_PP"], atr)
+                    log.info("     [c] close>ZLEMA=%s | Two_P>Two_PP=%s",
+                             bool(live["close"] > live["ZLEMA"]), bool(live["Two_P"] > live["Two_PP"]))
             planned_sl = current.get("planned_sl")
             planned_tp = current.get("planned_tp")
             entry_risk = current.get("entry_risk_usdt")
@@ -668,7 +672,21 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                          order_qty, last_closed["Signal_Trigger"])
                 exchange_order_id = None
             else:
-                exchange.set_leverage(int(cfg.leverage), symbol)
+                target_lev = int(cfg.leverage)
+                try:
+                    exchange.set_leverage(target_lev, symbol)
+                except Exception as exc:
+                    if "Exceeded the maximum settable leverage" in str(exc):
+                        max_lev = int(
+                            exchange.market(symbol)
+                            .get("info", {})
+                            .get("maxLever", target_lev)
+                        )
+                        capped = min(target_lev, max_lev)
+                        log.warning("Leverage %d no permitido para %s, usando max=%d", target_lev, symbol, capped)
+                        exchange.set_leverage(capped, symbol)
+                    else:
+                        raise
                 log.info("  => PLACING LIVE ORDER: %s %s | clientOid=%s | qty=%.6f @ %.6f",
                          symbol, order_side, client_id, order_qty, plan.entry)
                 order = exchange.create_order(symbol, "limit", order_side, order_qty, plan.entry, params=params)
