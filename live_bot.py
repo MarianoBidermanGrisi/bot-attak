@@ -15,12 +15,14 @@ import requests
 try:
     from .config import BotConfig, validate_live_env
     from .indicators import calc_two_pole, calc_zlema, calculate_all_indicators
+    from .mean_rev_signals import generate_mr_signals
     from .risk import build_trade_plan
     from .signals import build_signal_options, generate_signals
     from .state import StateStore
 except ImportError:
     from config import BotConfig, validate_live_env
     from indicators import calc_two_pole, calc_zlema, calculate_all_indicators
+    from mean_rev_signals import generate_mr_signals
     from risk import build_trade_plan
     from signals import build_signal_options, generate_signals
     from state import StateStore
@@ -405,14 +407,22 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             ohlcv = fetch_ohlcv_safe(exchange, symbol, cfg.timeframe, 300)
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
             atr = float(ta.atr(df["high"], df["low"], df["close"], length=14).iloc[-1])
-            df["ZLEMA"] = calc_zlema(df["close"], cfg.zl_length)
-            df["Two_P"], df["Two_PP"] = calc_two_pole(df["close"], cfg.tp_filter_len)
-            live = df.iloc[-1]
-            log.info("  Indicators: close=%.6f | ZLEMA=%.6f | Two_P=%.6f | Two_PP=%.6f | ATR=%.6f",
-                     live["close"], live["ZLEMA"], live["Two_P"], live["Two_PP"], atr)
-            log.info("  Cond: close>ZLEMA=%s | Two_P>Two_PP=%s | close<ZLEMA=%s | Two_P<Two_PP=%s",
-                     bool(live["close"] > live["ZLEMA"]), bool(live["Two_P"] > live["Two_PP"]),
-                     bool(live["close"] < live["ZLEMA"]), bool(live["Two_P"] < live["Two_PP"]))
+            if cfg.strategy_mode == "mean_rev":
+                df["RSI"] = ta.rsi(df["close"], length=cfg.mr_rsi_period)
+                bb = ta.bbands(df["close"], length=cfg.mr_bb_period, std=cfg.mr_bb_std)
+                if bb is not None and not bb.empty:
+                    df["BB_Middle"] = bb.iloc[:, 1]
+                live = df.iloc[-1]
+                log.info("  Indicators: close=%.6f | RSI=%.2f | ATR=%.6f", live["close"], live["RSI"], atr)
+            else:
+                df["ZLEMA"] = calc_zlema(df["close"], cfg.zl_length)
+                df["Two_P"], df["Two_PP"] = calc_two_pole(df["close"], cfg.tp_filter_len)
+                live = df.iloc[-1]
+                log.info("  Indicators: close=%.6f | ZLEMA=%.6f | Two_P=%.6f | Two_PP=%.6f | ATR=%.6f",
+                         live["close"], live["ZLEMA"], live["Two_P"], live["Two_PP"], atr)
+                log.info("  Cond: close>ZLEMA=%s | Two_P>Two_PP=%s | close<ZLEMA=%s | Two_P<Two_PP=%s",
+                         bool(live["close"] > live["ZLEMA"]), bool(live["Two_P"] > live["Two_PP"]),
+                         bool(live["close"] < live["ZLEMA"]), bool(live["Two_P"] < live["Two_PP"]))
         except Exception as exc:
             log.warning("Indicator fetch failed %s: %s", symbol, exc)
             atr = 0.0
@@ -443,35 +453,45 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                          float(planned_sl), float(planned_tp), entry_rr, sl_dist, tp_dist, risk_str)
             # Immediately set stop-loss at exchange level (redundant with preset, but ensures it's active)
             if atr > 0:
-                sl_price = entry - atr * 1.5 if side == "long" else entry + atr * 1.5
+                sl_price = entry - atr * cfg.sl_atr_mult if side == "long" else entry + atr * cfg.sl_atr_mult
                 update_stop_loss(exchange, cfg, symbol, side, sl_price)
                 log.info("  => POST-OPEN SL SET: %s | side=%s | sl=%.6f", symbol, side, sl_price)
 
         # --- Early exit check ---
-        if cfg.enable_early_exit and live is not None and profit_pct < -0.015:
-            early_long = side == "long" and (live["close"] < live["ZLEMA"] or live["Two_P"] < live["Two_PP"])
-            early_short = side == "short" and (live["close"] > live["ZLEMA"] or live["Two_P"] > live["Two_PP"])
-            if early_long or early_short:
-                log.info("  => EARLY EXIT TRIGGERED: PnL=%+.4f%% (below -1.5%%)", profit_pct * 100)
-                if side == "long":
-                    log.info("     close(%.6f) < ZLEMA(%.6f)=%s | Two_P(%.6f) < Two_PP(%.6f)=%s",
-                             live["close"], live["ZLEMA"], bool(live["close"] < live["ZLEMA"]),
-                             live["Two_P"], live["Two_PP"], bool(live["Two_P"] < live["Two_PP"]))
-                else:
-                    log.info("     close(%.6f) > ZLEMA(%.6f)=%s | Two_P(%.6f) > Two_PP(%.6f)=%s",
-                             live["close"], live["ZLEMA"], bool(live["close"] > live["ZLEMA"]),
-                             live["Two_P"], live["Two_PP"], bool(live["Two_P"] > live["Two_PP"]))
-                if close_position(exchange, cfg, symbol, side, "early_exit"):
-                    state.set_cooldown(symbol, 14400)
-                    state.clear_runtime_state(symbol)
-                    log.info("  => CLOSED by early exit | %s | PnL=%+.4f%%", symbol, profit_pct * 100)
-                continue
+        if cfg.enable_early_exit and live is not None and profit_pct < cfg.early_exit_max_loss:
+            if cfg.strategy_mode == "mean_rev":
+                rsi_val = float(live.get("RSI", 50))
+                early_long = side == "long" and rsi_val > cfg.mr_early_exit_rsi_long
+                early_short = side == "short" and rsi_val < cfg.mr_early_exit_rsi_short
+                if early_long or early_short:
+                    log.info("  => EARLY EXIT TRIGGERED: PnL=%+.4f%% | RSI=%.2f", profit_pct * 100, rsi_val)
+                    if close_position(exchange, cfg, symbol, side, "early_exit"):
+                        state.set_cooldown(symbol, 14400)
+                        state.clear_runtime_state(symbol)
+                        log.info("  => CLOSED by early exit | %s | PnL=%+.4f%%", symbol, profit_pct * 100)
+                    continue
             else:
-                log.debug("  Early exit check: not triggered (PnL=%+.4f%%)", profit_pct * 100)
+                early_long = side == "long" and (live["close"] < live["ZLEMA"] or live["Two_P"] < live["Two_PP"])
+                early_short = side == "short" and (live["close"] > live["ZLEMA"] or live["Two_P"] > live["Two_PP"])
+                if early_long or early_short:
+                    log.info("  => EARLY EXIT TRIGGERED: PnL=%+.4f%% (below -1.5%%)", profit_pct * 100)
+                    if side == "long":
+                        log.info("     close(%.6f) < ZLEMA(%.6f)=%s | Two_P(%.6f) < Two_PP(%.6f)=%s",
+                                 live["close"], live["ZLEMA"], bool(live["close"] < live["ZLEMA"]),
+                                 live["Two_P"], live["Two_PP"], bool(live["Two_P"] < live["Two_PP"]))
+                    else:
+                        log.info("     close(%.6f) > ZLEMA(%.6f)=%s | Two_P(%.6f) > Two_PP(%.6f)=%s",
+                                 live["close"], live["ZLEMA"], bool(live["close"] > live["ZLEMA"]),
+                                 live["Two_P"], live["Two_PP"], bool(live["Two_P"] > live["Two_PP"]))
+                    if close_position(exchange, cfg, symbol, side, "early_exit"):
+                        state.set_cooldown(symbol, 14400)
+                        state.clear_runtime_state(symbol)
+                        log.info("  => CLOSED by early exit | %s | PnL=%+.4f%%", symbol, profit_pct * 100)
+                    continue
 
         # --- Breakeven and trailing ---
         if atr > 0:
-            be_trigger = (atr * 1.5) / entry
+            be_trigger = (atr * cfg.be_atr_mult) / entry
             log.info("  BE check: profit_pct=%+.4f%% | be_trigger=%.4f%% | status=%s",
                      profit_pct * 100, be_trigger * 100, current.get("status"))
 
@@ -490,15 +510,15 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                 profit_at_peak = (peak - entry) / entry if side == "long" else (entry - peak) / entry
                 atr_profit = profit_at_peak / (atr / entry) if atr > 0 else 0
 
-                if atr_profit >= 2.0:
-                    trail_dist = (atr * 0.15) / peak
-                    trail_tier = "tight (0.15x ATR)"
-                elif atr_profit >= 1.5:
-                    trail_dist = (atr * 0.30) / peak
-                    trail_tier = "medium (0.30x ATR)"
+                if atr_profit >= cfg.trail_tight_atr_threshold:
+                    trail_dist = (atr * cfg.trail_tight_mult) / peak
+                    trail_tier = f"tight ({cfg.trail_tight_mult}x ATR)"
+                elif atr_profit >= cfg.trail_medium_atr_threshold:
+                    trail_dist = (atr * cfg.trail_medium_mult) / peak
+                    trail_tier = f"medium ({cfg.trail_medium_mult}x ATR)"
                 else:
-                    trail_dist = (atr * 0.60) / peak
-                    trail_tier = "loose (0.60x ATR)"
+                    trail_dist = (atr * cfg.trail_loose_mult) / peak
+                    trail_tier = f"loose ({cfg.trail_loose_mult}x ATR)"
 
                 trail_sl = peak * (1 - trail_dist) if side == "long" else peak * (1 + trail_dist)
                 last_trail = current.get("last_trail_sl")
@@ -568,8 +588,12 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             if len(df) < 300:
                 log.debug("SKIP %s: insufficient data (%d bars)", symbol, len(df))
                 continue
-            opts = build_signal_options(use_volume=cfg.use_volume_filter)
-            df = generate_signals(calculate_all_indicators(df, cfg), cfg, options=opts)
+            df = calculate_all_indicators(df, cfg)
+            if cfg.strategy_mode == "mean_rev":
+                df = generate_mr_signals(df, cfg)
+            else:
+                opts = build_signal_options(use_volume=cfg.use_volume_filter)
+                df = generate_signals(df, cfg, options=opts)
             last_closed = df.iloc[-2]
             last_row = df.iloc[-1]
 
@@ -589,32 +613,39 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                 log.info("  => TRADE REJECTED: %s | reason: %s", symbol, reason)
                 continue
 
+            tp = plan.take_profit
+            if cfg.strategy_mode == "mean_rev" and cfg.mr_tp_at_middle:
+                bb_mid = float(last_closed.get("BB_Middle", 0))
+                if side == "long" and bb_mid > plan.entry:
+                    tp = bb_mid
+                elif side == "short" and bb_mid < plan.entry:
+                    tp = bb_mid
+
             order_qty = float(exchange.amount_to_precision(symbol, plan.qty))
             if order_qty <= 0:
                 log.info("  => TRADE REJECTED: %s | amount_to_precision rounded qty to zero (raw=%.8f)", symbol, plan.qty)
                 continue
 
             log.info("--- INDICATORS [%s] %s ---", symbol, side.upper())
-            log.info("  Price: close=%.6f | VMA=%.6f | ST_dir=%s | MACD=%.6f | MACD_sig=%.6f",
-                     last_closed["close"], last_closed["VMA"], last_closed["ST_dir"],
-                     last_closed["MACD"], last_closed["MACD_sig"])
-            log.info("  ZLEMA=%.6f | ZL_Upper=%.6f | ZL_Lower=%.6f | zl_trend_state=%s",
-                     last_closed["ZLEMA"], last_closed["ZL_Upper"], last_closed["ZL_Lower"],
-                     last_closed.get("zl_trend_state", "N/A"))
-            log.info("  Two_P=%.6f | Two_PP=%.6f | ATR14=%.6f | Vol_Anomaly=%s",
-                     last_closed["Two_P"], last_closed["Two_PP"], last_closed["ATR14"],
-                     bool(last_closed["Vol_Anomaly"]))
-            log.info("  => SIGNAL DETECTED: Trigger=%s | st_buy=%s zl_buy=%s tp_buy=%s st_sell=%s zl_sell=%s tp_sell=%s | Master_Buy=%s Master_Sell=%s | Vol_Anomaly=%s",
-                     last_closed["Signal_Trigger"],
-                     bool(last_closed["st_buy"]), bool(last_closed["zl_buy"]), bool(last_closed["tp_buy"]),
-                     bool(last_closed["st_sell"]), bool(last_closed["zl_sell"]), bool(last_closed["tp_sell"]),
-                     bool(last_closed["Master_Buy"]), bool(last_closed["Master_Sell"]),
-                     bool(last_closed["Vol_Anomaly"]))
+            if cfg.strategy_mode == "mean_rev":
+                log.info("  RSI=%.2f | BB_Lower=%.6f | BB_Mid=%.6f | BB_Upper=%.6f | ZScore=%.3f",
+                         last_closed["RSI"], last_closed["BB_Lower"], last_closed["BB_Middle"],
+                         last_closed["BB_Upper"], last_closed["ZScore"])
+            else:
+                log.info("  Price: close=%.6f | VMA=%.6f | ST_dir=%s | MACD=%.6f | MACD_sig=%.6f",
+                         last_closed["close"], last_closed["VMA"], last_closed["ST_dir"],
+                         last_closed["MACD"], last_closed["MACD_sig"])
+                log.info("  ZLEMA=%.6f | ZL_Upper=%.6f | ZL_Lower=%.6f | zl_trend_state=%s",
+                         last_closed["ZLEMA"], last_closed["ZL_Upper"], last_closed["ZL_Lower"],
+                         last_closed.get("zl_trend_state", "N/A"))
+                log.info("  Two_P=%.6f | Two_PP=%.6f", last_closed["Two_P"], last_closed["Two_PP"])
+            log.info("  ATR14=%.6f | Vol_Anomaly=%s | Signal_Trigger=%s",
+                     last_closed["ATR14"], bool(last_closed["Vol_Anomaly"]),
+                     last_closed["Signal_Trigger"])
             log.info("  Live price: %.6f (vs signal bar close: %.6f)", live_price, last_closed["close"])
 
-            # --- Log trade plan details ---
             log.info("  => TRADE PLAN ACCEPTED: %s %s", symbol, side.upper())
-            log.info("     Entry: %.6f | SL: %.6f | TP: %.6f", plan.entry, plan.stop_loss, plan.take_profit)
+            log.info("     Entry: %.6f | SL: %.6f | TP: %.6f", plan.entry, plan.stop_loss, tp)
             log.info("     SL distance: %.4f%% | TP distance: %.4f%% | R/R: %.2f | Risk: %.2f USDT",
                      plan.sl_pct * 100, plan.tp_pct * 100, plan.rr, plan.risk_usdt)
             log.info("     Qty: %.6f | Notional: %.6f | Margin: %.6f USDT",
@@ -627,13 +658,13 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                 "marginMode": "isolated",
                 "tradeSide": "open",
                 "clientOid": client_id,
-                "presetStopSurplusPrice": str(exchange.price_to_precision(symbol, plan.take_profit)),
+                "presetStopSurplusPrice": str(exchange.price_to_precision(symbol, tp)),
                 "presetStopLossPrice": str(exchange.price_to_precision(symbol, plan.stop_loss)),
             }
             if cfg.dry_run:
                 log.info("  => DRY RUN ORDER: %s %s | clientOid=%s", symbol, order_side, client_id)
                 log.info("     Entry=%.8f | SL=%.8f | TP=%.8f | Qty=%.8f | Trigger=%s",
-                         plan.entry, plan.stop_loss, plan.take_profit,
+                         plan.entry, plan.stop_loss, tp,
                          order_qty, last_closed["Signal_Trigger"])
                 exchange_order_id = None
             else:
@@ -644,13 +675,13 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                 exchange_order_id = order.get("id")
                 log.info("  => ORDER PLACED: %s | exchangeOrderId=%s", symbol, exchange_order_id)
 
-            state.upsert_symbol_state(symbol, planned_sl=plan.stop_loss, planned_tp=plan.take_profit, trigger=last_closed["Signal_Trigger"], entry_risk_usdt=plan.risk_usdt)
+            state.upsert_symbol_state(symbol, planned_sl=plan.stop_loss, planned_tp=tp, trigger=last_closed["Signal_Trigger"], entry_risk_usdt=plan.risk_usdt)
             state.record_order(client_id, exchange_order_id, symbol, side)
             busy_symbols.add(symbol)
             orders_placed += 1
             send_telegram(
                 f"*{symbol} {side.upper()} v2 LIMIT*\n"
-                f"Entry: `{plan.entry:.6f}`\nSL: `{plan.stop_loss:.6f}`\nTP: `{plan.take_profit:.6f}`\n"
+                f"Entry: `{plan.entry:.6f}`\nSL: `{plan.stop_loss:.6f}`\nTP: `{tp:.6f}`\n"
                 f"Estimated Risk: `{plan.risk_usdt:.2f} USDT` | Margin aprox: `{plan.notional / cfg.leverage:.2f} USDT`\n"
                 f"R/R: `{plan.rr:.2f}` | Trigger: `{last_closed['Signal_Trigger']}`"
             )
