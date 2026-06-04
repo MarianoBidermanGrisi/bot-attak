@@ -86,4 +86,18 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
     out["Two_P"], out["Two_PP"] = calc_two_pole(close, cfg.tp_filter_len)
     out["ATR14"] = ta.atr(out["high"], out["low"], out["close"], length=14)
     out["Vol_Anomaly"] = out["volume"].rolling(3).mean() > out["volume"].rolling(20).mean()
+
+    # Mean reversion indicators
+    out["RSI"] = ta.rsi(close, length=cfg.mr_rsi_period)
+    bb = ta.bbands(close, length=cfg.mr_bb_period, std=cfg.mr_bb_std)
+    if bb is not None and not bb.empty:
+        out["BB_Upper"] = bb.iloc[:, 2]
+        out["BB_Middle"] = bb.iloc[:, 1]
+        out["BB_Lower"] = bb.iloc[:, 0]
+    else:
+        out["BB_Upper"] = close.rolling(cfg.mr_bb_period).mean() + cfg.mr_bb_std * close.rolling(cfg.mr_bb_period).std()
+        out["BB_Middle"] = close.rolling(cfg.mr_bb_period).mean()
+        out["BB_Lower"] = close.rolling(cfg.mr_bb_period).mean() - cfg.mr_bb_std * close.rolling(cfg.mr_bb_period).std()
+    returns = close.pct_change()
+    out["ZScore"] = (returns - returns.rolling(cfg.mr_zscore_period).mean()) / returns.rolling(cfg.mr_zscore_period).std().replace(0, 1e-10)
     return out.dropna().copy()
