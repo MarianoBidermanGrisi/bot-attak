@@ -24,12 +24,12 @@ class TradePlan:
 def calculate_levels(side: str, price: float, atr: float, cfg: BotConfig) -> tuple[float, float, float]:
     if side == "long":
         entry = price * (1 - cfg.limit_discount_pct)
-        sl = entry - atr * 1.5
-        tp = entry + atr * 3.0
+        sl = entry - atr * cfg.sl_atr_mult
+        tp = entry + atr * cfg.tp_atr_mult
     elif side == "short":
         entry = price * (1 + cfg.limit_discount_pct)
-        sl = entry + atr * 1.5
-        tp = entry - atr * 3.0
+        sl = entry + atr * cfg.sl_atr_mult
+        tp = entry - atr * cfg.tp_atr_mult
     else:
         raise ValueError(f"Invalid side: {side}")
     return entry, sl, tp
@@ -41,8 +41,8 @@ def validate_distances(entry: float, sl: float, tp: float, cfg: BotConfig) -> tu
     sl_pct = abs(entry - sl) / entry
     tp_pct = abs(entry - tp) / entry
     rr = tp_pct / sl_pct if sl_pct > 0 else 0.0
-    if sl_pct >= tp_pct:
-        return False, "SL distance >= TP distance", sl_pct, tp_pct, rr
+    if sl_pct > tp_pct:
+        return False, "SL distance > TP distance", sl_pct, tp_pct, rr
     if sl_pct > cfg.max_sl_distance_pct:
         return False, f"SL too far: {sl_pct:.4f}", sl_pct, tp_pct, rr
     if tp_pct < cfg.min_tp_distance_pct:
