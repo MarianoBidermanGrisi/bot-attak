@@ -15,11 +15,8 @@ class BotConfig:
     max_open_positions: int = 4
     leverage: float = 10.0
 
-    # Real account risk. This is estimated loss at stop, not notional exposure.
     risk_per_trade: float = _env_float("BOT_RISK_PER_TRADE", 0.01)
 
-    # Small account controls. Pure risk sizing can produce orders below exchange
-    # minimums. These values lift the order size while capping margin per trade.
     min_margin_usdt: float = _env_float("BOT_MIN_MARGIN_USDT", 1.0)
     max_margin_fraction: float = _env_float("BOT_MAX_MARGIN_FRACTION", 0.07)
 
@@ -29,9 +26,33 @@ class BotConfig:
     limit_order_expiry_minutes: int = 120
     use_volume_filter: bool = os.environ.get("BOT_USE_VOLUME_FILTER", "true").lower() in {"1", "true", "yes", "on"}
 
+    # Strategy mode: "trend" (original Combined Strategy) or "mean_rev"
+    strategy_mode: str = "mean_rev"
+
+    # Signal config (trend mode)
+    min_triggers: int = 2
+    require_all_trend: bool = True
+
+    # --- Mean Reversion parameters ---
+    mr_rsi_period: int = 21
+    mr_rsi_oversold: float = 35.0
+    mr_rsi_overbought: float = 75.0
+    mr_bb_period: int = 20
+    mr_bb_std: float = 3.0
+    mr_zscore_period: int = 30
+    mr_zscore_threshold: float = 3.0
+    mr_use_rsi: bool = True
+    mr_use_bb: bool = True
+    mr_use_zscore: bool = True
+    mr_min_confluences: int = 1
+    mr_volume_filter: bool = True
+    mr_tp_at_middle: bool = False
+    mr_early_exit_rsi_long: float = 50.0
+    mr_early_exit_rsi_short: float = 50.0
+
     max_sl_distance_pct: float = 0.035
-    min_tp_distance_pct: float = 0.020
-    min_risk_reward_ratio: float = 2.0
+    min_tp_distance_pct: float = 0.010
+    min_risk_reward_ratio: float = 1.0
 
     diy_st_length: int = 10
     diy_st_mult: float = 3.0
@@ -44,6 +65,20 @@ class BotConfig:
     zl_length: int = 70
     zl_mult: float = 1.5
     tp_filter_len: int = 15
+
+    # --- SL/TP calculation ---
+    sl_atr_mult: float = 3.0
+    tp_atr_mult: float = 3.0
+
+    be_atr_mult: float = 5.0
+
+    early_exit_max_loss: float = -0.02
+
+    trail_tight_atr_threshold: float = 3.0
+    trail_tight_mult: float = 0.10
+    trail_medium_atr_threshold: float = 3.0
+    trail_medium_mult: float = 0.20
+    trail_loose_mult: float = 0.30
 
     fee_rate: float = 0.0006
     slippage_pct: float = 0.0005
