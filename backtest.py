@@ -6,12 +6,14 @@ import pandas as pd
 try:
     from .config import BotConfig, timeframe_to_minutes
     from .indicators import calculate_all_indicators
+    from .mean_rev_signals import generate_mr_signals
     from .metrics import equity_curve_stats, summarize_by_trigger, summarize_trades, trades_to_dataframe
     from .risk import apply_entry_slippage, apply_exit_slippage, build_trade_plan
     from .signals import SignalOptions, build_signal_options, generate_signals
 except ImportError:
     from config import BotConfig, timeframe_to_minutes
     from indicators import calculate_all_indicators
+    from mean_rev_signals import generate_mr_signals
     from metrics import equity_curve_stats, summarize_by_trigger, summarize_trades, trades_to_dataframe
     from risk import apply_entry_slippage, apply_exit_slippage, build_trade_plan
     from signals import SignalOptions, build_signal_options, generate_signals
@@ -81,7 +83,10 @@ def run_backtest(
     cfg = cfg or BotConfig()
     expiry_bars = max(1, cfg.limit_order_expiry_minutes // timeframe_to_minutes(cfg.timeframe))
     df = calculate_all_indicators(raw_df, cfg)
-    df = generate_signals(df, cfg, options)
+    if cfg.strategy_mode == "mean_rev":
+        df = generate_mr_signals(df, cfg)
+    else:
+        df = generate_signals(df, cfg, options)
 
     balance = starting_balance
     equity = [starting_balance]
@@ -132,7 +137,7 @@ def run_backtest(
             if exit_price is None:
                 open_trade["peak"] = max(open_trade["peak"], row["high"]) if side == "long" else min(open_trade["peak"], row["low"])
                 if atr > 0:
-                    be_trigger = (atr * 1.5) / entry
+                    be_trigger = (atr * cfg.be_atr_mult) / entry
                 else:
                     be_trigger = 0.015
                 if profit_pct >= be_trigger and not open_trade["be_active"]:
@@ -143,12 +148,12 @@ def run_backtest(
                     peak = open_trade["peak"]
                     profit_at_peak = _unrealized_pct(side, entry, peak)
                     atr_profit = profit_at_peak / (atr / entry) if atr > 0 else 0
-                    if atr_profit >= 2.7:
-                        trail_dist = (atr * 0.2) / peak
-                    elif atr_profit >= 2.2:
-                        trail_dist = (atr * 0.5) / peak
+                    if atr_profit >= cfg.trail_tight_atr_threshold:
+                        trail_dist = (atr * cfg.trail_tight_mult) / peak
+                    elif atr_profit >= cfg.trail_medium_atr_threshold:
+                        trail_dist = (atr * cfg.trail_medium_mult) / peak
                     else:
-                        trail_dist = (atr * 1.0) / peak
+                        trail_dist = (atr * cfg.trail_loose_mult) / peak
                     trail_sl = peak * (1 - trail_dist) if side == "long" else peak * (1 + trail_dist)
                     valid = (side == "long" and trail_sl > entry * 1.001) or (side == "short" and trail_sl < entry * 0.999)
                     moved = open_trade["last_trail_sl"] is None or (side == "long" and trail_sl > open_trade["last_trail_sl"]) or (side == "short" and trail_sl < open_trade["last_trail_sl"])
@@ -156,11 +161,18 @@ def run_backtest(
                         open_trade["stop_loss"] = trail_sl
                         open_trade["last_trail_sl"] = trail_sl
 
-                if cfg.enable_early_exit and profit_pct < -0.005:
-                    if side == "long" and (row["close"] < row["ZLEMA"] or row["Two_P"] < row["Two_PP"]):
-                        exit_price, exit_reason = apply_exit_slippage(row["close"], side, cfg), "early_exit"
-                    if side == "short" and (row["close"] > row["ZLEMA"] or row["Two_P"] > row["Two_PP"]):
-                        exit_price, exit_reason = apply_exit_slippage(row["close"], side, cfg), "early_exit"
+                if cfg.enable_early_exit and profit_pct < cfg.early_exit_max_loss:
+                    if cfg.strategy_mode == "mean_rev":
+                        rsi_val = float(row.get("RSI", 50))
+                        if side == "long" and rsi_val > cfg.mr_early_exit_rsi_long:
+                            exit_price, exit_reason = apply_exit_slippage(row["close"], side, cfg), "early_exit"
+                        if side == "short" and rsi_val < cfg.mr_early_exit_rsi_short:
+                            exit_price, exit_reason = apply_exit_slippage(row["close"], side, cfg), "early_exit"
+                    else:
+                        if side == "long" and (row["close"] < row["ZLEMA"] or row["Two_P"] < row["Two_PP"]):
+                            exit_price, exit_reason = apply_exit_slippage(row["close"], side, cfg), "early_exit"
+                        if side == "short" and (row["close"] > row["ZLEMA"] or row["Two_P"] > row["Two_PP"]):
+                            exit_price, exit_reason = apply_exit_slippage(row["close"], side, cfg), "early_exit"
 
             age_hours = (i - open_trade["entry_i"]) * timeframe_to_minutes(cfg.timeframe) / 60
             if exit_price is None and age_hours >= cfg.max_position_age_hours:
@@ -207,6 +219,13 @@ def run_backtest(
             if side:
                 plan, reason = build_trade_plan(side, float(row["close"]), float(row["ATR14"]), balance, cfg)
                 if plan:
+                    tp = plan.take_profit
+                    if cfg.strategy_mode == "mean_rev" and cfg.mr_tp_at_middle:
+                        bb_mid = float(row.get("BB_Middle", 0))
+                        if side == "long" and bb_mid > plan.entry:
+                            tp = bb_mid
+                        elif side == "short" and bb_mid < plan.entry:
+                            tp = bb_mid
                     pending_orders.append(
                         {
                             "side": side,
@@ -215,7 +234,7 @@ def run_backtest(
                             "expires_at": i + expiry_bars,
                             "entry": plan.entry,
                             "stop_loss": plan.stop_loss,
-                            "take_profit": plan.take_profit,
+                            "take_profit": tp,
                             "qty": plan.qty,
                         }
                     )
