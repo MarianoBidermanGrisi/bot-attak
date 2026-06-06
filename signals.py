@@ -56,17 +56,25 @@ def generate_signals(df: pd.DataFrame, cfg: BotConfig, options: SignalOptions | 
         zl_down = out["zl_trend_state"].iloc[i] == -1
         volume_ok = bool(out["Vol_Anomaly"].iloc[i])
 
+        trend_bools_long = [
+            vma_long if opts.use_vma else True,
+            st_long if opts.use_supertrend else True,
+            macd_long if opts.use_macd else True,
+            zl_up if opts.use_zl_trend else True,
+        ]
+        trend_bools_short = [
+            vma_short if opts.use_vma else True,
+            st_short if opts.use_supertrend else True,
+            macd_short if opts.use_macd else True,
+            zl_down if opts.use_zl_trend else True,
+        ]
         trend_long = (
-            (vma_long or not opts.use_vma)
-            and (st_long or not opts.use_supertrend)
-            and (macd_long or not opts.use_macd)
-            and (zl_up or not opts.use_zl_trend)
+            all(trend_bools_long) if cfg.require_all_trend
+            else sum(trend_bools_long) >= 3
         )
         trend_short = (
-            (vma_short or not opts.use_vma)
-            and (st_short or not opts.use_supertrend)
-            and (macd_short or not opts.use_macd)
-            and (zl_down or not opts.use_zl_trend)
+            all(trend_bools_short) if cfg.require_all_trend
+            else sum(trend_bools_short) >= 3
         )
 
         st_buy = False
@@ -104,10 +112,10 @@ def generate_signals(df: pd.DataFrame, cfg: BotConfig, options: SignalOptions | 
         if opts.use_tp_trigger and tp_sell:
             sell_triggers.append("tp")
 
-        if trend_long and len(buy_triggers) >= 2 and (volume_ok or not opts.use_volume):
+        if trend_long and len(buy_triggers) >= cfg.min_triggers and (volume_ok or not opts.use_volume):
             out.at[out.index[i], "Master_Buy"] = True
             out.at[out.index[i], "Signal_Trigger"] = "+".join(buy_triggers)
-        if trend_short and len(sell_triggers) >= 2 and (volume_ok or not opts.use_volume):
+        if trend_short and len(sell_triggers) >= cfg.min_triggers and (volume_ok or not opts.use_volume):
             out.at[out.index[i], "Master_Sell"] = True
             out.at[out.index[i], "Signal_Trigger"] = "+".join(sell_triggers)
 
