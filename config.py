@@ -44,7 +44,7 @@ class BotConfig:
     mr_use_rsi: bool = True
     mr_use_bb: bool = True
     mr_use_zscore: bool = True
-    mr_min_confluences: int = 3
+    mr_min_confluences: int = 2
     mr_volume_filter: bool = True
     mr_tp_at_middle: bool = True
     mr_early_exit_rsi_long: float = 50.0
