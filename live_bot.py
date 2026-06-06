@@ -648,10 +648,12 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                      last_closed["Signal_Trigger"])
             log.info("  Live price: %.6f (vs signal bar close: %.6f)", live_price, last_closed["close"])
 
+            real_tp_pct = abs(tp - plan.entry) / plan.entry
+            real_rr = real_tp_pct / plan.sl_pct if plan.sl_pct > 0 else 0.0
             log.info("  => TRADE PLAN ACCEPTED: %s %s", symbol, side.upper())
             log.info("     Entry: %.6f | SL: %.6f | TP: %.6f", plan.entry, plan.stop_loss, tp)
             log.info("     SL distance: %.4f%% | TP distance: %.4f%% | R/R: %.2f | Risk: %.2f USDT",
-                     plan.sl_pct * 100, plan.tp_pct * 100, plan.rr, plan.risk_usdt)
+                     plan.sl_pct * 100, real_tp_pct * 100, real_rr, plan.risk_usdt)
             log.info("     Qty: %.6f | Notional: %.6f | Margin: %.6f USDT",
                      order_qty, plan.notional, plan.notional / cfg.leverage)
 
