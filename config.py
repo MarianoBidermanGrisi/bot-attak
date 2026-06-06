@@ -22,7 +22,7 @@ class BotConfig:
 
     enable_early_exit: bool = True
     max_position_age_hours: float = 6.0
-    limit_discount_pct: float = _env_float("BOT_LIMIT_DISCOUNT_PCT", 0.003)
+    limit_discount_pct: float = _env_float("BOT_LIMIT_DISCOUNT_PCT", 0.001)
     limit_order_expiry_minutes: int = 120
     use_volume_filter: bool = os.environ.get("BOT_USE_VOLUME_FILTER", "true").lower() in {"1", "true", "yes", "on"}
 
@@ -35,20 +35,21 @@ class BotConfig:
 
     # --- Mean Reversion parameters ---
     mr_rsi_period: int = 21
-    mr_rsi_oversold: float = 35.0
-    mr_rsi_overbought: float = 75.0
+    mr_rsi_oversold: float = 20.0
+    mr_rsi_overbought: float = 65.0
     mr_bb_period: int = 20
-    mr_bb_std: float = 3.0
+    mr_bb_std: float = 1.5
     mr_zscore_period: int = 30
-    mr_zscore_threshold: float = 3.0
+    mr_zscore_threshold: float = 1.5
     mr_use_rsi: bool = True
     mr_use_bb: bool = True
     mr_use_zscore: bool = True
-    mr_min_confluences: int = 1
+    mr_min_confluences: int = 3
     mr_volume_filter: bool = True
-    mr_tp_at_middle: bool = False
+    mr_tp_at_middle: bool = True
     mr_early_exit_rsi_long: float = 50.0
     mr_early_exit_rsi_short: float = 50.0
+    use_trend_filter: bool = False
 
     max_sl_distance_pct: float = 0.035
     min_tp_distance_pct: float = 0.010
@@ -70,15 +71,15 @@ class BotConfig:
     sl_atr_mult: float = 3.0
     tp_atr_mult: float = 3.0
 
-    be_atr_mult: float = 5.0
+    be_atr_mult: float = 2.0
 
-    early_exit_max_loss: float = -0.02
+    early_exit_max_loss: float = -0.03
 
     trail_tight_atr_threshold: float = 3.0
-    trail_tight_mult: float = 0.10
-    trail_medium_atr_threshold: float = 3.0
-    trail_medium_mult: float = 0.20
-    trail_loose_mult: float = 0.30
+    trail_tight_mult: float = 0.20
+    trail_medium_atr_threshold: float = 2.0
+    trail_medium_mult: float = 0.15
+    trail_loose_mult: float = 0.40
 
     fee_rate: float = 0.0006
     slippage_pct: float = 0.0005
