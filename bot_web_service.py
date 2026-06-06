@@ -48,7 +48,7 @@ def resolve_bot_script():
         return BOT_SCRIPT_OVERRIDE if os.path.isabs(BOT_SCRIPT_OVERRIDE) else os.path.join(BASE_DIR, BOT_SCRIPT_OVERRIDE)
     if BOT_VERSION == 'original':
         return os.path.join(BASE_DIR, "combined_strategy_bot.py")
-    return os.path.join(BASE_DIR, "combined_strategy_v2", "live_bot.py")
+    return os.path.join(BASE_DIR, "live_bot.py")
 
 # ==============================================================
 #  HEARTBEAT INTERNO (keep-alive sin cron-job)
