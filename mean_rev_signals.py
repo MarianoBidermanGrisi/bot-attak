@@ -20,6 +20,11 @@ def generate_mr_signals(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
         zs = out["ZScore"].iloc[i]
         vol_ok = bool(out["Vol_Anomaly"].iloc[i])
 
+        # Trend filter: VMA direction alignment
+        vma = out["VMA"].iloc[i]
+        trend_filter_ok_long = (not cfg.use_trend_filter) or close > vma
+        trend_filter_ok_short = (not cfg.use_trend_filter) or close < vma
+
         # Long confluences
         long_confs = []
         if cfg.mr_use_bb and close <= bb_lo:
@@ -30,7 +35,7 @@ def generate_mr_signals(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
             long_confs.append("zscore")
         vol_ok_long = (not cfg.mr_volume_filter) or vol_ok
 
-        if len(long_confs) >= cfg.mr_min_confluences and vol_ok_long:
+        if len(long_confs) >= cfg.mr_min_confluences and vol_ok_long and trend_filter_ok_long:
             out.at[out.index[i], "Master_Buy"] = True
             out.at[out.index[i], "Signal_Trigger"] = "+".join(long_confs)
 
@@ -44,7 +49,7 @@ def generate_mr_signals(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
             short_confs.append("zscore")
         vol_ok_short = (not cfg.mr_volume_filter) or vol_ok
 
-        if len(short_confs) >= cfg.mr_min_confluences and vol_ok_short:
+        if len(short_confs) >= cfg.mr_min_confluences and vol_ok_short and trend_filter_ok_short:
             out.at[out.index[i], "Master_Sell"] = True
             out.at[out.index[i], "Signal_Trigger"] = "+".join(short_confs)
 
