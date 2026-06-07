@@ -49,7 +49,7 @@ class BotConfig:
     mr_tp_at_middle: bool = True
     mr_early_exit_rsi_long: float = 50.0
     mr_early_exit_rsi_short: float = 50.0
-    use_trend_filter: bool = False
+    use_trend_filter: bool = True
 
     max_sl_distance_pct: float = 0.035
     min_tp_distance_pct: float = 0.010
@@ -68,12 +68,12 @@ class BotConfig:
     tp_filter_len: int = 15
 
     # --- SL/TP calculation ---
-    sl_atr_mult: float = 3.0
+    sl_atr_mult: float = 2.0
     tp_atr_mult: float = 3.0
 
     be_atr_mult: float = 2.0
 
-    early_exit_max_loss: float = -0.03
+    early_exit_max_loss: float = -0.015
 
     trail_tight_atr_threshold: float = 3.0
     trail_tight_mult: float = 0.20
