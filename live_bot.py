@@ -595,8 +595,8 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             break
         if state.is_in_cooldown(symbol):
             continue
-        if state.has_pending_order(symbol):
-            log.debug("DUPLICATE GUARD: %s already has a pending order", symbol)
+        if state.is_symbol_busy(symbol):
+            log.debug("DUPLICATE GUARD: %s already has a pending order, position, or placing flag", symbol)
             continue
 
         symbols_scanned += 1
@@ -685,52 +685,73 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
 
             order_side = "buy" if side == "long" else "sell"
             client_id = new_client_order_id(cfg.order_prefix, symbol)
-            params = {
-                "marginCoin": "USDT",
-                "marginMode": "isolated",
-                "tradeSide": "open",
-                "clientOid": client_id,
-                "presetStopSurplusPrice": str(exchange.price_to_precision(symbol, tp)),
-                "presetStopLossPrice": str(exchange.price_to_precision(symbol, plan.stop_loss)),
-            }
-            if cfg.dry_run:
-                log.info("  => DRY RUN ORDER: %s %s | clientOid=%s", symbol, order_side, client_id)
-                log.info("     Entry=%.8f | SL=%.8f | TP=%.8f | Qty=%.8f | Trigger=%s",
-                         plan.entry, plan.stop_loss, tp,
-                         order_qty, last_closed["Signal_Trigger"])
-                exchange_order_id = None
-            else:
-                target_lev = int(cfg.leverage)
-                try:
-                    exchange.set_leverage(target_lev, symbol)
-                except Exception as exc:
-                    if "Exceeded the maximum settable leverage" in str(exc):
-                        max_lev = int(
-                            exchange.market(symbol)
-                            .get("info", {})
-                            .get("maxLever", target_lev)
-                        )
-                        capped = min(target_lev, max_lev)
-                        log.warning("Leverage %d no permitido para %s, usando max=%d", target_lev, symbol, capped)
-                        exchange.set_leverage(capped, symbol)
-                    else:
-                        raise
-                log.info("  => PLACING LIVE ORDER: %s %s | clientOid=%s | qty=%.6f @ %.6f",
-                         symbol, order_side, client_id, order_qty, plan.entry)
-                order = exchange.create_order(symbol, "limit", order_side, order_qty, plan.entry, params=params)
-                exchange_order_id = order.get("id")
-                log.info("  => ORDER PLACED: %s | exchangeOrderId=%s", symbol, exchange_order_id)
 
-            state.upsert_symbol_state(symbol, planned_sl=plan.stop_loss, planned_tp=tp, trigger=last_closed["Signal_Trigger"], entry_risk_usdt=plan.risk_usdt)
-            state.record_order(client_id, exchange_order_id, symbol, side)
-            busy_symbols.add(symbol)
-            orders_placed += 1
-            send_telegram(
-                f"*{symbol} {side.upper()} v2 LIMIT*\n"
-                f"Entry: `{plan.entry:.6f}`\nSL: `{plan.stop_loss:.6f}`\nTP: `{tp:.6f}`\n"
-                f"Estimated Risk: `{plan.risk_usdt:.2f} USDT` | Margin aprox: `{plan.notional / cfg.leverage:.2f} USDT`\n"
-                f"R/R: `{plan.rr:.2f}` | Trigger: `{last_closed['Signal_Trigger']}`"
-            )
+            # ---- Flag placing (evita doble entrada entre hilos) ----
+            state.set_placing_flag(symbol, True)
+            placed_successfully = False
+            try:
+                # ---- Anti-recompra: verificar posición activa en exchange ----
+                try:
+                    position_check = exchange.fetch_position(symbol)
+                    contracts = float(position_check.get("contracts", 0))
+                    if contracts > 0:
+                        log.warning("ANTI-REBUY: %s ya tiene posicion activa en exchange (%.4f contracts)", symbol, contracts)
+                        state.mark_orders_filled(symbol)
+                        busy_symbols.add(symbol)
+                        continue
+                except Exception as exc:
+                    log.warning("ANTI-REBUY check fallo para %s: %s (no bloqueante)", symbol, exc)
+
+                params = {
+                    "marginCoin": "USDT",
+                    "marginMode": "isolated",
+                    "tradeSide": "open",
+                    "clientOid": client_id,
+                    "presetStopSurplusPrice": str(exchange.price_to_precision(symbol, tp)),
+                    "presetStopLossPrice": str(exchange.price_to_precision(symbol, plan.stop_loss)),
+                }
+                if cfg.dry_run:
+                    log.info("  => DRY RUN ORDER: %s %s | clientOid=%s", symbol, order_side, client_id)
+                    log.info("     Entry=%.8f | SL=%.8f | TP=%.8f | Qty=%.8f | Trigger=%s",
+                             plan.entry, plan.stop_loss, tp,
+                             order_qty, last_closed["Signal_Trigger"])
+                    exchange_order_id = None
+                else:
+                    target_lev = int(cfg.leverage)
+                    try:
+                        exchange.set_leverage(target_lev, symbol)
+                    except Exception as exc:
+                        if "Exceeded the maximum settable leverage" in str(exc):
+                            max_lev = int(
+                                exchange.market(symbol)
+                                .get("info", {})
+                                .get("maxLever", target_lev)
+                            )
+                            capped = min(target_lev, max_lev)
+                            log.warning("Leverage %d no permitido para %s, usando max=%d", target_lev, symbol, capped)
+                            exchange.set_leverage(capped, symbol)
+                        else:
+                            raise
+                    log.info("  => PLACING LIVE ORDER: %s %s | clientOid=%s | qty=%.6f @ %.6f",
+                             symbol, order_side, client_id, order_qty, plan.entry)
+                    order = exchange.create_order(symbol, "limit", order_side, order_qty, plan.entry, params=params)
+                    exchange_order_id = order.get("id")
+                    log.info("  => ORDER PLACED: %s | exchangeOrderId=%s", symbol, exchange_order_id)
+
+                state.upsert_symbol_state(symbol, planned_sl=plan.stop_loss, planned_tp=tp, trigger=last_closed["Signal_Trigger"], entry_risk_usdt=plan.risk_usdt)
+                state.record_order(client_id, exchange_order_id, symbol, side)
+                busy_symbols.add(symbol)
+                orders_placed += 1
+                placed_successfully = True
+                send_telegram(
+                    f"*{symbol} {side.upper()} v2 LIMIT*\n"
+                    f"Entry: `{plan.entry:.6f}`\nSL: `{plan.stop_loss:.6f}`\nTP: `{tp:.6f}`\n"
+                    f"Estimated Risk: `{plan.risk_usdt:.2f} USDT` | Margin aprox: `{plan.notional / cfg.leverage:.2f} USDT`\n"
+                    f"R/R: `{plan.rr:.2f}` | Trigger: `{last_closed['Signal_Trigger']}`"
+                )
+            finally:
+                # Limpiar flag placing SIEMPRE, incluso si falló la orden
+                state.set_placing_flag(symbol, False)
         except Exception as exc:
             log.error("SCAN ERROR %s: %s", symbol, exc, exc_info=True)
 
@@ -783,6 +804,12 @@ class PositionMonitor:
 def main() -> None:
     cfg = BotConfig()
     state = StateStore(cfg.state_db_path)
+
+    # Limpiar flags 'placing' huérfanos de posibles crasheos anteriores
+    for entry in state.list_symbol_states(("placing",)):
+        log.info("Startup: clearing stale 'placing' flag for %s", entry["symbol"])
+        state.set_placing_flag(entry["symbol"], False)
+
     owner_id = f"{os.environ.get('RENDER_INSTANCE_ID', 'local')}-{os.getpid()}"
     exchange = setup_exchange(cfg)
     last_report_day = datetime.now().day
@@ -810,6 +837,9 @@ def main() -> None:
     monitor = PositionMonitor(exchange, cfg, state)
     monitor.start()
 
+    # shared_busy: persiste entre ciclos para evitar que símbolos se pierdan
+    shared_busy: set[str] = set()
+
     while not _shutdown_ev.is_set():
         cycle_num += 1
         try:
@@ -826,10 +856,17 @@ def main() -> None:
             log.info("")
             log.info(">>> CYCLE %d START <<<  %s", cycle_num, now.strftime("%Y-%m-%d %H:%M:%S"))
 
-            # Orders and scanning run every ~60s (positions handled by monitor thread)
+            # Combinar: monitor (posiciones activas) + órdenes abiertas + memoria entre ciclos
             busy = monitor.busy
             busy.update(manage_open_orders(exchange, cfg, state))
+            busy.update(shared_busy)
             scan_and_place(exchange, cfg, state, busy)
+
+            # Persistir solo símbolos genuinamente ocupados (evita bloqueo eterno)
+            shared_busy.clear()
+            for sym in busy:
+                if state.is_symbol_busy(sym):
+                    shared_busy.add(sym)
 
             log.info("<<< CYCLE %d END >>>  Active symbols: %d | Next cycle in 60s",
                      cycle_num, len(busy))
