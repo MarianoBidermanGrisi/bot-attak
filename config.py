@@ -12,13 +12,13 @@ def _env_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class BotConfig:
     timeframe: str = "15m"
-    max_open_positions: int = 4
+    max_open_positions: int = 5
     leverage: float = 10.0
 
     risk_per_trade: float = _env_float("BOT_RISK_PER_TRADE", 0.01)
 
     min_margin_usdt: float = _env_float("BOT_MIN_MARGIN_USDT", 1.0)
-    max_margin_fraction: float = _env_float("BOT_MAX_MARGIN_FRACTION", 0.07)
+    max_margin_fraction: float = _env_float("BOT_MAX_MARGIN_FRACTION", 0.10)
 
     enable_early_exit: bool = True
     max_position_age_hours: float = 6.0
@@ -27,14 +27,14 @@ class BotConfig:
     use_volume_filter: bool = os.environ.get("BOT_USE_VOLUME_FILTER", "false").lower() in {"1", "true", "yes", "on"}
     use_supertrend_filter: bool = os.environ.get("BOT_USE_SUPERTREND_FILTER", "false").lower() in {"1", "true", "yes", "on"}
 
-    # Strategy mode: "trend" (original Combined Strategy) or "mean_rev"
-    strategy_mode: str = "trend"
+    # Strategy mode: "mean_rev" (Mean Reversion - ganador del backtest) o "trend"
+    strategy_mode: str = "mean_rev"
 
     # Signal config (trend mode)
     min_triggers: int = 2
     require_all_trend: bool = True
 
-    # --- Mean Reversion parameters ---
+    # --- Mean Reversion parameters (optimizados vía best_config.json) ---
     mr_rsi_period: int = 21
     mr_rsi_oversold: float = 20.0
     mr_rsi_overbought: float = 65.0
@@ -45,12 +45,12 @@ class BotConfig:
     mr_use_rsi: bool = True
     mr_use_bb: bool = True
     mr_use_zscore: bool = True
-    mr_min_confluences: int = 2
+    mr_min_confluences: int = 3
     mr_volume_filter: bool = True
     mr_tp_at_middle: bool = True
     mr_early_exit_rsi_long: float = 50.0
     mr_early_exit_rsi_short: float = 50.0
-    use_trend_filter: bool = True
+    use_trend_filter: bool = False
     use_vma_slope: bool = os.environ.get("BOT_USE_VMA_SLOPE", "true").lower() in {"1", "true", "yes", "on"}
 
     max_sl_distance_pct: float = 0.035
@@ -70,12 +70,12 @@ class BotConfig:
     tp_filter_len: int = 15
 
     # --- SL/TP calculation ---
-    sl_atr_mult: float = _env_float("BOT_SL_ATR_MULT", 1.1)
+    sl_atr_mult: float = _env_float("BOT_SL_ATR_MULT", 3.0)
     tp_atr_mult: float = _env_float("BOT_TP_ATR_MULT", 3.0)
 
     be_atr_mult: float = 2.0
 
-    early_exit_max_loss: float = -0.015
+    early_exit_max_loss: float = -0.03
 
     trail_tight_atr_threshold: float = 3.0
     trail_tight_mult: float = 0.20
