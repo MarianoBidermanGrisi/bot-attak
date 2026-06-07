@@ -24,10 +24,11 @@ class BotConfig:
     max_position_age_hours: float = 6.0
     limit_discount_pct: float = _env_float("BOT_LIMIT_DISCOUNT_PCT", 0.001)
     limit_order_expiry_minutes: int = 120
-    use_volume_filter: bool = os.environ.get("BOT_USE_VOLUME_FILTER", "true").lower() in {"1", "true", "yes", "on"}
+    use_volume_filter: bool = os.environ.get("BOT_USE_VOLUME_FILTER", "false").lower() in {"1", "true", "yes", "on"}
+    use_supertrend_filter: bool = os.environ.get("BOT_USE_SUPERTREND_FILTER", "false").lower() in {"1", "true", "yes", "on"}
 
     # Strategy mode: "trend" (original Combined Strategy) or "mean_rev"
-    strategy_mode: str = "mean_rev"
+    strategy_mode: str = "trend"
 
     # Signal config (trend mode)
     min_triggers: int = 2
@@ -50,6 +51,7 @@ class BotConfig:
     mr_early_exit_rsi_long: float = 50.0
     mr_early_exit_rsi_short: float = 50.0
     use_trend_filter: bool = True
+    use_vma_slope: bool = os.environ.get("BOT_USE_VMA_SLOPE", "true").lower() in {"1", "true", "yes", "on"}
 
     max_sl_distance_pct: float = 0.035
     min_tp_distance_pct: float = 0.010
@@ -68,8 +70,8 @@ class BotConfig:
     tp_filter_len: int = 15
 
     # --- SL/TP calculation ---
-    sl_atr_mult: float = 2.0
-    tp_atr_mult: float = 3.0
+    sl_atr_mult: float = _env_float("BOT_SL_ATR_MULT", 1.1)
+    tp_atr_mult: float = _env_float("BOT_TP_ATR_MULT", 3.0)
 
     be_atr_mult: float = 2.0
 
