@@ -793,6 +793,8 @@ def main() -> None:
     log.info("#  BOT COMBINED STRATEGY v2 - INICIADO")
     log.info("#  PID: %s | Dry-run: %s | Max positions: %d | Timeframe: %s",
              owner_id, cfg.dry_run, cfg.max_open_positions, cfg.timeframe)
+    log.info("#  Strategy: %s | SL=%.1fxATR | TP=%.1fxATR | Confluences=%d | Symbols=46",
+             cfg.strategy_mode, cfg.sl_atr_mult, cfg.tp_atr_mult, cfg.mr_min_confluences)
     log.info("#  Logging level: INFO (full trade diagnostics enabled)")
     log.info("#  ZL length: %d | ZL mult: %.1f | TP filter: %d",
              cfg.zl_length, cfg.zl_mult, cfg.tp_filter_len)
