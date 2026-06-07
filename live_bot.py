@@ -346,6 +346,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
         won_or_protected = status == "be" or (final_pnl is not None and float(final_pnl) > 0)
         cooldown = 3600 if won_or_protected else 14400
         state.set_cooldown(symbol, cooldown)
+        state.mark_orders_filled(symbol)
         state.clear_runtime_state(symbol)
 
         pnl_str = f"{float(final_pnl) * 100:.4f}%" if final_pnl is not None else "N/A"
@@ -433,6 +434,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             log.info("  => POSITION OPENED: %s | side=%s | entry=%.6f | contracts=%.8f | mark=%.6f | age=%.2fh | PnL=%+.4f%% | trigger=%s",
                      symbol, side, entry, contracts, mark, age_h, profit_pct * 100, trigger_str)
             state.upsert_symbol_state(symbol, qty=contracts)
+            state.mark_orders_filled(symbol)
             if live is not None:
                 if cfg.strategy_mode == "mean_rev":
                     log.info("     [i] close=%.6f | RSI=%.2f | ATR=%.6f",
@@ -556,14 +558,24 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
         return
 
     balance = float(exchange.fetch_balance()["total"].get("USDT", 0))
-    tickers = exchange.fetch_tickers()
+    # 46 simbolos rentables (PF>=1) validados en backtest MR con best_config.json
     top_symbols = [
-        item[0]
-        for item in sorted(
-            [(s, float(t.get("quoteVolume") or 0)) for s, t in tickers.items() if s.endswith("/USDT:USDT")],
-            key=lambda x: x[1],
-            reverse=True,
-        )[:100]
+        "BTC/USDT:USDT", "LAB/USDT:USDT", "SKYAI/USDT:USDT",
+        "CHZ/USDT:USDT", "ETH/USDT:USDT", "CRCL/USDT:USDT",
+        "APT/USDT:USDT", "PEPE/USDT:USDT", "DOGE/USDT:USDT",
+        "FIDA/USDT:USDT", "SOL/USDT:USDT", "GWEI/USDT:USDT",
+        "NEAR/USDT:USDT", "AAVE/USDT:USDT", "ADA/USDT:USDT",
+        "PENGU/USDT:USDT", "IN/USDT:USDT", "VELVET/USDT:USDT",
+        "AVAX/USDT:USDT", "XAG/USDT:USDT", "LUNC/USDT:USDT",
+        "TIA/USDT:USDT", "BNB/USDT:USDT", "MU/USDT:USDT",
+        "PIPPIN/USDT:USDT", "DASH/USDT:USDT", "BABY/USDT:USDT",
+        "WLFI/USDT:USDT", "CBRS/USDT:USDT", "TRUMP/USDT:USDT",
+        "NVDA/USDT:USDT", "TAO/USDT:USDT", "XLM/USDT:USDT",
+        "BZ/USDT:USDT", "ICP/USDT:USDT", "SUI/USDT:USDT",
+        "ARB/USDT:USDT", "DOT/USDT:USDT", "LINK/USDT:USDT",
+        "SAHARA/USDT:USDT", "TON/USDT:USDT", "LTC/USDT:USDT",
+        "XMR/USDT:USDT", "XPL/USDT:USDT", "CL/USDT:USDT",
+        "AAOI/USDT:USDT",
     ]
 
     log.info("=" * 70)
@@ -582,6 +594,9 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             log.info("SCAN STOP: max positions reached mid-scan (%d/%d)", len(busy_symbols), cfg.max_open_positions)
             break
         if state.is_in_cooldown(symbol):
+            continue
+        if state.has_pending_order(symbol):
+            log.debug("DUPLICATE GUARD: %s already has a pending order", symbol)
             continue
 
         symbols_scanned += 1
@@ -615,6 +630,9 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             plan, reason = build_trade_plan(side, live_price, float(last_closed["ATR14"]), balance, cfg, min_amount)
             if not plan:
                 log.info("  => TRADE REJECTED: %s | reason: %s", symbol, reason)
+                continue
+            if plan.notional < 5.0:
+                log.info("  => TRADE REJECTED: %s | notional below 5 USDT (%.2f)", symbol, plan.notional)
                 continue
 
             tp = plan.take_profit
