@@ -625,6 +625,16 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                 elif side == "short" and bb_mid < plan.entry:
                     tp = bb_mid
 
+            # Re-validate R/R with real TP (BB_Middle may be tighter than ATR TP)
+            real_tp_pct = abs(tp - plan.entry) / plan.entry
+            real_rr = real_tp_pct / plan.sl_pct if plan.sl_pct > 0 else 0.0
+            if real_rr < cfg.min_risk_reward_ratio:
+                log.info("  => TRADE REJECTED: %s | real R/R %.2f < %.2f (bb_middle TP)", symbol, real_rr, cfg.min_risk_reward_ratio)
+                continue
+            if plan.sl_pct > real_tp_pct:
+                log.info("  => TRADE REJECTED: %s | SL dist (%.4f%%) > TP dist (%.4f%%) (bb_middle TP)", symbol, plan.sl_pct * 100, real_tp_pct * 100)
+                continue
+
             order_qty = float(exchange.amount_to_precision(symbol, plan.qty))
             if order_qty <= 0:
                 log.info("  => TRADE REJECTED: %s | amount_to_precision rounded qty to zero (raw=%.8f)", symbol, plan.qty)
@@ -648,8 +658,6 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                      last_closed["Signal_Trigger"])
             log.info("  Live price: %.6f (vs signal bar close: %.6f)", live_price, last_closed["close"])
 
-            real_tp_pct = abs(tp - plan.entry) / plan.entry
-            real_rr = real_tp_pct / plan.sl_pct if plan.sl_pct > 0 else 0.0
             log.info("  => TRADE PLAN ACCEPTED: %s %s", symbol, side.upper())
             log.info("     Entry: %.6f | SL: %.6f | TP: %.6f", plan.entry, plan.stop_loss, tp)
             log.info("     SL distance: %.4f%% | TP distance: %.4f%% | R/R: %.2f | Risk: %.2f USDT",
