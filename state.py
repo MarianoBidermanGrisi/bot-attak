@@ -196,6 +196,30 @@ class StateStore:
             ).fetchone()
         return row is not None
 
+    def is_symbol_busy(self, symbol: str) -> bool:
+        """Verifica si un símbolo está ocupado: orden pendiente, posición activa O flag placing."""
+        if self.has_pending_order(symbol):
+            return True
+        state = self.get_symbol_state(symbol)
+        if state.get("entry_price") is not None:
+            return True
+        if state.get("status") == "placing":
+            return True
+        return False
+
+    def set_placing_flag(self, symbol: str, active: bool) -> None:
+        """Flag volátil: marca que estamos por colocar una orden (evita doble entrada)."""
+        if active:
+            self.upsert_symbol_state(symbol, status="placing")
+        else:
+            current = self.get_symbol_state(symbol)
+            if current.get("status") == "placing":
+                with self._conn() as conn:
+                    conn.execute(
+                        "UPDATE symbol_state SET status = NULL, updated_at = ? WHERE symbol = ?",
+                        (time.time(), symbol),
+                    )
+
     def mark_orders_filled(self, symbol: str) -> None:
         with self._conn() as conn:
             conn.execute(
