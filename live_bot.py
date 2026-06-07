@@ -596,7 +596,7 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
             if cfg.strategy_mode == "mean_rev":
                 df = generate_mr_signals(df, cfg)
             else:
-                opts = build_signal_options(use_volume=cfg.use_volume_filter)
+                opts = build_signal_options(use_volume=cfg.use_volume_filter, use_supertrend=cfg.use_supertrend_filter)
                 df = generate_signals(df, cfg, options=opts)
             last_closed = df.iloc[-2]
             last_row = df.iloc[-1]
