@@ -188,6 +188,21 @@ class StateStore:
                 (status, time.time(), client_order_id),
             )
 
+    def has_pending_order(self, symbol: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM bot_orders WHERE symbol = ? AND status = 'open' AND created_at > ?",
+                (symbol, time.time() - 86400),
+            ).fetchone()
+        return row is not None
+
+    def mark_orders_filled(self, symbol: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE bot_orders SET status = 'filled', updated_at = ? WHERE symbol = ? AND status = 'open'",
+                (time.time(), symbol),
+            )
+
     def is_bot_order(self, client_order_id: str | None, prefix: str) -> bool:
         if not client_order_id or not client_order_id.startswith(prefix):
             return False
