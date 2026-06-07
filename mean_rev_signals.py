@@ -22,8 +22,13 @@ def generate_mr_signals(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
 
         # Trend filter: VMA direction alignment
         vma = out["VMA"].iloc[i]
-        trend_filter_ok_long = (not cfg.use_trend_filter) or close > vma
-        trend_filter_ok_short = (not cfg.use_trend_filter) or close < vma
+        vma_prev = out["VMA"].iloc[i - 1] if i > 0 else vma
+        if cfg.use_vma_slope:
+            trend_filter_ok_long = (not cfg.use_trend_filter) or (vma > vma_prev)
+            trend_filter_ok_short = (not cfg.use_trend_filter) or (vma < vma_prev)
+        else:
+            trend_filter_ok_long = (not cfg.use_trend_filter) or close > vma
+            trend_filter_ok_short = (not cfg.use_trend_filter) or close < vma
 
         # Long confluences
         long_confs = []
