@@ -15,7 +15,7 @@ class BotConfig:
     max_open_positions: int = 5
     leverage: float = 10.0
 
-    risk_per_trade: float = _env_float("BOT_RISK_PER_TRADE", 0.01)
+    risk_per_trade: float = _env_float("BOT_RISK_PER_TRADE", 0.015)
 
     min_margin_usdt: float = _env_float("BOT_MIN_MARGIN_USDT", 1.0)
     max_margin_fraction: float = _env_float("BOT_MAX_MARGIN_FRACTION", 0.10)
