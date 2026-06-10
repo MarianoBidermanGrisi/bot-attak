@@ -42,9 +42,11 @@ def fetch_ohlcv_safe(exchange, symbol, timeframe, limit=500, max_retries=4):
         try:
             return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         except Exception as e:
-            if "429" in str(e) and attempt < max_retries - 1:
+            is_429 = "429" in str(e)
+            if attempt < max_retries - 1:
                 wait = 2 ** attempt
-                log.warning("429 en %s, retry en %ds (intento %d/%d)", symbol, wait, attempt + 1, max_retries)
+                log.warning("Error fetching %s (intento %d/%d, retry en %ds): %s",
+                            symbol, attempt + 1, max_retries, wait, e)
                 time.sleep(wait)
             else:
                 raise
@@ -722,7 +724,7 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                 # ---- Anti-recompra: verificar posición activa en exchange ----
                 try:
                     position_check = exchange.fetch_position(symbol)
-                    contracts = float(position_check.get("contracts", 0)) if position_check else 0
+                    contracts = float(position_check.get("contracts") or 0) if position_check else 0
                     if contracts > 0:
                         log.warning("ANTI-REBUY: %s ya tiene posicion activa en exchange (%.4f contracts)", symbol, contracts)
                         state.mark_orders_filled(symbol)
