@@ -148,7 +148,23 @@ def extract_client_order_id(order: dict) -> str | None:
     return order.get("clientOrderId") or order.get("clientOid") or info.get("clientOid") or info.get("clientOrderId")
 
 
-def update_stop_loss(exchange, cfg: BotConfig, symbol: str, side: str, new_sl: float) -> bool:
+def update_stop_loss(exchange, cfg: BotConfig, symbol: str, side: str, new_sl: float, mark_price: float | None = None) -> bool:
+    if mark_price is None:
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            mark_price = float(ticker["last"])
+        except Exception:
+            log.warning("  Could not fetch mark price for SL validation: %s", symbol)
+            mark_price = 0.0
+
+    if mark_price > 0:
+        if side == "long" and new_sl >= mark_price:
+            log.warning("  SKIP SL UPDATE (long SL must be below mark): sl=%.8f >= mark=%.8f", new_sl, mark_price)
+            return False
+        if side == "short" and new_sl <= mark_price:
+            log.warning("  SKIP SL UPDATE (short SL must be above mark): sl=%.8f <= mark=%.8f", new_sl, mark_price)
+            return False
+
     sym_clean = clean_bitget_symbol(symbol)
     if cfg.dry_run:
         log.info("  [DRY RUN] update_stop_loss: %s | side=%s | new_sl=%.8f", symbol, side, new_sl)
@@ -319,8 +335,21 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             final_pnl = actual_pnl_pct
             final_pnl_usdt = actual_abs_pnl
         else:
-            final_pnl = last_pnl
-            final_pnl_usdt = None
+            # Fallback: compute PnL from final trailing SL (most accurate available)
+            final_sl_raw = saved.get("last_trail_sl")
+            if final_sl_raw and entry_price and side:
+                entry_f = float(entry_price)
+                sl_f = float(final_sl_raw)
+                if side == "long":
+                    computed_pnl = (sl_f - entry_f) / entry_f
+                else:
+                    computed_pnl = (entry_f - sl_f) / entry_f
+                log.info("  PnL computed from final SL: %.4f%% (SL=%.6f, entry=%.6f)", computed_pnl * 100, sl_f, entry_f)
+                final_pnl = computed_pnl
+                final_pnl_usdt = computed_pnl * entry_f * float(saved_qty) if saved_qty else None
+            else:
+                final_pnl = last_pnl
+                final_pnl_usdt = None
 
         # Compute exit price from realized PnL
         exit_price = None
@@ -460,7 +489,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             # Immediately set stop-loss at exchange level (redundant with preset, but ensures it's active)
             if atr > 0:
                 sl_price = entry - atr * cfg.sl_atr_mult if side == "long" else entry + atr * cfg.sl_atr_mult
-                update_stop_loss(exchange, cfg, symbol, side, sl_price)
+                update_stop_loss(exchange, cfg, symbol, side, sl_price, mark_price=mark)
                 log.info("  => POST-OPEN SL SET: %s | side=%s | sl=%.6f", symbol, side, sl_price)
 
         # --- Early exit check ---
@@ -504,7 +533,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
             if profit_pct >= be_trigger and current.get("status") != "be":
                 log.info("  => BREAKEVEN ACTIVATING: profit(%.4f%%) >= trigger(%.4f%%)",
                          profit_pct * 100, be_trigger * 100)
-                if update_stop_loss(exchange, cfg, symbol, side, entry):
+                if update_stop_loss(exchange, cfg, symbol, side, entry, mark_price=mark):
                     state.upsert_symbol_state(symbol, status="be", last_trail_sl=entry)
                     log.info("  => BREAKEVEN ACTIVATED | %s | SL moved to entry=%.6f", symbol, entry)
                     send_telegram(f"*{symbol} breakeven activated* trigger={be_trigger * 100:.2f}%")
@@ -537,7 +566,7 @@ def manage_open_positions(exchange, cfg: BotConfig, state: StateStore) -> set[st
                          peak, trail_dist * 100, trail_sl, last_trail)
                 log.info("    moved=%s | valid=%s | side=%s", moved, valid, side)
 
-                if moved and valid and update_stop_loss(exchange, cfg, symbol, side, trail_sl):
+                if moved and valid and update_stop_loss(exchange, cfg, symbol, side, trail_sl, mark_price=mark):
                     state.upsert_symbol_state(symbol, last_trail_sl=trail_sl)
                     log.info("  => TRAIL UPDATED: %s | SL: %.6f -> %.6f (%.4f%%)",
                              symbol, float(last_trail) if last_trail else entry, trail_sl,
@@ -693,7 +722,7 @@ def scan_and_place(exchange, cfg: BotConfig, state: StateStore, busy_symbols: se
                 # ---- Anti-recompra: verificar posición activa en exchange ----
                 try:
                     position_check = exchange.fetch_position(symbol)
-                    contracts = float(position_check.get("contracts", 0))
+                    contracts = float(position_check.get("contracts", 0)) if position_check else 0
                     if contracts > 0:
                         log.warning("ANTI-REBUY: %s ya tiene posicion activa en exchange (%.4f contracts)", symbol, contracts)
                         state.mark_orders_filled(symbol)
