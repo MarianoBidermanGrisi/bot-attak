@@ -7,10 +7,21 @@ try:
 except ImportError:
     from config import BotConfig
 
-try:
-    from .regime_classifier import calc_adx
-except ImportError:
-    from regime_classifier import calc_adx
+
+def calc_adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    tr = ta.true_range(high, low, close)
+    up = high.diff()
+    down = -low.diff()
+    pos_dm = np.where((up > down) & (up > 0), up, 0.0)
+    neg_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr_s = tr.rolling(length).sum()
+    pos_s = pd.Series(pos_dm, index=high.index).rolling(length).sum()
+    neg_s = pd.Series(neg_dm, index=high.index).rolling(length).sum()
+    pos_di = 100 * pos_s / tr_s.replace(0, np.nan)
+    neg_di = 100 * neg_s / tr_s.replace(0, np.nan)
+    dx = 100 * (pos_di - neg_di).abs() / (pos_di + neg_di).replace(0, np.nan)
+    adx = dx.rolling(length).mean()
+    return adx
 
 
 def calc_zlema(close: pd.Series, length: int) -> pd.Series:
