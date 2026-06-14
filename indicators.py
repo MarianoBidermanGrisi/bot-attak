@@ -7,6 +7,11 @@ try:
 except ImportError:
     from config import BotConfig
 
+try:
+    from .regime_classifier import calc_adx
+except ImportError:
+    from regime_classifier import calc_adx
+
 
 def calc_zlema(close: pd.Series, length: int) -> pd.Series:
     lag = int((length - 1) / 2)
@@ -85,6 +90,7 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
     out["ZLEMA"], out["ZL_Upper"], out["ZL_Lower"] = calc_zl_bands(out, cfg.zl_length, cfg.zl_mult)
     out["Two_P"], out["Two_PP"] = calc_two_pole(close, cfg.tp_filter_len)
     out["ATR14"] = ta.atr(out["high"], out["low"], out["close"], length=14)
+    out["ADX"] = calc_adx(out["high"], out["low"], out["close"], 14)
     out["Vol_Anomaly"] = out["volume"].rolling(3).mean() > out["volume"].rolling(20).mean()
 
     # Mean reversion indicators
