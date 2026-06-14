@@ -13,6 +13,11 @@ def generate_mr_signals(df: pd.DataFrame, cfg: BotConfig) -> pd.DataFrame:
     out["Signal_Trigger"] = ""
 
     for i in range(1, len(out)):
+        if cfg.mr_adx_filter_enable:
+            adx_v = out["ADX"].iloc[i]
+            if not pd.isna(adx_v) and cfg.mr_adx_filter_lo <= adx_v < cfg.mr_adx_filter_hi:
+                continue
+
         close = out["close"].iloc[i]
         rsi = out["RSI"].iloc[i]
         bb_lo = out["BB_Lower"].iloc[i]
