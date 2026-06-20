@@ -248,6 +248,8 @@ class BotRF15m:
         try:
             self.exchange.set_leverage(LEVERAGE, symbol)
             notional = self.balance * RISK_PCT * LEVERAGE
+            if notional < 5:
+                notional = 5
             amount_contracts = self.exchange.amount_to_precision(symbol, notional / price)
             if float(amount_contracts) <= 0:
                 return None
@@ -262,6 +264,8 @@ class BotRF15m:
         try:
             side = 'sell' if position.side == 'buy' else 'buy'
             notional = abs(position.size_usdt * LEVERAGE)
+            if notional < 5:
+                notional = 5
             amount_contracts = self.exchange.amount_to_precision(position.symbol, notional / position.entry_price)
             order = self.exchange.create_market_order(position.symbol, side, float(amount_contracts))
             exit_price = position.exit_price or self.exchange.fetch_ticker(position.symbol)['last']
