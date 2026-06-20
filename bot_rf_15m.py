@@ -247,14 +247,19 @@ class BotRF15m:
     def place_order(self, symbol, side, price):
         try:
             self.exchange.set_leverage(LEVERAGE, symbol)
-            notional = self.balance * RISK_PCT * LEVERAGE
-            if notional < 5:
-                notional = 5
-            amount_contracts = self.exchange.amount_to_precision(symbol, notional / price)
-            if float(amount_contracts) <= 0:
+            notional = max(self.balance * RISK_PCT * LEVERAGE, 5)
+            raw = notional / price
+            tick = float(self.exchange.market(symbol)['precision']['amount'])
+            try:
+                amount_str = self.exchange.amount_to_precision(symbol, raw)
+            except Exception:
+                amount_str = self.exchange.amount_to_precision(symbol, raw + tick)
+            if float(amount_str) * price < 5:
+                amount_str = self.exchange.amount_to_precision(symbol, raw + tick)
+            if float(amount_str) <= 0 or float(amount_str) * price < 5:
                 return None
-            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_contracts))
-            log.info(f"ORDEN {side.upper()} {symbol}: {amount_contracts} contracts @ {price} (notional={notional:.2f})")
+            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str))
+            log.info(f"ORDEN {side.upper()} {symbol}: {amount_str} contracts @ {price} (notional={float(amount_str)*price:.2f})")
             return order
         except Exception as e:
             log.error(f"Error placing {side} order for {symbol}: {e}")
@@ -263,11 +268,16 @@ class BotRF15m:
     def close_position(self, position):
         try:
             side = 'sell' if position.side == 'buy' else 'buy'
-            notional = abs(position.size_usdt * LEVERAGE)
-            if notional < 5:
-                notional = 5
-            amount_contracts = self.exchange.amount_to_precision(position.symbol, notional / position.entry_price)
-            order = self.exchange.create_market_order(position.symbol, side, float(amount_contracts))
+            notional = max(abs(position.size_usdt * LEVERAGE), 5)
+            raw = notional / position.entry_price
+            tick = float(self.exchange.market(position.symbol)['precision']['amount'])
+            try:
+                amount_str = self.exchange.amount_to_precision(position.symbol, raw)
+            except Exception:
+                amount_str = self.exchange.amount_to_precision(position.symbol, raw + tick)
+            if float(amount_str) <= 0:
+                return False
+            order = self.exchange.create_market_order(position.symbol, side, float(amount_str))
             exit_price = position.exit_price or self.exchange.fetch_ticker(position.symbol)['last']
             position.close(exit_price, datetime.now(), position.exit_reason or 'MANUAL')
             self.balance += position.pnl_usdt
@@ -431,7 +441,6 @@ class BotRF15m:
 
             log.info(f"Esperando {CHECK_INTERVAL_SEC}s...")
             time.sleep(CHECK_INTERVAL_SEC)
-
 
 
 if __name__ == '__main__':
