@@ -173,11 +173,11 @@ class Position:
 class BotRF15m:
     def __init__(self):
         api_key = os.getenv('BITGET_API_KEY')
-        api_secret = os.getenv('BITGET_API_SECRET')
-        api_password = os.getenv('BITGET_API_PASSWORD')
+        api_secret = os.getenv('BITGET_SECRET_KEY')
+        api_password = os.getenv('BITGET_PASSPHRASE')
 
         if not all([api_key, api_secret, api_password]):
-            log.error("Faltan API Keys. Crear archivo .env con BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSWORD")
+            log.error("Faltan API Keys. Verificar env vars en Render")
             sys.exit(1)
 
         self.exchange = ccxt.bitget({
