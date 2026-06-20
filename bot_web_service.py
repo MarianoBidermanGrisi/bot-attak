@@ -38,10 +38,14 @@ def status():
         "started_at": BOT_STARTED_AT,
     }), 200
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 def run_bot():
     global BOT_ACTIVE, BOT_STARTED_AT
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        os.chdir(PROJECT_ROOT)
+        if PROJECT_ROOT not in sys.path:
+            sys.path.insert(0, PROJECT_ROOT)
         from bot_rf_15m import BotRF15m
         bot = BotRF15m()
         BOT_STARTED_AT = time.time()
