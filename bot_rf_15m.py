@@ -14,11 +14,32 @@ import ccxt
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from backtest.ml.features import build_features, FEATURE_COLS, get_feature_vector
-from backtest.strategies.abracadabra_v1 import compute_indicators
-from backtest.optimizations.proposed_v2 import compute_sl_tp_v2
-
 load_dotenv()
+
+import importlib.util as _util
+import types as _types
+def _import_path(mod_path, name):
+    _parts = name.split('.')
+    for _i in range(len(_parts)):
+        _pkg = '.'.join(_parts[:_i+1])
+        if _pkg not in sys.modules:
+            sys.modules[_pkg] = _types.ModuleType(_pkg)
+    spec = _util.spec_from_file_location(name, mod_path)
+    m = _util.module_from_spec(spec)
+    sys.modules[name] = m
+    spec.loader.exec_module(m)
+    return m
+
+_bt = os.path.join(BASE_DIR, 'backtest')
+_ml = _import_path(os.path.join(_bt, 'ml', 'features.py'), 'backtest.ml.features')
+_strat = _import_path(os.path.join(_bt, 'strategies', 'abracadabra_v1.py'), 'backtest.strategies.abracadabra_v1')
+_opt = _import_path(os.path.join(_bt, 'optimizations', 'proposed_v2.py'), 'backtest.optimizations.proposed_v2')
+
+build_features = _ml.build_features
+FEATURE_COLS = _ml.FEATURE_COLS
+get_feature_vector = _ml.get_feature_vector
+compute_indicators = _strat.compute_indicators
+compute_sl_tp_v2 = _opt.compute_sl_tp_v2
 
 logging.basicConfig(
     level=logging.INFO,
