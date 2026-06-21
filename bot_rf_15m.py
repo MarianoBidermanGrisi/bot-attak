@@ -131,17 +131,17 @@ class Position:
 
     def check_exit(self, high, low, ts):
         if self.side == 'buy':
-            if low <= self.sl:
+            if self.sl is not None and low <= self.sl:
                 self.exit_price = self.sl
                 self.exit_reason = 'SL'
-            elif high >= self.tp:
+            elif self.tp is not None and high >= self.tp:
                 self.exit_price = self.tp
                 self.exit_reason = 'TP'
         else:
-            if high >= self.sl:
+            if self.sl is not None and high >= self.sl:
                 self.exit_price = self.sl
                 self.exit_reason = 'SL'
-            elif low <= self.tp:
+            elif self.tp is not None and low <= self.tp:
                 self.exit_price = self.tp
                 self.exit_reason = 'TP'
         if self.exit_price:
@@ -257,16 +257,19 @@ class BotRF15m:
         try:
             max_lev = float(self.exchange.market(symbol)['limits']['leverage']['max'])
             lev = min(LEVERAGE, max_lev)
+            try:
+                self.exchange.set_margin_mode('isolated', symbol)
+            except Exception:
+                pass
             self.exchange.set_leverage(lev, symbol, {'holdSide': 'long' if side == 'buy' else 'short'})
             notional = max(self.balance * RISK_PCT * lev, 5)
             raw = notional / price
             tick = float(self.exchange.market(symbol)['precision']['amount'])
+            raw_rounded = raw + tick  # round up to nearest tick to meet min notional
             try:
-                amount_str = self.exchange.amount_to_precision(symbol, raw)
+                amount_str = self.exchange.amount_to_precision(symbol, raw_rounded)
             except Exception:
-                amount_str = self.exchange.amount_to_precision(symbol, raw + tick)
-            if float(amount_str) * price < 5:
-                amount_str = self.exchange.amount_to_precision(symbol, raw + tick)
+                amount_str = self.exchange.amount_to_precision(symbol, raw_rounded + tick)
             if float(amount_str) <= 0 or float(amount_str) * price < 5:
                 return None
             params = {'hedged': True}
@@ -324,6 +327,7 @@ class BotRF15m:
         if position.last_sl_sent == position.sl:
             return True
         try:
+            self._cancel_stop_orders(position.symbol)
             close_side = 'sell' if position.side == 'buy' else 'buy'
             notional = abs(position.size_usdt * position.leverage)
             raw_amount = notional / position.entry_price
@@ -385,6 +389,8 @@ class BotRF15m:
                 continue
             if len(self.positions) >= MAX_POSITIONS:
                 break
+            if len(entries) >= MAX_POSITIONS * 2:
+                break
 
             if symbol not in self.ohlcv_cache:
                 df = self.fetch_candles(symbol)
@@ -407,7 +413,7 @@ class BotRF15m:
         entries.sort(key=lambda x: -abs(x[2] - 0.5))
         taken = 0
         for symbol, side, prob in entries:
-            if taken + len(self.positions) >= MAX_POSITIONS:
+            if taken >= MAX_POSITIONS:
                 break
             if any(p.symbol == symbol for p in self.positions):
                 continue
@@ -467,6 +473,45 @@ class BotRF15m:
         except Exception as e:
             log.error(f"Error saving state: {e}")
 
+    def _recover_positions(self):
+        try:
+            positions = self.exchange.fetch_positions()
+            recovered = 0
+            for p in positions:
+                sym = p.get('symbol')
+                side = p.get('side')
+                size = float(p.get('contracts', 0) or 0)
+                if sym is None or side is None or size <= 0:
+                    continue
+                if side not in ('long', 'short'):
+                    continue
+                entry = float(p.get('entryPrice', 0) or 0)
+                if entry <= 0:
+                    continue
+                if any(x.symbol == sym for x in self.positions):
+                    continue
+                margin = float(p.get('collateral', 0) or 0)
+                if margin <= 0:
+                    notional = float(p.get('notional', 0) or 0)
+                    lev_est = float(p.get('leverage', LEVERAGE) or 1)
+                    margin = notional / lev_est if lev_est > 0 else 0
+                if margin <= 0:
+                    continue
+                lev = float(p.get('leverage', LEVERAGE) or 1)
+                pos = Position(sym, 'buy' if side == 'long' else 'sell', entry,
+                               datetime.now(), None, None, margin, lev)
+                pos.sl = entry * 0.95 if side == 'long' else entry * 1.05
+                pos.peak_price = entry
+                self.positions.append(pos)
+                recovered += 1
+                log.info(f"Recuperada posicion {sym} {side} @ {entry} colateral={margin:.2f} lev={lev:.0f}")
+            if recovered:
+                log.info(f"Recuperadas {recovered} posiciones del exchange")
+            return recovered
+        except Exception as e:
+            log.warning(f"No se pudieron recuperar posiciones: {e}")
+            return 0
+
     def run(self):
         log.info("Iniciando Bot RF 15m v2 (optimizado)")
         log.info(f"Threshold: {THRESHOLD}, Max pos: {MAX_POSITIONS}, Leverage: {LEVERAGE}x")
@@ -479,6 +524,10 @@ class BotRF15m:
         if not self.fetch_top_symbols():
             log.error("No se pudieron obtener símbolos. Verificar API keys.")
             return
+
+        recovered = self._recover_positions()
+        if recovered:
+            log.info(f"Sincronizadas {recovered} posiciones del exchange. Total: {len(self.positions)}")
 
         while True:
             try:
