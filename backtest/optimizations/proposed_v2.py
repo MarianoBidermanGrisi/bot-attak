@@ -100,6 +100,7 @@ def get_entry_signal_v2(df, i, poc, params):
     return None, None, None, None, None
 
 def compute_sl_tp_v2(df, i, side, price, params):
+    min_dist = params.get('MIN_SL_DIST_PCT', 0.003)
     if params['use_atr_sl']:
         atr = compute_atr(df, params['atr_period'])
         atr_val = atr.iloc[i]
@@ -107,17 +108,21 @@ def compute_sl_tp_v2(df, i, side, price, params):
         if side == 'buy':
             sl = price - sl_dist
             sl = max(sl, price * (1 - params['MAX_SL_PCT']))
+            sl = min(sl, price * (1 - min_dist))
         else:
             sl = price + sl_dist
             sl = min(sl, price * (1 + params['MAX_SL_PCT']))
+            sl = max(sl, price * (1 + min_dist))
         tp = price + (price - sl) * params['RR_RATIO'] if side == 'buy' else price - (sl - price) * params['RR_RATIO']
     else:
         if side == 'buy':
             last_lows = df['low'].iloc[max(0, i-params['SL_LOOKBACK']-1):i].min()
             sl = max(last_lows, price * (1 - params['MAX_SL_PCT']))
+            sl = min(sl, price * (1 - min_dist))
         else:
             last_highs = df['high'].iloc[max(0, i-params['SL_LOOKBACK']-1):i].max()
             sl = min(last_highs, price * (1 + params['MAX_SL_PCT']))
+            sl = max(sl, price * (1 + min_dist))
         tp = price + (price - sl) * params['RR_RATIO'] if side == 'buy' else price - (sl - price) * params['RR_RATIO']
     return sl, tp
 
