@@ -3,8 +3,6 @@ import sys
 import time
 import logging
 import json
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -437,7 +435,9 @@ class BotRF15m:
             lev = min(LEVERAGE, max_lev)
             order = self.place_order(symbol, side, price, sl, tp)
             if order:
-                pos = Position(symbol, side, price, datetime.now(), sl, tp, self.balance * RISK_PCT, lev)
+                notional = max(self.balance * RISK_PCT * lev, 5)
+                margin = notional / lev
+                pos = Position(symbol, side, price, datetime.now(), sl, tp, margin, lev)
                 self.positions.append(pos)
                 taken += 1
                 log.info(f"ENTRADA {side.upper()} {symbol}: entry={price:.4f} sl={sl:.4f} tp={tp:.4f} prob={prob:.4f} be={BE_TRIGGER_PCT*100}% trail={TRAILING_DIST_PCT*100}%")
@@ -461,7 +461,10 @@ class BotRF15m:
 
         log.info(f"Posiciones activas: {len(self.positions)}")
         for p in self.positions:
-            log.info(f"  {p.symbol} {p.side.upper()} entry={p.entry_price:.4f} sl={p.sl:.4f} tp={p.tp:.4f} pnl={p.pnl_usdt:.2f}")
+            sl = p.sl if p.sl is not None else 0.0
+            tp = p.tp if p.tp is not None else 0.0
+            pnl = p.pnl_usdt if p.pnl_usdt is not None else 0.0
+            log.info(f"  {p.symbol} {p.side.upper()} entry={p.entry_price:.4f} sl={sl:.4f} tp={tp:.4f} pnl={pnl:.2f}")
 
         if len(self.trade_log) > 1000:
             self.trade_log = self.trade_log[-500:]
@@ -536,6 +539,9 @@ class BotRF15m:
         recovered = self._recover_positions()
         if recovered:
             log.info(f"Sincronizadas {recovered} posiciones del exchange. Total: {len(self.positions)}")
+            for pos in self.positions:
+                self._sync_sl_to_exchange(pos)
+                log.info(f"SL de guardia sincronizado para {pos.symbol}: {pos.sl:.4f}")
 
         while True:
             try:
@@ -555,23 +561,4 @@ class BotRF15m:
             time.sleep(CHECK_INTERVAL_SEC)
 
 
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'ok')
-    def log_message(self, format, *args):
-        pass
 
-def _start_health_server():
-    port = int(os.getenv('PORT', 8080))
-    server = HTTPServer(('0.0.0.0', port), _HealthHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    log.info(f"Health server on port {port}")
-
-if __name__ == '__main__':
-    _start_health_server()
-    bot = BotRF15m()
-    bot.run()
