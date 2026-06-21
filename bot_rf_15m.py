@@ -186,7 +186,11 @@ class BotRF15m:
             'secret': api_secret,
             'password': api_password,
             'enableRateLimit': True,
-            'options': {'defaultType': 'swap'},
+            'options': {
+                'defaultType': 'swap',
+                'defaultPositionSide': 'long',
+                'marginMode': 'crossed',
+            },
         })
 
         model_path = os.path.join(BASE_DIR, 'backtest', 'models', 'rf_15m_20x.joblib')
@@ -261,7 +265,8 @@ class BotRF15m:
                 amount_str = self.exchange.amount_to_precision(symbol, raw + tick)
             if float(amount_str) <= 0 or float(amount_str) * price < 5:
                 return None
-            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str))
+            params = {'positionSide': 'long' if side.lower() == 'buy' else 'short'}
+            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str), None, params)
             log.info(f"ORDEN {side.upper()} {symbol}: {amount_str} contracts @ {price} (lev={lev:.0f}x, notional={float(amount_str)*price:.2f})")
             return order
         except Exception as e:
@@ -270,7 +275,7 @@ class BotRF15m:
 
     def close_position(self, position):
         try:
-            side = 'sell' if position.side == 'buy' else 'buy'
+            close_side = 'sell' if position.side == 'buy' else 'buy'
             notional = max(abs(position.size_usdt * position.leverage), 5)
             raw = notional / position.entry_price
             tick = float(self.exchange.market(position.symbol)['precision']['amount'])
@@ -280,7 +285,8 @@ class BotRF15m:
                 amount_str = self.exchange.amount_to_precision(position.symbol, raw + tick)
             if float(amount_str) <= 0:
                 return False
-            order = self.exchange.create_market_order(position.symbol, side, float(amount_str))
+            params = {'positionSide': 'long' if position.side == 'buy' else 'short'}
+            order = self.exchange.create_market_order(position.symbol, close_side, float(amount_str), None, params)
             exit_price = position.exit_price or self.exchange.fetch_ticker(position.symbol)['last']
             position.close(exit_price, datetime.now(), position.exit_reason or 'MANUAL')
             self.balance += position.pnl_usdt
