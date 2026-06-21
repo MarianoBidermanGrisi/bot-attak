@@ -186,11 +186,7 @@ class BotRF15m:
             'secret': api_secret,
             'password': api_password,
             'enableRateLimit': True,
-            'options': {
-                'defaultType': 'swap',
-                'defaultPositionSide': 'long',
-                'marginMode': 'crossed',
-            },
+            'options': {'defaultType': 'swap'},
         })
 
         model_path = os.path.join(BASE_DIR, 'backtest', 'models', 'rf_15m_20x.joblib')
@@ -265,8 +261,7 @@ class BotRF15m:
                 amount_str = self.exchange.amount_to_precision(symbol, raw + tick)
             if float(amount_str) <= 0 or float(amount_str) * price < 5:
                 return None
-            params = {'positionSide': 'long' if side.lower() == 'buy' else 'short'}
-            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str), None, params)
+            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str), None, {'hedged': True})
             log.info(f"ORDEN {side.upper()} {symbol}: {amount_str} contracts @ {price} (lev={lev:.0f}x, notional={float(amount_str)*price:.2f})")
             return order
         except Exception as e:
@@ -285,8 +280,7 @@ class BotRF15m:
                 amount_str = self.exchange.amount_to_precision(position.symbol, raw + tick)
             if float(amount_str) <= 0:
                 return False
-            params = {'positionSide': 'long' if position.side == 'buy' else 'short'}
-            order = self.exchange.create_market_order(position.symbol, close_side, float(amount_str), None, params)
+            order = self.exchange.create_market_order(position.symbol, close_side, float(amount_str), None, {'hedged': True, 'reduceOnly': True})
             exit_price = position.exit_price or self.exchange.fetch_ticker(position.symbol)['last']
             position.close(exit_price, datetime.now(), position.exit_reason or 'MANUAL')
             self.balance += position.pnl_usdt
