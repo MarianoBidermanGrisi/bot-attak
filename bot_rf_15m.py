@@ -245,7 +245,7 @@ class BotRF15m:
             log.error(f"Error predicting {symbol}: {e}")
             return None
 
-    def place_order(self, symbol, side, price):
+    def place_order(self, symbol, side, price, sl=None, tp=None):
         try:
             max_lev = float(self.exchange.market(symbol)['limits']['leverage']['max'])
             lev = min(LEVERAGE, max_lev)
@@ -261,7 +261,12 @@ class BotRF15m:
                 amount_str = self.exchange.amount_to_precision(symbol, raw + tick)
             if float(amount_str) <= 0 or float(amount_str) * price < 5:
                 return None
-            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str), None, {'hedged': True})
+            params = {'hedged': True}
+            if sl is not None:
+                params['stopLoss'] = {'triggerPrice': sl, 'price': sl, 'type': 'mark_price'}
+            if tp is not None:
+                params['takeProfit'] = {'triggerPrice': tp, 'price': tp, 'type': 'mark_price'}
+            order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str), None, params)
             log.info(f"ORDEN {side.upper()} {symbol}: {amount_str} contracts @ {price} (lev={lev:.0f}x, notional={float(amount_str)*price:.2f})")
             return order
         except Exception as e:
@@ -371,7 +376,7 @@ class BotRF15m:
 
             max_lev = float(self.exchange.market(symbol)['limits']['leverage']['max'])
             lev = min(LEVERAGE, max_lev)
-            order = self.place_order(symbol, side, price)
+            order = self.place_order(symbol, side, price, sl, tp)
             if order:
                 pos = Position(symbol, side, price, datetime.now(), sl, tp, self.balance * RISK_PCT, lev)
                 self.positions.append(pos)
