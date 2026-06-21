@@ -257,7 +257,7 @@ class BotRF15m:
         try:
             max_lev = float(self.exchange.market(symbol)['limits']['leverage']['max'])
             lev = min(LEVERAGE, max_lev)
-            self.exchange.set_leverage(lev, symbol)
+            self.exchange.set_leverage(lev, symbol, {'holdSide': 'long' if side == 'buy' else 'short'})
             notional = max(self.balance * RISK_PCT * lev, 5)
             raw = notional / price
             tick = float(self.exchange.market(symbol)['precision']['amount'])
