@@ -91,6 +91,8 @@ class Position:
         self.exit_reason = None
         self.be_active = False
         self.peak_price = entry_price
+        self.sl_order_id = None
+        self.last_sl_sent = sl
 
     def update_pnl(self, current_price):
         if self.side == 'buy':
@@ -104,7 +106,7 @@ class Position:
         else:
             self.peak_price = min(self.peak_price, current_price)
 
-    def update_be_trail(self):
+    def update_be_trail(self, bot=None):
         entry = self.entry_price
         side = self.side
         peak = self.peak_price
@@ -115,12 +117,17 @@ class Position:
             be_sl = entry * (1 + BE_OFFSET_PCT) if side == 'buy' else entry * (1 - BE_OFFSET_PCT)
             self.sl = max(self.sl, be_sl) if side == 'buy' else min(self.sl, be_sl)
             log.info(f"BE activado {self.symbol}: SL movido a {self.sl:.4f}")
+            if bot:
+                bot._sync_sl_to_exchange(self)
         # Trailing
         if TRAILING_DIST_PCT > 0 and self.be_active:
             new_sl = peak * (1 - TRAILING_DIST_PCT) if side == 'buy' else peak * (1 + TRAILING_DIST_PCT)
             moved = new_sl > self.sl if side == 'buy' else new_sl < self.sl
             if moved:
                 self.sl = new_sl
+                log.info(f"Trailing {self.symbol}: SL movido a {self.sl:.4f}")
+                if bot:
+                    bot._sync_sl_to_exchange(self)
 
     def check_exit(self, high, low, ts):
         if self.side == 'buy':
@@ -166,6 +173,7 @@ class Position:
             'size_usdt': self.size_usdt, 'pnl_usdt': round(self.pnl_usdt, 2),
             'exit_reason': self.exit_reason,
             'be_active': self.be_active,
+            'last_sl_sent': self.last_sl_sent,
             'entry_time': self.entry_time.isoformat() if self.entry_time else None,
             'exit_time': self.exit_time.isoformat() if self.exit_time else None,
         }
@@ -286,6 +294,7 @@ class BotRF15m:
             if float(amount_str) <= 0:
                 return False
             order = self.exchange.create_market_order(position.symbol, close_side, float(amount_str), None, {'hedged': True, 'reduceOnly': True})
+            self._cancel_stop_orders(position.symbol)
             exit_price = position.exit_price or self.exchange.fetch_ticker(position.symbol)['last']
             position.close(exit_price, datetime.now(), position.exit_reason or 'MANUAL')
             self.balance += position.pnl_usdt
@@ -296,6 +305,42 @@ class BotRF15m:
             return True
         except Exception as e:
             log.error(f"Error closing {position.symbol}: {e}")
+            return False
+
+    def _cancel_stop_orders(self, symbol):
+        try:
+            orders = self.exchange.fetch_open_orders(symbol)
+            for o in orders:
+                try:
+                    self.exchange.cancel_order(o['id'], symbol)
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            log.warning(f"Error cancelando plan orders {symbol}: {e}")
+            return False
+
+    def _sync_sl_to_exchange(self, position):
+        if position.last_sl_sent == position.sl:
+            return True
+        try:
+            close_side = 'sell' if position.side == 'buy' else 'buy'
+            notional = abs(position.size_usdt * position.leverage)
+            raw_amount = notional / position.entry_price
+            amount_str = self.exchange.amount_to_precision(position.symbol, raw_amount)
+            if float(amount_str) <= 0:
+                return False
+            sl_price = float(self.exchange.price_to_precision(position.symbol, position.sl))
+            order = self.exchange.create_order(
+                position.symbol, 'market', close_side, float(amount_str), None,
+                {'hedged': True, 'stopLossPrice': sl_price, 'reduceOnly': True}
+            )
+            position.sl_order_id = order.get('id')
+            position.last_sl_sent = position.sl
+            log.info(f"SL sincronizado en exchange {position.symbol}: {sl_price:.4f} (order={position.sl_order_id})")
+            return True
+        except Exception as e:
+            log.error(f"Error sincronizando SL {position.symbol}: {e}")
             return False
 
     def update_balance(self):
@@ -318,7 +363,7 @@ class BotRF15m:
                 ts = datetime.now()
 
                 pos.update_pnl(price)
-                pos.update_be_trail()
+                pos.update_be_trail(self)
                 pos.check_timeout(price, ts)
                 if pos.check_exit(high, low, ts):
                     self.close_position(pos)
