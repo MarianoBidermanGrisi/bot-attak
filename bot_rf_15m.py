@@ -75,7 +75,7 @@ SL_TP_PARAMS = {
 }
 
 class Position:
-    def __init__(self, symbol, side, entry_price, entry_time, sl, tp, size_usdt):
+    def __init__(self, symbol, side, entry_price, entry_time, sl, tp, size_usdt, leverage=LEVERAGE):
         self.symbol = symbol
         self.side = side
         self.entry_price = entry_price
@@ -83,6 +83,7 @@ class Position:
         self.sl = sl
         self.tp = tp
         self.size_usdt = size_usdt
+        self.leverage = leverage
         self.pnl_pct = 0.0
         self.pnl_usdt = 0.0
         self.exit_price = None
@@ -96,7 +97,7 @@ class Position:
             self.pnl_pct = (current_price - self.entry_price) / self.entry_price
         else:
             self.pnl_pct = (self.entry_price - current_price) / self.entry_price
-        self.pnl_usdt = self.size_usdt * self.pnl_pct * LEVERAGE
+        self.pnl_usdt = self.size_usdt * self.pnl_pct * self.leverage
         # Track peak for trailing
         if self.side == 'buy':
             self.peak_price = max(self.peak_price, current_price)
@@ -246,8 +247,10 @@ class BotRF15m:
 
     def place_order(self, symbol, side, price):
         try:
-            self.exchange.set_leverage(LEVERAGE, symbol)
-            notional = max(self.balance * RISK_PCT * LEVERAGE, 5)
+            max_lev = float(self.exchange.market(symbol)['limits']['leverage']['max'])
+            lev = min(LEVERAGE, max_lev)
+            self.exchange.set_leverage(lev, symbol)
+            notional = max(self.balance * RISK_PCT * lev, 5)
             raw = notional / price
             tick = float(self.exchange.market(symbol)['precision']['amount'])
             try:
@@ -259,7 +262,7 @@ class BotRF15m:
             if float(amount_str) <= 0 or float(amount_str) * price < 5:
                 return None
             order = self.exchange.create_market_order(symbol, side.lower(), float(amount_str))
-            log.info(f"ORDEN {side.upper()} {symbol}: {amount_str} contracts @ {price} (notional={float(amount_str)*price:.2f})")
+            log.info(f"ORDEN {side.upper()} {symbol}: {amount_str} contracts @ {price} (lev={lev:.0f}x, notional={float(amount_str)*price:.2f})")
             return order
         except Exception as e:
             log.error(f"Error placing {side} order for {symbol}: {e}")
@@ -268,7 +271,7 @@ class BotRF15m:
     def close_position(self, position):
         try:
             side = 'sell' if position.side == 'buy' else 'buy'
-            notional = max(abs(position.size_usdt * LEVERAGE), 5)
+            notional = max(abs(position.size_usdt * position.leverage), 5)
             raw = notional / position.entry_price
             tick = float(self.exchange.market(position.symbol)['precision']['amount'])
             try:
@@ -366,9 +369,11 @@ class BotRF15m:
             params = dict(SL_TP_PARAMS)
             sl, tp = compute_sl_tp_v2(df.copy(), len(df)-1, side, price, params)
 
+            max_lev = float(self.exchange.market(symbol)['limits']['leverage']['max'])
+            lev = min(LEVERAGE, max_lev)
             order = self.place_order(symbol, side, price)
             if order:
-                pos = Position(symbol, side, price, datetime.now(), sl, tp, self.balance * RISK_PCT)
+                pos = Position(symbol, side, price, datetime.now(), sl, tp, self.balance * RISK_PCT, lev)
                 self.positions.append(pos)
                 taken += 1
                 log.info(f"ENTRADA {side.upper()} {symbol}: entry={price:.4f} sl={sl:.4f} tp={tp:.4f} prob={prob:.4f} be={BE_TRIGGER_PCT*100}% trail={TRAILING_DIST_PCT*100}%")
