@@ -3,6 +3,8 @@ import sys
 import time
 import logging
 import json
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -57,6 +59,7 @@ MAX_POSITIONS = 3
 RISK_PCT = 0.015
 LEVERAGE = 20.0
 MAX_SL_PCT = 0.02
+MIN_SL_DIST_PCT = 0.003
 RR_RATIO = 2.0
 COOLDOWN_MINS = 60
 CANDLES_HIST = 500
@@ -69,6 +72,7 @@ TRAILING_DIST_PCT = 0.005
 
 SL_TP_PARAMS = {
     'MAX_SL_PCT': MAX_SL_PCT,
+    'MIN_SL_DIST_PCT': MIN_SL_DIST_PCT,
     'RR_RATIO': RR_RATIO,
     'SL_LOOKBACK': 10,
     'use_atr_sl': False,
@@ -210,6 +214,7 @@ class BotRF15m:
         self.trade_log = []
         self.top_symbols = []
         self.ohlcv_cache = {}
+        self._margin_set = set()
 
     def fetch_top_symbols(self):
         try:
@@ -257,10 +262,13 @@ class BotRF15m:
         try:
             max_lev = float(self.exchange.market(symbol)['limits']['leverage']['max'])
             lev = min(LEVERAGE, max_lev)
-            try:
-                self.exchange.set_margin_mode('isolated', symbol)
-            except Exception:
-                pass
+            if symbol not in self._margin_set:
+                for hs in ('long', 'short'):
+                    try:
+                        self.exchange.set_margin_mode('isolated', symbol, {'holdSide': hs})
+                    except Exception:
+                        pass
+                self._margin_set.add(symbol)
             self.exchange.set_leverage(lev, symbol, {'holdSide': 'long' if side == 'buy' else 'short'})
             notional = max(self.balance * RISK_PCT * lev, 5)
             raw = notional / price
@@ -547,6 +555,23 @@ class BotRF15m:
             time.sleep(CHECK_INTERVAL_SEC)
 
 
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'ok')
+    def log_message(self, format, *args):
+        pass
+
+def _start_health_server():
+    port = int(os.getenv('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), _HealthHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    log.info(f"Health server on port {port}")
+
 if __name__ == '__main__':
+    _start_health_server()
     bot = BotRF15m()
     bot.run()
