@@ -20,14 +20,15 @@ log = logging.getLogger('turtle_bot')
 # ==========================================
 # API keys (solo desde variables de entorno por seguridad)
 API_KEY      = os.environ.get('BITGET_API_KEY', '')
-API_SECRET   = os.environ.get('BITGET_SECRET_KEY', '')
-API_PASSWORD = os.environ.get('BITGET_PASSPHRASE', '')
+API_SECRET   = os.environ.get('BITGET_API_SECRET', '')
+API_PASSWORD = os.environ.get('BITGET_API_PASSWORD', '')
 
 # Parámetros fijos del bot (hardcodeados, no requieren env vars)
 TOP_N        = 27
 MAX_POS      = 3
 RISK_PCT     = 0.02
 LEVERAGE     = 10
+MIN_NOTIONAL = 5.0       # USDT mínimo por orden en Bitget
 TIMEOUT_H    = 96
 COOLDOWN_H   = 4
 FEE_RATE     = 0.0006
@@ -421,10 +422,15 @@ class TurtleBot:
         for sym, side, price, atr, score, det in candidates[:MAX_POS]:
             if len(self.tracker.positions) >= MAX_POS:
                 break
-            margin = balance * RISK_PCT
-            min_notional = 5.0  # USDT mínimo para Bitget
-            if margin * LEVERAGE < min_notional:
-                log.warning(f"Saltando {sym}: margen {margin:.2f}*{LEVERAGE}x={margin*LEVERAGE:.2f} < {min_notional} USDT mínimo")
+            # Margen dinámico: usa RISK_PCT si alcanza mín. notional; si no, fuerza el mínimo
+            min_margin = MIN_NOTIONAL / LEVERAGE
+            margin_raw = balance * RISK_PCT
+            margin = max(margin_raw, min_margin)
+            # Nunca arriesgar más del 50% del balance en 1 trade
+            margin = min(margin, balance * 0.5)
+            if margin != margin_raw and margin > 0:
+                log.info(f"Ajuste margen {sym}: {margin_raw:.2f}→{margin:.2f} (mín {MIN_NOTIONAL}U notional)")
+            if margin <= 0:
                 continue
             await self.ex.set_leverage(sym, LEVERAGE)
             qty = margin * LEVERAGE / price  # en base currency (raw); market_order ajusta precisión
