@@ -279,12 +279,17 @@ class BitgetExchange:
             for p in positions:
                 size = float(p.get('contracts', 0))
                 if size != 0:
+                    # Extraer margen inicial (útil para restaurar posición tras reinicio)
+                    im = float(p.get('initialMargin', 0))
+                    lev = float(p.get('leverage', LEVERAGE))
                     result[p['symbol']] = {
                         'side': 'long' if size > 0 else 'short',
                         'size': abs(size),
                         'entry_price': float(p.get('entryPrice', 0)),
                         'unrealized_pnl': float(p.get('unrealizedPnl', 0)),
                         'liquidation': float(p.get('liquidationPrice', 0)),
+                        'initial_margin': im if im > 0 else None,
+                        'leverage': lev,
                     }
             return result
         except Exception as e:
@@ -318,6 +323,28 @@ class Tracker:
             'entry_arrow': arrow,
             'exit_orders': [],
         }
+
+    def restore_position(self, symbol, side, entry_price, size_usdt, entry_time=None):
+        """Restaura posición existente desde exchange tras reinicio.
+        SL inicial conservador (~15%); update_trail lo ajustará
+        con ATR real cuando lleguen datos OHLCV.
+        """
+        atr_est = entry_price * 0.02  # 2% estimado del precio
+        sl_price = entry_price - atr_est * SL_MULT if side == 'long' else entry_price + atr_est * SL_MULT
+        self.positions[symbol] = {
+            'side': side,
+            'entry_price': entry_price,
+            'size_usdt': size_usdt,
+            'atr_entry': atr_est,
+            'sl': sl_price,
+            'peak_price': entry_price,
+            'entry_time': entry_time or datetime.now(),
+            'entry_arrow': side == 'long',
+            'exit_orders': [],
+            'restored': True,
+        }
+        log.info(f"Posición restaurada: {symbol} {side.upper()} "
+                 f"entry={entry_price:.8f} margin=${size_usdt:.2f}")
 
     def update_trail(self, symbol, current_price, atr):
         pos = self.positions.get(symbol)
@@ -370,7 +397,13 @@ class TurtleBot:
         await self.ex.connect()
         positions = await self.ex.fetch_positions()
         for sym, p in positions.items():
-            log.info(f"Posición existente: {sym} {p['side']} entry={p['entry_price']}")
+            margin = p.get('initial_margin') or p['size'] * p['entry_price'] / p.get('leverage', LEVERAGE)
+            self.tracker.restore_position(
+                symbol=sym,
+                side=p['side'],
+                entry_price=p['entry_price'],
+                size_usdt=margin,
+            )
         self.symbols = await self.ex.fetch_top_symbols(TOP_N)
         if not self.symbols:
             log.error("No se obtuvieron símbolos. Abortando.")
