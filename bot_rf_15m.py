@@ -52,11 +52,11 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 TF = '15m'
-THRESHOLD = 0.55
+THRESHOLD = 0.60          # óptimo: 0.60 (antes 0.55)
 MAX_POSITIONS = 3
-RISK_PCT = 0.015
+RISK_PCT = 0.01            # óptimo: 0.01 (antes 0.015)
 LEVERAGE = 20.0
-MAX_SL_PCT = 0.02
+MAX_SL_PCT = 0.018         # óptimo: 0.018 (antes 0.02)
 MIN_SL_DIST_PCT = 0.003
 RR_RATIO = 2.0
 COOLDOWN_MINS = 60
@@ -64,7 +64,7 @@ CANDLES_HIST = 500
 CHECK_INTERVAL_SEC = 15 * 60
 MAX_POS_HOURS = 12
 TOP_SYMBOLS = 30
-BE_TRIGGER_PCT = 0.01
+BE_TRIGGER_PCT = 0.012     # óptimo: 0.012 (antes 0.01)
 BE_OFFSET_PCT = 0.003
 TRAILING_DIST_PCT = 0.005
 
@@ -72,7 +72,7 @@ SL_TP_PARAMS = {
     'MAX_SL_PCT': MAX_SL_PCT,
     'MIN_SL_DIST_PCT': MIN_SL_DIST_PCT,
     'RR_RATIO': RR_RATIO,
-    'SL_LOOKBACK': 10,
+    'SL_LOOKBACK': 15,       # óptimo: 15 (antes 10)
     'use_atr_sl': False,
 }
 
