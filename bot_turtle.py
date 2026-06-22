@@ -20,15 +20,14 @@ log = logging.getLogger('turtle_bot')
 # ==========================================
 # API keys (solo desde variables de entorno por seguridad)
 API_KEY      = os.environ.get('BITGET_API_KEY', '')
-API_SECRET   = os.environ.get('BITGET_API_SECRET', '')
-API_PASSWORD = os.environ.get('BITGET_API_PASSWORD', '')
+API_SECRET   = os.environ.get('BITGET_SECRET_KEY', '')
+API_PASSWORD = os.environ.get('BITGET_PASSPHRASE', '')
 
 # Parámetros fijos del bot (hardcodeados, no requieren env vars)
 TOP_N        = 27
 MAX_POS      = 3
-RISK_PCT     = 0.02
+FIXED_MARGIN = 2.0       # USDT fijos por posición (con 10x = $20 notional)
 LEVERAGE     = 10
-MIN_NOTIONAL = 5.0       # USDT mínimo por orden en Bitget
 TIMEOUT_H    = 96
 COOLDOWN_H   = 4
 FEE_RATE     = 0.0006
@@ -422,15 +421,10 @@ class TurtleBot:
         for sym, side, price, atr, score, det in candidates[:MAX_POS]:
             if len(self.tracker.positions) >= MAX_POS:
                 break
-            # Margen dinámico: usa RISK_PCT si alcanza mín. notional; si no, fuerza el mínimo
-            min_margin = MIN_NOTIONAL / LEVERAGE
-            margin_raw = balance * RISK_PCT
-            margin = max(margin_raw, min_margin)
-            # Nunca arriesgar más del 50% del balance en 1 trade
-            margin = min(margin, balance * 0.5)
-            if margin != margin_raw and margin > 0:
-                log.info(f"Ajuste margen {sym}: {margin_raw:.2f}→{margin:.2f} (mín {MIN_NOTIONAL}U notional)")
-            if margin <= 0:
+            # Margen fijo: 2 USDT por posición (configurable via FIXED_MARGIN)
+            margin = FIXED_MARGIN
+            if balance < margin:
+                log.warning(f"Saltando {sym}: balance=${balance:.2f} < margen fijo ${margin}")
                 continue
             await self.ex.set_leverage(sym, LEVERAGE)
             qty = margin * LEVERAGE / price  # en base currency (raw); market_order ajusta precisión
@@ -522,7 +516,7 @@ class TurtleBot:
         log.info("=" * 60)
         log.info("  TURTLE BOT — Donchian Breakout 4H (Optimizado)")
         log.info(f"  SL={SL_MULT}x TS={TS_MULT}x DC={DC_IN}/{DC_OUT} TO={TIMEOUT_H}h")
-        log.info(f"  MaxPos={MAX_POS} Risk={RISK_PCT*100:.0f}% Lev={LEVERAGE}x")
+        log.info(f"  MaxPos={MAX_POS} FixedMargin=${FIXED_MARGIN} Lev={LEVERAGE}x")
         log.info(f"  Top={TOP_N} símbolos, check cada {CHECK_INTERVAL_MIN}min")
         log.info("=" * 60)
 
