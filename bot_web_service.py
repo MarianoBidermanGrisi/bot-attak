@@ -1,68 +1,98 @@
-import os
-import sys
-import time
-import json
-import logging
-import threading
-from flask import Flask, jsonify
+"""
+bot_web_service.py — Entry point for Render.com Web Service
+==========================================================
+Run: python bot_web_service.py
+- Starts HTTP health server on PORT (env) or 8080
+- Runs TurtleBot in background
+- Handles graceful shutdown (SIGTERM)
+"""
+import os, sys, asyncio, logging, signal, json
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-log = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+log = logging.getLogger('web_service')
 
-logging.getLogger('werkzeug').setLevel(logging.WARNING)
+from bot_turtle import TurtleBot, API_KEY, API_SECRET, API_PASSWORD
 
-app = Flask(__name__)
+# ==========================================
+# HEALTH SERVER
+# ==========================================
+async def health_server(bot):
+    """Servidor HTTP mínimo para health checks de Render."""
+    async def handler(reader, writer):
+        try:
+            bal = 0.0
+            if bot and bot.ex and bot.ex.ex:
+                bal = await bot.ex.get_usdt_balance()
+            open_n = len(bot.tracker.positions) if bot and bot.tracker else 0
+            trades_n = len(bot.tracker.trades_log) if bot and bot.tracker else 0
+            body = json.dumps({
+                'status': 'ok',
+                'balance': round(bal, 2),
+                'open_positions': open_n,
+                'total_trades': trades_n,
+                'uptime_hours': None,
+            })
+            response = (
+                'HTTP/1.1 200 OK\r\n'
+                'Content-Type: application/json\r\n'
+                f'Content-Length: {len(body)}\r\n'
+                'Connection: close\r\n'
+                '\r\n'
+                f'{body}'
+            )
+            writer.write(response.encode())
+            await writer.drain()
+        except Exception as e:
+            log.warning(f"Health handler error: {e}")
+        finally:
+            writer.close()
 
-BOT_THREAD = None
-BOT_STARTED_AT = None
-BOT_ACTIVE = False
+    port = int(os.environ.get('PORT', 8080))
+    server = await asyncio.start_server(handler, '0.0.0.0', port)
+    log.info(f"Health server listening on :{port}")
+    async with server:
+        await server.serve_forever()
 
-@app.route('/')
-def index():
-    return "Bot RF 15m - en linea.", 200
+# ==========================================
+# ENTRY POINT
+# ==========================================
+async def main():
+    # Verificar credenciales
+    if not API_KEY or not API_SECRET or not API_PASSWORD:
+        log.error("FALTAN CREDENCIALES. Setear BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSWORD")
+        sys.exit(1)
 
-@app.route('/health')
-def health():
-    return jsonify({
-        "status": "running",
-        "timestamp": time.time(),
-        "bot": "rf_15m",
-        "bot_active": BOT_ACTIVE,
-        "bot_started_at": BOT_STARTED_AT,
-    }), 200
+    # Callback para notificar trades nuevos
+    def on_trade(trade):
+        log.info(f"NUEVO TRADE: {trade['symbol']} {trade['side']} pnl={trade['pnl']:.2f}")
 
-@app.route('/status')
-def status():
-    uptime = time.time() - BOT_STARTED_AT if BOT_STARTED_AT else 0
-    return jsonify({
-        "bot_active": BOT_ACTIVE,
-        "uptime_seconds": round(uptime),
-        "started_at": BOT_STARTED_AT,
-    }), 200
+    bot = TurtleBot(on_trade=on_trade)
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+    # Manejar señal de parada (Render envía SIGTERM)
+    def shutdown(sig=None, frame=None):
+        log.info(f"Señal de parada recibida ({sig}). Apagando...")
+        bot.stop()
 
-def run_bot():
-    global BOT_ACTIVE, BOT_STARTED_AT
+    # Windows no soporta signal.signal(SIGTERM); Linux sí
     try:
-        os.chdir(PROJECT_ROOT)
-        if PROJECT_ROOT not in sys.path:
-            sys.path.insert(0, PROJECT_ROOT)
-        from bot_rf_15m import BotRF15m
-        bot = BotRF15m()
-        BOT_STARTED_AT = time.time()
-        BOT_ACTIVE = True
-        log.info("Bot RF 15m iniciado correctamente")
-        bot.run()
-    except Exception as e:
-        log.error(f"Error fatal en bot: {e}", exc_info=True)
-    finally:
-        BOT_ACTIVE = False
+        signal.signal(signal.SIGTERM, shutdown)
+    except (ValueError, AttributeError):
+        log.warning("SIGTERM no soportado en este SO (esperado en Windows)")
+    signal.signal(signal.SIGINT, shutdown)
 
-bot_thread = threading.Thread(target=run_bot, daemon=True, name="BotRF15m")
-bot_thread.start()
+    # Correr bot + health server concurrentemente
+    try:
+        await asyncio.gather(
+            bot.run(),
+            health_server(bot),
+        )
+    except Exception as e:
+        log.error(f"Error fatal: {e}", exc_info=True)
+        bot.stop()
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    log.info(f"Iniciando servidor web en puerto {port}")
-    app.run(debug=False, host='0.0.0.0', port=port)
+    asyncio.run(main())
