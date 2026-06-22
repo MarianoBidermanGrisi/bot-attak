@@ -20,8 +20,8 @@ log = logging.getLogger('turtle_bot')
 # ==========================================
 # API keys (solo desde variables de entorno por seguridad)
 API_KEY      = os.environ.get('BITGET_API_KEY', '')
-API_SECRET   = os.environ.get('BITGET_API_SECRET', '')
-API_PASSWORD = os.environ.get('BITGET_API_PASSWORD', '')
+API_SECRET   = os.environ.get('BITGET_SECRET_KEY', '')
+API_PASSWORD = os.environ.get('BITGET_PASSPHRASE', '')
 
 # Parámetros fijos del bot (hardcodeados, no requieren env vars)
 TOP_N        = 27
