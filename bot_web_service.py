@@ -63,7 +63,7 @@ async def health_server(bot):
 async def main():
     # Verificar credenciales
     if not API_KEY or not API_SECRET or not API_PASSWORD:
-        log.error("FALTAN CREDENCIALES. Setear BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSWORD")
+        log.error("FALTAN CREDENCIALES. Setear BITGET_API_KEY, BITGET_SECRET_KEY, BITGET_PASSPHRASE en Render")
         sys.exit(1)
 
     # Callback para notificar trades nuevos
