@@ -1,98 +1,122 @@
+#!/usr/bin/env python3
 """
-bot_web_service.py — Entry point for Render.com Web Service
-==========================================================
-Run: python bot_web_service.py
-- Starts HTTP health server on PORT (env) or 8080
-- Runs TurtleBot in background
-- Handles graceful shutdown (SIGTERM)
+bot_web_service.py — Punto de entrada para Render Web Service.
+=============================================================
+Importa el monolito BOTZG y ejecuta:
+  1. Servidor Flask (health checks, uptime)
+  2. Bot de trading en segundo plano (thread + asyncio)
+
+Uso en Render:
+    gunicorn bot_web_service:app
+
+Endpoints:
+    GET /         → "BOTZG - online"
+    GET /health   → JSON status
+    GET /status   → JSON bot status + uptime
 """
-import os, sys, asyncio, logging, signal, json
+import os
+import sys
+import time
+import json
+import logging
+import threading
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-log = logging.getLogger('web_service')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("web")
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
-from bot_turtle import TurtleBot, API_KEY, API_SECRET, API_PASSWORD
+# ── Importar el monolito ──────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import botzg
 
-# ==========================================
-# HEALTH SERVER
-# ==========================================
-async def health_server(bot):
-    """Servidor HTTP mínimo para health checks de Render."""
-    async def handler(reader, writer):
-        try:
-            bal = 0.0
-            if bot and bot.ex and bot.ex.ex:
-                bal = await bot.ex.get_usdt_balance()
-            open_n = len(bot.tracker.positions) if bot and bot.tracker else 0
-            trades_n = len(bot.tracker.trades_log) if bot and bot.tracker else 0
-            body = json.dumps({
-                'status': 'ok',
-                'balance': round(bal, 2),
-                'open_positions': open_n,
-                'total_trades': trades_n,
-                'uptime_hours': None,
-            })
-            response = (
-                'HTTP/1.1 200 OK\r\n'
-                'Content-Type: application/json\r\n'
-                f'Content-Length: {len(body)}\r\n'
-                'Connection: close\r\n'
-                '\r\n'
-                f'{body}'
-            )
-            writer.write(response.encode())
-            await writer.drain()
-        except Exception as e:
-            log.warning(f"Health handler error: {e}")
-        finally:
-            writer.close()
+# ── Flask App ─────────────────────────────────────────────────
+try:
+    from flask import Flask, jsonify
+except ImportError:
+    log.error("Flask no instalado. Ejecuta: pip install flask gunicorn")
+    raise
 
-    port = int(os.environ.get('PORT', 8080))
-    server = await asyncio.start_server(handler, '0.0.0.0', port)
-    log.info(f"Health server listening on :{port}")
-    async with server:
-        await server.serve_forever()
+app = Flask(__name__)
 
-# ==========================================
-# ENTRY POINT
-# ==========================================
-async def main():
-    # Verificar credenciales
-    if not API_KEY or not API_SECRET or not API_PASSWORD:
-        log.error("FALTAN CREDENCIALES. Setear BITGET_API_KEY, BITGET_SECRET_KEY, BITGET_PASSPHRASE en Render")
-        sys.exit(1)
+# Estado global del bot
+BOT_ACTIVE = False
+BOT_STARTED_AT = None
 
-    # Callback para notificar trades nuevos
-    def on_trade(trade):
-        log.info(f"NUEVO TRADE: {trade['symbol']} {trade['side']} pnl={trade['pnl']:.2f}")
 
-    bot = TurtleBot(on_trade=on_trade)
+@app.route("/")
+def index():
+    return "BOTZG - MoneyZG Scalping Bot - online", 200
 
-    # Manejar señal de parada (Render envía SIGTERM)
-    def shutdown(sig=None, frame=None):
-        log.info(f"Señal de parada recibida ({sig}). Apagando...")
-        bot.stop()
 
-    # Windows no soporta signal.signal(SIGTERM); Linux sí
+@app.route("/health")
+def health():
+    uptime = round(time.time() - BOT_STARTED_AT, 1) if BOT_STARTED_AT else 0
+    return jsonify({
+        "status": "running",
+        "bot": "botzg",
+        "active": BOT_ACTIVE,
+        "uptime": uptime,
+        "strategy": f"MACD({botzg.MACD_FAST},{botzg.MACD_SLOW},{botzg.MACD_SIGNAL}) SMA({botzg.SMA_LONG})",
+        "sl_pct": botzg.SL_PCT * 100,
+        "tp_pct": botzg.TP_MIN_PCT * 100,
+        "leverage": botzg.LEVERAGE,
+        "paper_mode": botzg.PAPER_TRADE,
+    })
+
+
+@app.route("/status")
+def status_handler():
+    uptime = round(time.time() - BOT_STARTED_AT, 1) if BOT_STARTED_AT else 0
+    return jsonify({
+        "bot_active": BOT_ACTIVE,
+        "uptime_seconds": uptime,
+        "started_at": BOT_STARTED_AT,
+        "paper_mode": botzg.PAPER_TRADE,
+    })
+
+
+@app.route("/config")
+def config_handler():
+    """Devuelve la configuración actual del bot."""
+    return jsonify({
+        "timeframe": botzg.ENTRY_TIMEFRAME,
+        "macd": {"fast": botzg.MACD_FAST, "slow": botzg.MACD_SLOW, "signal": botzg.MACD_SIGNAL},
+        "sma_long": botzg.SMA_LONG,
+        "sl_pct": botzg.SL_PCT * 100,
+        "tp_min_pct": botzg.TP_MIN_PCT * 100,
+        "leverage": botzg.LEVERAGE,
+        "max_positions": botzg.MAX_POSITIONS,
+        "max_trades_day": botzg.MAX_TRADES_DAY,
+        "paper_trade": botzg.PAPER_TRADE,
+        "poll_interval_sec": botzg.POLL_INTERVAL_SEC,
+        "top_n": botzg.TOP_N,
+    })
+
+
+# ── Iniciar bot en segundo plano ──────────────────────────────
+def _start_bot():
+    global BOT_ACTIVE, BOT_STARTED_AT
+    BOT_STARTED_AT = time.time()
+    BOT_ACTIVE = True
+    log.info("BOTZG worker started in background thread")
+
     try:
-        signal.signal(signal.SIGTERM, shutdown)
-    except (ValueError, AttributeError):
-        log.warning("SIGTERM no soportado en este SO (esperado en Windows)")
-    signal.signal(signal.SIGINT, shutdown)
-
-    # Correr bot + health server concurrentemente
-    try:
-        await asyncio.gather(
-            bot.run(),
-            health_server(bot),
-        )
+        # web_worker() crea su propio event loop y corre bot.live()
+        botzg.BOTZG.web_worker()
     except Exception as e:
-        log.error(f"Error fatal: {e}", exc_info=True)
-        bot.stop()
+        log.error("BOTZG worker error: %s", e, exc_info=True)
+    finally:
+        BOT_ACTIVE = False
+        log.info("BOTZG worker stopped")
 
-if __name__ == '__main__':
-    asyncio.run(main())
+
+bot_thread = threading.Thread(target=_start_bot, daemon=True, name="BOTZG")
+bot_thread.start()
+log.info("BOTZG thread launched")
+
+
+# ── Entry point ───────────────────────────────────────────────
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    log.info("Starting Flask on 0.0.0.0:%d", port)
+    app.run(host="0.0.0.0", port=port, debug=False)
