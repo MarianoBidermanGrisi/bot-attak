@@ -44,7 +44,7 @@ MACD_SIGNAL         = int(os.environ.get("MACD_SIGNAL", "9"))
 SMA_LONG            = int(os.environ.get("SMA_LONG", "200"))
 
 # Risk (del video)
-LEVERAGE            = float(os.environ.get("LEVERAGE", "5"))
+LEVERAGE            = float(os.environ.get("LEVERAGE", "10"))
 SL_PCT              = float(os.environ.get("SL_PCT", "0.001"))       # 0.1%
 TP_MIN_PCT          = float(os.environ.get("TP_MIN_PCT", "0.0015"))  # 0.15% (1.5x SL)
 TP_MAX_PCT          = float(os.environ.get("TP_MAX_PCT", "0.0020"))  # 0.20% (2x SL)
@@ -644,30 +644,75 @@ class BOTZG:
                  sig.stop_loss, sig.take_profit, sig.reason)
 
         bal = await ex.balance()
-        usdt = float(bal.get("USDT", {}).get("free", 0))
-        if usdt <= 0:
-            log.warning("No USDT balance")
+        usdt_free = float(bal.get("USDT", {}).get("free", 0))
+        usdt_total = float(bal.get("USDT", {}).get("total", usdt_free))
+        if usdt_free <= 0:
+            log.warning("No USDT balance free")
             return
 
-        risk_amt = usdt * RISK_PCT
-        diff = abs(sig.entry_price - sig.stop_loss)
+        entry_price = sig.entry_price
+        diff = abs(entry_price - sig.stop_loss)
         if diff <= 0:
             return
-        qty = risk_amt / diff
+
+        # ── Position sizing: repartir capital entre MAX_POSITIONS ──
+        # Cada posición recibe una porción igual del capital TOTAL.
+        # Así se pueden abrir hasta MAX_POSITIONS simultáneas.
+        margin_budget = (usdt_total * 0.90) / MAX_POSITIONS  # 90% del total / N slots
+        # No gastar más de lo que hay libre realmente
+        margin_available = min(margin_budget, usdt_free * 0.95)
+        if margin_available <= 0:
+            log.warning("No hay margen disponible para %s", symbol)
+            return
+
+        risk_qty = (usdt_free * RISK_PCT) / diff
+        max_qty_by_margin = (margin_available * LEVERAGE) / entry_price
+        qty = min(risk_qty, max_qty_by_margin)
+
+        log.info("POSITION SIZING: total=%.2f free=%.2f budget=%.2f risk_qty=%.2f margin_qty=%.2f qty=%.2f",
+                 usdt_total, usdt_free, margin_available, risk_qty, max_qty_by_margin, qty)
+        if qty < 0.001:
+            log.warning("Qty demasiado pequeña para %s (%s)", symbol, qty)
+            return
 
         await ex.set_leverage(symbol, LEVERAGE)
 
         side = "buy" if sig.signal == "long" else "sell"
+        hold_side = "long" if sig.signal == "long" else "short"
         sl_trigger = sig.stop_loss
         tp_trigger = sig.take_profit
 
-        order = await ex.market_order(symbol, side, qty, params={
+        # ── Fix: type=3 attached SL+TP con uta=true ──
+        # La cuenta está en One-Way mode ("unilateral" según error 40774),
+        # así que NO usamos holdSide (eso es para Hedge mode).
+        # 'uta':'true' activa el SL+TP simultáneo en ccxt bitget.
+        # Ver: https://github.com/ccxt/ccxt/issues/28239
+        params = {
             "stopLoss": {"triggerPrice": sl_trigger},
             "takeProfit": {"triggerPrice": tp_trigger},
-        })
+            "uta": "true",
+        }
+        order = await ex.market_order(symbol, side, qty, params=params)
+        if not order.get("id"):
+            # ── Fallback 1: reintentar con holdSide (por si es Hedge mode) ──
+            log.warning("SL/TP attach falló, reintentando con holdSide...")
+            params["holdSide"] = hold_side
+            order = await ex.market_order(symbol, side, qty, params=params)
+        if not order.get("id"):
+            # ── Fallback 2: 2 pasos (posición + SL/TP como trigger orders) ──
+            log.warning("Reintento falló, abriendo posición sola...")
+            order = await ex.market_order(symbol, side, qty)
+            if order.get("id"):
+                reduce_side = "sell" if sig.signal == "long" else "buy"
+                for label, price in [("SL", sl_trigger), ("TP", tp_trigger)]:
+                    await ex.market_order(symbol, reduce_side, qty,
+                                          reduce=True,
+                                          params={"triggerPrice": price})
+                    log.info("%s set %s %.6f", label, symbol, price)
+
         if order.get("id"):
             log.info("ORDER PLACED %s %s qty=%.6f id=%s",
-                     side.upper(), symbol, qty, order["id"])
+                     side.upper(), symbol, qty, order.get("id", "?"))
 
     # ── BACKTEST ─────────────────────────────────────────
     async def backtest(self):
@@ -785,13 +830,30 @@ class BOTZG:
 # ──────────────────────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────────────────────
+_running_bot: 'BOTZG | None' = None
+
+
+def _sigterm_handler(signum, frame):
+    """Graceful shutdown on SIGTERM (Render deploy)."""
+    global _running_bot
+    log.info("SIGTERM recibido, apagando gracefulmente...")
+    if _running_bot is not None:
+        _running_bot.stop()
+    sys.exit(0)
+
+
 def main():
+    global _running_bot
     if len(sys.argv) < 2:
         print(__doc__)
         return
 
     cmd = sys.argv[1]
     bot = BOTZG()
+    _running_bot = bot
+    if cmd in ("live", "web"):
+        import signal
+        signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
         if cmd == "live":
