@@ -46,7 +46,7 @@ SMA_LONG            = int(os.environ.get("SMA_LONG", "200"))
 # Risk (del video)
 LEVERAGE            = float(os.environ.get("LEVERAGE", "10"))
 SL_PCT              = float(os.environ.get("SL_PCT", "0.001"))       # 0.1%
-TP_MIN_PCT          = float(os.environ.get("TP_MIN_PCT", "0.0015"))  # 0.15% (1.5x SL)
+TP_MIN_PCT          = float(os.environ.get("TP_MIN_PCT", "0.002"))   # 0.20% (2x SL = RR 1:2)
 TP_MAX_PCT          = float(os.environ.get("TP_MAX_PCT", "0.0020"))  # 0.20% (2x SL)
 RISK_PCT            = float(os.environ.get("RISK_PCT", "0.10"))
 MAX_POSITIONS       = int(os.environ.get("MAX_POSITIONS", "3"))
@@ -243,7 +243,7 @@ class MoneyZGStrategy:
       LONG  = HA_close > SMA200 + MACD cruza arriba + vela HA verde
       SHORT = HA_close < SMA200 + MACD cruza abajo + vela HA roja
       SL    = 0.1% fijo
-      TP    = 0.15% fijo (1.5x SL)
+      TP    = 0.20% fijo (2x SL = RR 1:2)
     """
 
     def __init__(self):
@@ -360,10 +360,11 @@ class Bitget:
             await asyncio.sleep(self._gap - elapsed)
         self._last = ttime.time()
 
-    async def ohlcv(self, symbol: str, tf: str = "1m", limit: int = 500) -> list:
+    async def ohlcv(self, symbol: str, tf: str = "1m", limit: int = 500,
+                    since: int | None = None) -> list:
         await self._throttle()
         try:
-            return await self._ex.fetch_ohlcv(symbol, tf, limit=limit)
+            return await self._ex.fetch_ohlcv(symbol, tf, since=since, limit=limit)
         except Exception as e:
             log.error("ohlcv %s %s: %s", symbol, tf, e)
             return []
@@ -692,8 +693,13 @@ class BOTZG:
             return False
 
         df = pd.DataFrame(ohlcv, columns=OHLCV_COLS)
-        df = compute_all(df)
+        df = self.strategy.prepare(df)
         last = df.iloc[-1].to_dict()
+
+        # Daily trade limit check (live mode)
+        self.strategy.reset_day(int(time.time()))
+        if self.strategy.daily_trades >= MAX_TRADES_DAY:
+            return False
 
         sig = self.strategy.evaluate(last)
         if sig.signal == "none":
@@ -757,6 +763,7 @@ class BOTZG:
                  side.upper(), symbol, qty, order.get("id", "?"),
                  sl_price, tp_price)
 
+        self.strategy.daily_trades += 1
         return True
 
     # ── BACKTEST ─────────────────────────────────────────
@@ -789,7 +796,7 @@ class BOTZG:
                 s = since
                 limit = 1000
                 while s < now_ms:
-                    ohlcv = await ex.ohlcv(sym, BACKTEST_TIMEFRAME, limit=limit)
+                    ohlcv = await ex.ohlcv(sym, BACKTEST_TIMEFRAME, limit=limit, since=s)
                     if not ohlcv:
                         break
                     all_ohlcv.extend(ohlcv)
