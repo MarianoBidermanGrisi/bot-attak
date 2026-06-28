@@ -718,6 +718,8 @@ class BOTZG:
                  side.upper(), symbol, qty, order.get("id", "?"))
 
         # Paso 2: Colocar SL y TP como trigger orders independientes
+        # Nota: NO usar triggerType explícito - CCXT maneja el default
+        # según el tipo de cuenta (Classic vs UTA) automáticamente.
         # Redondear precios a la precisión del mercado (evita error 40808 checkScale)
         sl_price = ex.round_price(symbol, sig.stop_loss)
         tp_price = ex.round_price(symbol, sig.take_profit)
@@ -729,8 +731,7 @@ class BOTZG:
                 trig_order = await ex.market_order(
                     symbol, reduce_side, qty,
                     reduce=True,
-                    params={"triggerPrice": trigger_px,
-                            "triggerType": "last_price"},
+                    params={"triggerPrice": trigger_px},
                 )
                 if trig_order.get("id"):
                     log.info("%s set %s trigger=%.6f id=%s",
