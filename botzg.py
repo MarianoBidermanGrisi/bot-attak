@@ -314,18 +314,20 @@ class Bitget:
         if self._ex:
             return
         import ccxt.pro as ccxtpro
+        verbose_logging = os.environ.get("CCXT_VERBOSE", "false").lower() == "true"
         self._ex = ccxtpro.bitget({
             "apiKey": BITGET_API_KEY,
             "secret": BITGET_SECRET_KEY,
             "password": BITGET_PASSPHRASE,
             "enableRateLimit": True,
+            "verbose": verbose_logging,
             "options": {"defaultType": "swap", "sandbox": PAPER_TRADE},
         })
         if PAPER_TRADE:
             log.info("PAPER TRADE MODE - no real orders")
         await self._throttle()
         await self._ex.load_markets()
-        log.info("Bitget ready - %d markets", len(self._ex.markets))
+        log.info("Bitget ready - %d markets (verbose=%s)", len(self._ex.markets), verbose_logging)
 
     async def close(self):
         if self._ex:
@@ -390,19 +392,48 @@ class Bitget:
             log.warning("set_leverage %s: %s", symbol, e)
 
     async def market_order(self, symbol: str, side: str, amount: float,
-                           reduce: bool = False, params: dict | None = None) -> dict:
+                           reduce: bool = False, params: dict | None = None,
+                           sl_price: float | None = None,
+                           tp_price: float | None = None) -> dict:
+        """Place market order with optional preset SL/TP (atomic, via presetStopLoss/SurplusPrice).
+
+        Inspired by botabracadabra.py pattern: SL/TP embedded in the same create_order call.
+        Works on Bitget Classic (no UTA, no trigger plans needed).
+        """
         await self._throttle()
         if params is None:
             params = {}
         if reduce:
             params["reduceOnly"] = True
+        if sl_price is not None:
+            params["presetStopLossPrice"] = str(self.round_price(symbol, sl_price))
+        if tp_price is not None:
+            params["presetStopSurplusPrice"] = str(self.round_price(symbol, tp_price))
         if PAPER_TRADE:
-            log.info("[PAPER] %s %s %.6f %s", side.upper(), symbol, amount, params)
+            log.info("[PAPER] %s %s %.6f sl=%s tp=%s %s",
+                     side.upper(), symbol, amount,
+                     params.get("presetStopLossPrice", "-"),
+                     params.get("presetStopSurplusPrice", "-"),
+                     params)
             return {"id": f"paper_{int(time.time())}", "status": "closed",
                     "symbol": symbol, "side": side, "amount": amount}
         try:
             order = await self._ex.create_order(symbol, "market", side, amount, params=params)
-            log.info("ORDER %s %s %.6f id=%s", side, symbol, amount, order.get("id"))
+            order_info = {
+                "id": order.get("id"),
+                "type": order.get("type"),
+                "status": order.get("status"),
+                "filled": order.get("filled"),
+                "cost": order.get("cost"),
+                "price": order.get("price"),
+                "average": order.get("average"),
+            }
+            sl_tp_info = ""
+            if sl_price is not None or tp_price is not None:
+                sl_tp_info = f" SL={params.get('presetStopLossPrice','-')} TP={params.get('presetStopSurplusPrice','-')}"
+            log.info("ORDER %s %s qty=%.6f id=%s%s raw=%s",
+                     side.upper(), symbol, amount,
+                     order.get("id", "?"), sl_tp_info, order_info)
             return order
         except Exception as e:
             log.error("order %s %s: %s", side, symbol, e)
@@ -707,48 +738,24 @@ class BOTZG:
 
         side = "buy" if sig.signal == "long" else "sell"
 
-        # ── LÓGICA PARA CUENTA CLASSIC (sin UTA) ──
-        # Paso 1: Abrir la posición (market order) SIN adjuntar SL/TP
-        order = await ex.market_order(symbol, side, qty)
+        # ── LÓGICA PARA CUENTA CLASSIC (inspirada en botabracadabra.py) ──
+        # Abrir posición con SL/TP incrustados (presetStopLossPrice / presetStopSurplusPrice)
+        # Atómico: Bitget crea posición + SL + TP en una sola llamada.
+        sl_price = ex.round_price(symbol, sig.stop_loss)
+        tp_price = ex.round_price(symbol, sig.take_profit)
+
+        order = await ex.market_order(
+            symbol, side, qty,
+            sl_price=sl_price,
+            tp_price=tp_price,
+        )
         if not order.get("id"):
             log.error("Fallo al abrir posición %s %s", side.upper(), symbol)
             return False
 
-        log.info("ORDER %s %s qty=%s id=%s",
-                 side.upper(), symbol, qty, order.get("id", "?"))
-
-        # Paso 2: Colocar SL y TP como trigger orders independientes
-        # Nota: NO usar triggerType explícito - CCXT maneja el default
-        # según el tipo de cuenta (Classic vs UTA) automáticamente.
-        # Redondear precios a la precisión del mercado (evita error 40808 checkScale)
-        sl_price = ex.round_price(symbol, sig.stop_loss)
-        tp_price = ex.round_price(symbol, sig.take_profit)
-        reduce_side = "sell" if sig.signal == "long" else "buy"
-
-        sl_ok = tp_ok = False
-        for label, trigger_px in [("SL", sl_price), ("TP", tp_price)]:
-            try:
-                trig_order = await ex.market_order(
-                    symbol, reduce_side, qty,
-                    reduce=True,
-                    params={"triggerPrice": trigger_px},
-                )
-                if trig_order.get("id"):
-                    log.info("%s set %s trigger=%.6f id=%s",
-                             label, symbol, trigger_px, trig_order["id"])
-                    if label == "SL":
-                        sl_ok = True
-                    else:
-                        tp_ok = True
-                else:
-                    log.error("Fallo al colocar %s %s trigger=%.6f", label, symbol, trigger_px)
-            except Exception as e:
-                log.error("Excepción al colocar %s %s: %s", label, symbol, e)
-
-        if not sl_ok:
-            log.warning("!! %s abierta SIN STOP LOSS (solo TP=%s)", symbol, tp_ok)
-        if not tp_ok:
-            log.warning("!! %s abierta SIN TAKE PROFIT (solo SL=%s)", symbol, sl_ok)
+        log.info("POSITION %s %s qty=%s id=%s SL=%.6f TP=%.6f",
+                 side.upper(), symbol, qty, order.get("id", "?"),
+                 sl_price, tp_price)
 
         return True
 
