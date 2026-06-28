@@ -332,6 +332,25 @@ class Bitget:
             await self._ex.close()
             self._ex = None
 
+    # ── Precision helpers ────────────────────────────────
+    def market(self, symbol: str) -> dict | None:
+        """Return market dict for symbol, or None."""
+        return self._ex.markets.get(symbol) if self._ex else None
+
+    def round_price(self, symbol: str, price: float) -> float:
+        """Round price to market precision (handle checkScale)."""
+        m = self.market(symbol)
+        if m and 'precision' in m and m['precision'].get('price') is not None:
+            return float(self._ex.price_to_precision(symbol, price))
+        return round(price, 8)
+
+    def round_amount(self, symbol: str, amount: float) -> float:
+        """Round amount to market precision."""
+        m = self.market(symbol)
+        if m and 'precision' in m and m['precision'].get('amount') is not None:
+            return float(self._ex.amount_to_precision(symbol, amount))
+        return round(amount, 8)
+
     async def _throttle(self):
         import time as ttime
         elapsed = ttime.time() - self._last
@@ -615,21 +634,31 @@ class BOTZG:
         if not syms:
             return
 
+        # Obtener posiciones actuales UNA SOLA VEZ
         positions = await ex.positions(syms)
         active = {p["symbol"] for p in positions
                   if float(p.get("contracts", 0) or 0) > 0}
+        log.info("Active positions: %d/%d - %s",
+                 len(active), MAX_POSITIONS,
+                 ", ".join(sorted(active)) if active else "none")
 
         for sym in syms:
             if sym in active:
                 continue
             if len(active) >= MAX_POSITIONS:
+                log.info("MAX_POSITIONS (%d) reached, stopping tick", MAX_POSITIONS)
                 break
-            await self._eval_symbol(ex, sym)
 
-    async def _eval_symbol(self, ex: Bitget, symbol: str):
+            opened = await self._eval_symbol(ex, sym)
+            if opened:
+                active.add(sym)  # ← ACTUALIZAMOS el set para respetar el límite
+
+    async def _eval_symbol(self, ex: Bitget, symbol: str) -> bool:
+        """Evaluate symbol and open position if signal triggers.
+        Returns True if a position was opened, False otherwise."""
         ohlcv = await ex.ohlcv(symbol, ENTRY_TIMEFRAME, limit=250)
         if not ohlcv or len(ohlcv) < SMA_LONG:
-            return
+            return False
 
         df = pd.DataFrame(ohlcv, columns=OHLCV_COLS)
         df = compute_all(df)
@@ -637,7 +666,7 @@ class BOTZG:
 
         sig = self.strategy.evaluate(last)
         if sig.signal == "none":
-            return
+            return False
 
         log.info("SIGNAL %s - %s  entry=%.6f  SL=%.6f  TP=%.6f  (%s)",
                  sig.signal.upper(), symbol, sig.entry_price,
@@ -648,71 +677,79 @@ class BOTZG:
         usdt_total = float(bal.get("USDT", {}).get("total", usdt_free))
         if usdt_free <= 0:
             log.warning("No USDT balance free")
-            return
+            return False
 
         entry_price = sig.entry_price
         diff = abs(entry_price - sig.stop_loss)
         if diff <= 0:
-            return
+            return False
 
         # ── Position sizing: repartir capital entre MAX_POSITIONS ──
-        # Cada posición recibe una porción igual del capital TOTAL.
-        # Así se pueden abrir hasta MAX_POSITIONS simultáneas.
-        margin_budget = (usdt_total * 0.90) / MAX_POSITIONS  # 90% del total / N slots
-        # No gastar más de lo que hay libre realmente
+        margin_budget = (usdt_total * 0.90) / MAX_POSITIONS
         margin_available = min(margin_budget, usdt_free * 0.95)
         if margin_available <= 0:
             log.warning("No hay margen disponible para %s", symbol)
-            return
+            return False
 
         risk_qty = (usdt_free * RISK_PCT) / diff
         max_qty_by_margin = (margin_available * LEVERAGE) / entry_price
         qty = min(risk_qty, max_qty_by_margin)
+        # Redondear cantidad a precisión del mercado
+        qty = ex.round_amount(symbol, qty)
 
-        log.info("POSITION SIZING: total=%.2f free=%.2f budget=%.2f risk_qty=%.2f margin_qty=%.2f qty=%.2f",
+        log.info("POSITION SIZING: total=%.2f free=%.2f budget=%.2f risk_qty=%.2f margin_qty=%.2f qty=%s",
                  usdt_total, usdt_free, margin_available, risk_qty, max_qty_by_margin, qty)
-        if qty < 0.001:
-            log.warning("Qty demasiado pequeña para %s (%s)", symbol, qty)
-            return
+        if qty <= 0:
+            log.warning("Qty <= 0 para %s", symbol)
+            return False
 
         await ex.set_leverage(symbol, LEVERAGE)
 
         side = "buy" if sig.signal == "long" else "sell"
-        hold_side = "long" if sig.signal == "long" else "short"
-        sl_trigger = sig.stop_loss
-        tp_trigger = sig.take_profit
 
-        # ── Fix: type=3 attached SL+TP con uta=true ──
-        # La cuenta está en One-Way mode ("unilateral" según error 40774),
-        # así que NO usamos holdSide (eso es para Hedge mode).
-        # 'uta':'true' activa el SL+TP simultáneo en ccxt bitget.
-        # Ver: https://github.com/ccxt/ccxt/issues/28239
-        params = {
-            "stopLoss": {"triggerPrice": sl_trigger},
-            "takeProfit": {"triggerPrice": tp_trigger},
-            "uta": "true",
-        }
-        order = await ex.market_order(symbol, side, qty, params=params)
+        # ── LÓGICA PARA CUENTA CLASSIC (sin UTA) ──
+        # Paso 1: Abrir la posición (market order) SIN adjuntar SL/TP
+        order = await ex.market_order(symbol, side, qty)
         if not order.get("id"):
-            # ── Fallback 1: reintentar con holdSide (por si es Hedge mode) ──
-            log.warning("SL/TP attach falló, reintentando con holdSide...")
-            params["holdSide"] = hold_side
-            order = await ex.market_order(symbol, side, qty, params=params)
-        if not order.get("id"):
-            # ── Fallback 2: 2 pasos (posición + SL/TP como trigger orders) ──
-            log.warning("Reintento falló, abriendo posición sola...")
-            order = await ex.market_order(symbol, side, qty)
-            if order.get("id"):
-                reduce_side = "sell" if sig.signal == "long" else "buy"
-                for label, price in [("SL", sl_trigger), ("TP", tp_trigger)]:
-                    await ex.market_order(symbol, reduce_side, qty,
-                                          reduce=True,
-                                          params={"triggerPrice": price})
-                    log.info("%s set %s %.6f", label, symbol, price)
+            log.error("Fallo al abrir posición %s %s", side.upper(), symbol)
+            return False
 
-        if order.get("id"):
-            log.info("ORDER PLACED %s %s qty=%.6f id=%s",
-                     side.upper(), symbol, qty, order.get("id", "?"))
+        log.info("ORDER %s %s qty=%s id=%s",
+                 side.upper(), symbol, qty, order.get("id", "?"))
+
+        # Paso 2: Colocar SL y TP como trigger orders independientes
+        # Redondear precios a la precisión del mercado (evita error 40808 checkScale)
+        sl_price = ex.round_price(symbol, sig.stop_loss)
+        tp_price = ex.round_price(symbol, sig.take_profit)
+        reduce_side = "sell" if sig.signal == "long" else "buy"
+
+        sl_ok = tp_ok = False
+        for label, trigger_px in [("SL", sl_price), ("TP", tp_price)]:
+            try:
+                trig_order = await ex.market_order(
+                    symbol, reduce_side, qty,
+                    reduce=True,
+                    params={"triggerPrice": trigger_px,
+                            "triggerType": "last_price"},
+                )
+                if trig_order.get("id"):
+                    log.info("%s set %s trigger=%.6f id=%s",
+                             label, symbol, trigger_px, trig_order["id"])
+                    if label == "SL":
+                        sl_ok = True
+                    else:
+                        tp_ok = True
+                else:
+                    log.error("Fallo al colocar %s %s trigger=%.6f", label, symbol, trigger_px)
+            except Exception as e:
+                log.error("Excepción al colocar %s %s: %s", label, symbol, e)
+
+        if not sl_ok:
+            log.warning("!! %s abierta SIN STOP LOSS (solo TP=%s)", symbol, tp_ok)
+        if not tp_ok:
+            log.warning("!! %s abierta SIN TAKE PROFIT (solo SL=%s)", symbol, sl_ok)
+
+        return True
 
     # ── BACKTEST ─────────────────────────────────────────
     async def backtest(self):
