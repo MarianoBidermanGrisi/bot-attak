@@ -199,6 +199,7 @@ LOBO_BE_OFFSET_PCT       = float(os.environ.get('LOBO_BE_OFFSET_PCT', '0.5')) / 
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '12'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
 LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '9'))
+MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 
 log.info(
@@ -206,13 +207,14 @@ log.info(
     "ADX[%d](%.0f-%.0f) | FVG gap>=%.1fATR | OB mov>=%.0fATR | "
     "Risk=%.1f%% | Lev=%.0fx | MaxPos=%d | "
     "TP %.0f/%.0f/%.0f%% | Trail=%.0fATR | "
-    "BE=%.1f%%(offset=%.1f%%) | Paper=%s",
+    "BE=%.1f%%(offset=%.1f%%) | MinOrder=%.0fUSDT | Paper=%s",
     TOP_N, TIMEFRAME_4H, TIMEFRAME_D1,
     LOBO_ADX_PERIOD, LOBO_ADX_MIN*100, LOBO_ADX_MAX*100,
     LOBO_FVG_MIN_GAP_ATR, LOBO_OB_MIN_MOV_ATR,
     LOBO_RISK_PCT*100, LEVERAGE, LOBO_MAX_POSITIONS,
     LOBO_TP1_SIZE*100, LOBO_TP2_SIZE*100, LOBO_TP3_SIZE*100,
     LOBO_TRAIL_ATR_MULT, LOBO_BE_TRIGGER_PCT*100, LOBO_BE_OFFSET_PCT*100,
+    MIN_ORDER_USDT,
     PAPER_TRADE,
 )
 
@@ -908,11 +910,19 @@ def evaluar_senal_bitlobo(
         pos_value = riesgo_capital / distancia_sl
     else:
         return None
+    
+    # Asegurar valor mínimo de orden (Bitget requiere >= 5 USDT)
+    if pos_value < MIN_ORDER_USDT:
+        log.info("%s: pos_value %.2f < min %d, ajustando a minimo", 
+                 symbol, pos_value, MIN_ORDER_USDT)
+        pos_value = MIN_ORDER_USDT
+    
     qty = pos_value / precio_actual
-    apalancamiento = min(pos_value / max(balance * LOBO_RISK_PCT, 1), 10)
+    apalancamiento = min(pos_value / max(riesgo_capital, 1), 10)
+    riesgo_real_pct = (pos_value * distancia_sl) / balance * 100  # % real arriesgado
 
     score += 1
-    detalles.append(f'R12:Sizing_qty={qty:.4f}')
+    detalles.append(f'R12:Sizing_qty={qty:.4f}_risk={riesgo_real_pct:.1f}%')
 
     # Score mínimo para considerar señal válida
     if score < LOBO_SCORE_MIN:
@@ -934,6 +944,8 @@ def evaluar_senal_bitlobo(
         'pos_value': pos_value,
         'score': score,
         'max_score': 14,
+        'size_usdt': pos_value / apalancamiento if apalancamiento > 0 else 0,
+        'riesgo_real_pct': riesgo_real_pct,
         'fvg_usado': tp1_candidates[0] if tp1_candidates else None,
         'impulso': impulso,
         'fibo': fibo,
@@ -1574,6 +1586,16 @@ def main():
                     market = exchange.market(symbol)
                     precision = market['precision']['amount']
                     step = market['limits']['amount']['min'] or (10 ** -precision)
+
+                    # Asegurar mínimo de Bitget: step AND notional >= MIN_ORDER_USDT
+                    min_qty = max(step, math.ceil(MIN_ORDER_USDT / precio_actual * 10**precision) / 10**precision)
+
+                    if raw_qty < min_qty:
+                        riesgo_pct_ajustado = (min_qty * precio_actual * abs(precio_actual - sl_price) / precio_actual) / balance * 100
+                        log.info("%s: raw_qty %.6f < min_qty %.6f, usando minima (riesgo %.1f%%)",
+                                 symbol, raw_qty, min_qty, riesgo_pct_ajustado)
+                        raw_qty = min_qty
+
                     qty = (raw_qty // step) * step
                     actual_margin = (qty * precio_actual) / LEVERAGE
 
@@ -1604,7 +1626,7 @@ def main():
                         'tp3_price': tp3_price,
                         'quantity': qty,
                         'balance_before': balance,
-                        'atr_val': atr_val,
+                        'atr_val': senal.get('atr_val', 0),
                         'size_usdt': round(actual_margin, 2),
                         'risk_pct': round(actual_margin / max(balance, 1) * 100, 2),
                         'score': score,
@@ -1634,6 +1656,11 @@ def main():
                         continue
 
                     # ── Orden real en Bitget ──
+                    try:
+                        exchange.set_leverage(int(LEVERAGE), symbol)
+                    except Exception as e:
+                        log.warning("Error set_leverage %s %d: %s", symbol, int(LEVERAGE), e)
+
                     params = {
                         'marginCoin': 'USDT',
                         'marginMode': 'isolated',
