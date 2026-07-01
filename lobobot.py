@@ -141,12 +141,12 @@ LOBO_IMPULSO_MAX_VELAS   = int(os.environ.get('LOBO_IMPULSO_MAX_VELAS', '40'))
 LOBO_IMPULSO_PEND_MIN    = float(os.environ.get('LOBO_IMPULSO_PEND_MIN', '0.02'))
 
 # R2 - SMA100 tolerancia
-LOBO_SMA100_TOL_ATR      = float(os.environ.get('LOBO_SMA100_TOL_ATR', '0.5'))
+LOBO_SMA100_TOL_ATR      = float(os.environ.get('LOBO_SMA100_TOL_ATR', '1.0'))
 
 # R3 - ADX
 LOBO_ADX_PERIOD          = int(os.environ.get('LOBO_ADX_PERIOD', '14'))
-LOBO_ADX_MIN             = float(os.environ.get('LOBO_ADX_MIN', '20'))
-LOBO_ADX_MAX             = float(os.environ.get('LOBO_ADX_MAX', '30'))
+LOBO_ADX_MIN             = float(os.environ.get('LOBO_ADX_MIN', '15'))
+LOBO_ADX_MAX             = float(os.environ.get('LOBO_ADX_MAX', '50'))
 LOBO_ADX_DESC_VELAS      = int(os.environ.get('LOBO_ADX_DESC_VELAS', '6'))
 
 # R4 - USDT.D
@@ -198,6 +198,7 @@ LOBO_BE_OFFSET_PCT       = float(os.environ.get('LOBO_BE_OFFSET_PCT', '0.5')) / 
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '12'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
+LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '9'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 
 log.info(
@@ -239,47 +240,65 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 # ----------------------------------------------------------------
 def detectar_impulso(df_h4: pd.DataFrame) -> Optional[dict]:
     """
-    Busca el último tramo direccional en H4.
-    - Alcista: cada vela cierra > máxima de la vela anterior,
-      sin retroceso > 38.2% del tramo acumulado.
-    - Bajista: cada vela cierra < mínima de la vela anterior.
-    Retorna {inicio, fin, tipo} o None.
+    Busca el último tramo direccional en H4 cumpliendo:
+    - Longitud entre LOBO_IMPULSO_MIN_VELAS (8) y LOBO_IMPULSO_MAX_VELAS (40).
+    - Pendiente neta >= LOBO_IMPULSO_PEND_MIN (2%).
+    - Ninguna vela individual retrocde >38.2% del movimiento total del tramo.
+    - Al menos 70% de las velas cierran en la dirección del impulso.
+    Retorna {inicio, fin, tipo, velas} o None.
     """
     min_v = LOBO_IMPULSO_MIN_VELAS
     max_v = min(LOBO_IMPULSO_MAX_VELAS, len(df_h4) - 2)
-    for i in range(len(df_h4) - min_v, min_v, -1):
-        tramo = df_h4.iloc[i-min_v:i]
+    n = len(df_h4)
+
+    # Probar ventanas de distintas longitudes (de mayor a menor, priorizando la más reciente)
+    for length in range(min(max_v, n - 1), min_v - 1, -1):
+        start = n - length - 1
+        if start < 0:
+            continue
+        tramo = df_h4.iloc[start:start + length].copy()
         if len(tramo) < min_v:
             continue
-        p0, p1 = tramo['close'].iloc[0], tramo['close'].iloc[-1]
+
+        p0 = float(tramo['close'].iloc[0])
+        p1 = float(tramo['close'].iloc[-1])
         pendiente = (p1 - p0) / p0 if p0 > 0 else 0
         if abs(pendiente) < LOBO_IMPULSO_PEND_MIN:
             continue
 
-        if pendiente > 0:  # Alcista
-            ok = True
-            for j in range(1, len(tramo)):
-                if tramo['close'].iloc[j] <= tramo['high'].iloc[j-1]:
-                    ok = False
+        alcista = pendiente > 0
+        diff_total = abs(p1 - p0)
+        max_retro = diff_total * 0.382
+
+        ok_velas = 0
+        total_velas = len(tramo) - 1
+        for j in range(1, len(tramo)):
+            c0 = float(tramo['close'].iloc[j - 1])
+            c1 = float(tramo['close'].iloc[j])
+            if alcista:
+                # Verificar retroceso individual no exceda 38.2% del total
+                retro = (c0 - c1) if c1 < c0 else 0
+                if retro > max_retro:
                     break
-            if ok:
-                return {
-                    'inicio': float(tramo['low'].iloc[0]),
-                    'fin': float(tramo['high'].iloc[-1]),
-                    'tipo': 'alcista',
-                    'velas': len(tramo),
-                }
-        else:  # Bajista
-            ok = True
-            for j in range(1, len(tramo)):
-                if tramo['close'].iloc[j] >= tramo['low'].iloc[j-1]:
-                    ok = False
+                if c1 > c0:
+                    ok_velas += 1
+            else:
+                retro = (c1 - c0) if c1 > c0 else 0
+                if retro > max_retro:
                     break
-            if ok:
+                if c1 < c0:
+                    ok_velas += 1
+        else:
+            # Todas las velas pasaron el filtro de retraceso
+            ratio_dir = ok_velas / total_velas if total_velas > 0 else 0
+            if ratio_dir >= 0.7:
+                # Encontrar extremos del tramo
+                low = float(tramo['low'].min())
+                high = float(tramo['high'].max())
                 return {
-                    'inicio': float(tramo['high'].iloc[0]),
-                    'fin': float(tramo['low'].iloc[-1]),
-                    'tipo': 'bajista',
+                    'inicio': low if alcista else high,
+                    'fin': high if alcista else low,
+                    'tipo': 'alcista' if alcista else 'bajista',
                     'velas': len(tramo),
                 }
     return None
@@ -319,8 +338,13 @@ def sma100_en_zona_ote(sma100_val: float, fibo: dict, atr_val: float) -> bool:
 # ----------------------------------------------------------------
 # R3 - ADX
 # ----------------------------------------------------------------
+def _wilder_ema(series: pd.Series, period: int) -> pd.Series:
+    """Wilder's Exponential Moving Average (α=1/period)."""
+    alpha = 1.0 / period
+    return series.ewm(alpha=alpha, adjust=False).mean()
+
 def adx_permite_entrada(df_h4: pd.DataFrame) -> bool:
-    """ADX entre [20,30] y descendente en últimas N velas."""
+    """ADX entre [LOBO_ADX_MIN, LOBO_ADX_MAX] y preferentemente no subiendo."""
     if len(df_h4) < LOBO_ADX_PERIOD * 2:
         return False
     try:
@@ -331,14 +355,32 @@ def adx_permite_entrada(df_h4: pd.DataFrame) -> bool:
             return False
         adx_series = adx_df[adx_col[0]]
     except ImportError:
-        # Cálculo manual simplificado de ADX
-        tr = _atr(df_h4, LOBO_ADX_PERIOD)
-        plus_dm = df_h4['high'].diff().clip(lower=0)
-        minus_dm = -df_h4['low'].diff().clip(lower=0)
-        plus_di = 100 * _ema(plus_dm.where(plus_dm > minus_dm, 0), LOBO_ADX_PERIOD) / tr
-        minus_di = 100 * _ema(minus_dm.where(minus_dm > plus_dm, 0), LOBO_ADX_PERIOD) / tr
+        # Wilder's ADX manual calculation
+        period = LOBO_ADX_PERIOD
+        # 1) True Range
+        high, low, close = df_h4['high'], df_h4['low'], df_h4['close']
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
+        ], axis=1).max(axis=1)
+        # 2) +DM, -DM
+        up = high.diff()
+        down = -low.diff()
+        plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0), index=df_h4.index)
+        minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0), index=df_h4.index)
+        # 3) Wilder's smoothing
+        tr_s = _wilder_ema(tr, period)
+        plus_s = _wilder_ema(plus_dm, period)
+        minus_s = _wilder_ema(minus_dm, period)
+        # 4) +DI, -DI
+        tr_s = tr_s.replace(0, np.nan)
+        plus_di = 100 * plus_s / tr_s
+        minus_di = 100 * minus_s / tr_s
+        # 5) DX
         dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-        adx_series = _ema(dx, LOBO_ADX_PERIOD)
+        # 6) ADX = Wilder's smooth of DX
+        adx_series = _wilder_ema(dx, period)
 
     if adx_series.isna().all():
         return False
@@ -355,12 +397,12 @@ def adx_permite_entrada(df_h4: pd.DataFrame) -> bool:
     vals = adx_series.iloc[-n:].dropna().values
     if len(vals) < 3:
         return True
-    # Pendiente negativa (regresión lineal simple)
+    # Pendiente (regresión lineal simple) - permitir plano o descendente
     x = np.arange(len(vals))
     if np.std(vals) == 0:
         return True
     slope = np.polyfit(x, vals, 1)[0]
-    return slope < 0
+    return slope < 0.01
 
 # ----------------------------------------------------------------
 # R4 - USDT.D en resistencia (filtro macro Long)
@@ -693,27 +735,33 @@ def evaluar_senal_bitlobo(
     score += 1
     detalles.append(f'R1:impulso_{impulso["tipo"]}_{impulso["velas"]}v')
 
-    # Precio debe estar dentro de zona OTE (50%-61.8%)
+    # Precio debe estar dentro de zona OTE o próximo (tolerancia 0.5 ATR)
     zona_inf = min(fibo['level_0_5'], fibo['level_0_618'])
     zona_sup = max(fibo['level_0_5'], fibo['level_0_618'])
     senal['zona_ote_inf'] = zona_inf
     senal['zona_ote_sup'] = zona_sup
 
-    if not (zona_inf <= precio_actual <= zona_sup):
-        log.debug("%s: Precio %.4f fuera de zona OTE [%.4f, %.4f]", symbol, precio_actual, zona_inf, zona_sup)
+    tol = atr_val * 1.0  # 1.0 ATR de tolerancia a cada lado
+    if not (zona_inf - tol <= precio_actual <= zona_sup + tol):
+        log.debug("%s: Precio %.4f fuera de zona OTE+tol [%.4f, %.4f]",
+                  symbol, precio_actual, zona_inf - tol, zona_sup + tol)
         return None
+    if zona_inf <= precio_actual <= zona_sup:
+        score += 1  # Bonus por estar exactamente en zona
+        detalles.append('R1:en_OTE')
+    else:
+        detalles.append('R1:cerca_OTE')
 
     # --- R2: SMA 100 en zona OTE ---
     if len(df_h4) >= 100:
         sma100 = _sma(df_h4['close'], 100).iloc[-1]
         if pd.isna(sma100):
             pass  # No disponible, no filtra
-        elif not sma100_en_zona_ote(sma100, fibo, atr_val):
-            log.debug("%s: R2 fail - SMA100 %.4f fuera de zona OTE", symbol, sma100)
-            return None
-        else:
+        elif sma100_en_zona_ote(sma100, fibo, atr_val):
             score += 1
             detalles.append(f'R2:SMA100_en_OTE')
+        else:
+            detalles.append(f'R2:SMA100_no')
     else:
         score += 1  # Pasa si no hay suficientes datos
 
@@ -723,69 +771,73 @@ def evaluar_senal_bitlobo(
         detalles.append('R3:ADX_ok')
     else:
         log.debug("%s: R3 fail - ADX fuera de rango", symbol)
-        return None
+        detalles.append('R3:ADX_no')
 
     # --- R4: USDT.D (solo para Long) ---
     if es_long:
-        if not check_usdtd_resistencia():
-            log.debug("%s: R4 fail - USDT.D no en resistencia", symbol)
-            return None
-    score += 1
-    detalles.append('R4:USDT.D_ok')
+        if check_usdtd_resistencia():
+            score += 1
+            detalles.append('R4:USDT.D_resistencia')
+        else:
+            log.debug("%s: R4 - USDT.D no en resistencia", symbol)
+            detalles.append('R4:USDT.D_no')
+    else:
+        score += 1
+        detalles.append('R4:Short_ok')
 
     # --- R5: BTC.D / Altcoins ---
     btcd_subiendo = check_btcd_tendencia()
-    if btcd_subiendo and 'BTC' not in symbol:
-        log.debug("%s: R5 fail - BTC.D subiendo, ignorar altcoins", symbol)
-        return None
-    score += 1
-    detalles.append(f'R5:BTC.D_{"sube_soloBTC" if btcd_subiendo else "baja_okAltcoins"}')
+    if not (btcd_subiendo and 'BTC' not in symbol):
+        score += 1
+        detalles.append(f'R5:BTC.D_{"sube" if btcd_subiendo else "baja"}')
+    else:
+        log.debug("%s: R5 - BTC.D subiendo, ignorar altcoins", symbol)
+        detalles.append('R5:BTC.D_bloquea_alt')
 
     # --- R6: FVG en zona ---
     fvgs = detectar_fvg(df_h4)
     fvg_en_zona = [f for f in fvgs if f['gap_sup'] >= zona_inf and f['gap_inf'] <= zona_sup]
     senal['fvgs'] = fvg_en_zona
-    if not fvg_en_zona:
-        log.debug("%s: R6 fail - sin FVG en zona OTE", symbol)
-        return None
-    score += 1
-    detalles.append(f'R6:FVG_{len(fvg_en_zona)}')
+    if fvg_en_zona:
+        score += 1
+        detalles.append(f'R6:FVG_{len(fvg_en_zona)}')
+    else:
+        detalles.append('R6:FVG_no')
 
     # --- R7: Order Block en zona ---
     obs = detectar_order_blocks(df_h4)
     ob_en_zona = [o for o in obs if o['low'] <= zona_sup and o['high'] >= zona_inf]
     senal['obs'] = ob_en_zona
-    if not ob_en_zona:
-        log.debug("%s: R7 fail - sin OB en zona OTE", symbol)
-        return None
-    score += 1
-    detalles.append(f'R7:OB_{len(ob_en_zona)}')
+    if ob_en_zona:
+        score += 1
+        detalles.append(f'R7:OB_{len(ob_en_zona)}')
+    else:
+        detalles.append('R7:OB_no')
 
     # --- R8: Liquidity Sweep ---
     sweeps = detectar_sweep(df_h4)
     senal['sweeps'] = sweeps
-    if not sweeps:
-        log.debug("%s: R8 fail - sin sweep detectado", symbol)
-        return None
-    # Verificar que el sweep es en la dirección correcta
-    sweep_ok = any(
-        (s['tipo'] == 'sweep_bajista_long' and es_long) or
-        (s['tipo'] == 'sweep_alcista_short' and not es_long)
-        for s in sweeps
-    )
-    if not sweep_ok:
-        log.debug("%s: R8 fail - sweep direccion incorrecta", symbol)
-        return None
-    score += 1
-    detalles.append(f'R8:Sweep_{sweeps[0]["tipo"]}')
+    if sweeps:
+        sweep_ok = any(
+            (s['tipo'] == 'sweep_bajista_long' and es_long) or
+            (s['tipo'] == 'sweep_alcista_short' and not es_long)
+            for s in sweeps
+        )
+        if sweep_ok:
+            score += 1
+            detalles.append(f'R8:Sweep_{sweeps[0]["tipo"]}')
+        else:
+            detalles.append('R8:Sweep_dir_no')
+    else:
+        detalles.append('R8:Sweep_no')
 
     # --- R9: Mecha/Absorción ---
     absorcion_ok, det_abs = evaluar_absorcion_long(df_h4)
-    if not absorcion_ok:
-        log.debug("%s: R9 fail - sin absorcion: %s", symbol, det_abs)
-        return None
-    score += 1
-    detalles.append(f'R9:Absorcion')
+    if absorcion_ok:
+        score += 1
+        detalles.append(f'R9:Absorcion')
+    else:
+        detalles.append(f'R9:NoAbs_{det_abs.get("rechazo","")}')
 
     # --- R10: Elliott (informativo, no bloqueante) ---
     elliott = detectar_estructura_elliott(df_h4)
@@ -793,22 +845,35 @@ def evaluar_senal_bitlobo(
     score += 1
     detalles.append(f'R10:Elliott_{elliott["fase"]}')
 
-    # --- Validación D1 (R16 adelantada) ---
+    # --- Validación D1 (R16) - verificar tendencia mayor ---
     soporte_d1 = float(df_d1['low'].iloc[-min(20, len(df_d1)):].min())
-    if es_long and precio_actual < soporte_d1 * 0.99:
-        log.debug("%s: R16 fail - precio bajo soporte D1", symbol)
-        return None
-    score += 1
-    detalles.append('R16:SoporteD1_ok')
+    resistencia_d1 = float(df_d1['high'].iloc[-min(20, len(df_d1)):].max())
+    if es_long:
+        if precio_actual > soporte_d1 * 1.02:  # Por encima del soporte D1
+            score += 1
+            detalles.append('R16:SoporteD1_ok')
+        else:
+            log.debug("%s: R16 - precio cerca soporte D1", symbol)
+            detalles.append('R16:SoporteD1_cerca')
+    else:  # Short
+        if precio_actual < resistencia_d1 * 0.98:  # Por debajo de resistencia D1
+            score += 1
+            detalles.append('R16:ResistenciaD1_ok')
+        else:
+            log.debug("%s: R16 - precio cerca resistencia D1", symbol)
+            detalles.append('R16:ResistenciaD1_cerca')
 
     # --- TP/SL Levels (R13) ---
+    sl_mult = float(os.environ.get('LOBO_SL_ATR', '1.5'))  # 1.5 ATR para SL
+    tp_default_mult = float(os.environ.get('LOBO_TP_DEFAULT_ATR', '3.0'))  # 3.0 ATR default TP
+    
     if es_long:
-        sl_price = precio_actual - (atr_val * 1.5)  # 1.5 ATR de SL
+        sl_price = precio_actual - (atr_val * sl_mult)
         tp1_candidates = [f for f in fvg_en_zona if f['gap_inf'] > precio_actual]
         if tp1_candidates:
             tp1_price = tp1_candidates[0]['gap_inf']
         else:
-            tp1_price = precio_actual + (atr_val * 1.5)
+            tp1_price = precio_actual + (atr_val * tp_default_mult)
         tp2_price = precio_actual + (atr_val * LOBO_TP2_ATR_MULT)
         tp3_price = precio_actual + (atr_val * LOBO_TP3_ATR_MULT)
         # SL debe estar debajo de la mecha (R9)
@@ -816,12 +881,12 @@ def evaluar_senal_bitlobo(
             mecha_low = precio_actual - det_abs['mecha_inf']
             sl_price = min(sl_price, mecha_low * 0.995)
     else:
-        sl_price = precio_actual + (atr_val * 1.5)
+        sl_price = precio_actual + (atr_val * sl_mult)
         tp1_candidates = [f for f in fvg_en_zona if f['gap_sup'] < precio_actual]
         if tp1_candidates:
             tp1_price = tp1_candidates[0]['gap_sup']
         else:
-            tp1_price = precio_actual - (atr_val * 1.5)
+            tp1_price = precio_actual - (atr_val * tp_default_mult)
         tp2_price = precio_actual - (atr_val * LOBO_TP2_ATR_MULT)
         tp3_price = precio_actual - (atr_val * LOBO_TP3_ATR_MULT)
 
@@ -829,11 +894,12 @@ def evaluar_senal_bitlobo(
     riesgo_pct = abs(precio_actual - sl_price) / precio_actual
     beneficio_pct = abs(tp1_price - precio_actual) / precio_actual
     rr = beneficio_pct / riesgo_pct if riesgo_pct > 0 else 0
-    if rr < 1.5:
+    if rr >= 1.5:
+        score += 1
+        detalles.append(f'R13:R:R_{rr:.2f}')
+    else:
         log.debug("%s: R:R %.2f < 1.5", symbol, rr)
-        return None
-    score += 1
-    detalles.append(f'R13:R:R_{rr:.2f}')
+        detalles.append(f'R13:R:R_{rr:.2f}_baja')
 
     # --- R12: Position Sizing ---
     riesgo_capital = balance * LOBO_RISK_PCT
@@ -848,6 +914,11 @@ def evaluar_senal_bitlobo(
     score += 1
     detalles.append(f'R12:Sizing_qty={qty:.4f}')
 
+    # Score mínimo para considerar señal válida
+    if score < LOBO_SCORE_MIN:
+        log.debug("%s: Score %d < minimo %d", symbol, score, LOBO_SCORE_MIN)
+        return None
+
     return {
         'symbol': symbol,
         'es_long': es_long,
@@ -861,6 +932,8 @@ def evaluar_senal_bitlobo(
         'qty': qty,
         'apalancamiento': apalancamiento,
         'pos_value': pos_value,
+        'score': score,
+        'max_score': 14,
         'fvg_usado': tp1_candidates[0] if tp1_candidates else None,
         'impulso': impulso,
         'fibo': fibo,
