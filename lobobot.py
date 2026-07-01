@@ -1584,19 +1584,23 @@ def main():
                     # Position sizing (R12, R18)
                     raw_qty = senal['qty']
                     market = exchange.market(symbol)
-                    precision = market['precision']['amount']
-                    step = market['limits']['amount']['min'] or (10 ** -precision)
+                    step = market['limits']['amount']['min'] or market['precision']['amount']
 
-                    # Asegurar mínimo de Bitget: step AND notional >= MIN_ORDER_USDT
-                    min_qty = max(step, math.ceil(MIN_ORDER_USDT / precio_actual * 10**precision) / 10**precision)
+                    # Mínimo que cumple step Y notional >= MIN_ORDER_USDT
+                    min_qty = math.ceil(MIN_ORDER_USDT / precio_actual / step) * step
 
                     if raw_qty < min_qty:
                         riesgo_pct_ajustado = (min_qty * precio_actual * abs(precio_actual - sl_price) / precio_actual) / balance * 100
+                        if riesgo_pct_ajustado > 10.0:
+                            log.info("%s: riesgo %.1f%% > 10%%, saltando (min_qty=%.4f notional=%.2f)",
+                                     symbol, riesgo_pct_ajustado, min_qty, min_qty * precio_actual)
+                            continue
                         log.info("%s: raw_qty %.6f < min_qty %.6f, usando minima (riesgo %.1f%%)",
                                  symbol, raw_qty, min_qty, riesgo_pct_ajustado)
                         raw_qty = min_qty
 
-                    qty = (raw_qty // step) * step
+                    # Redondear SIEMPRE hacia arriba al step (nunca truncar)
+                    qty = math.ceil(raw_qty / step) * step
                     actual_margin = (qty * precio_actual) / LEVERAGE
 
                     log.info(
