@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-bot_web_service.py — Punto de entrada para Render Web Service.
-=============================================================
-Importa el monolito BOTZG y ejecuta:
-  1. Servidor Flask (health checks, uptime)
-  2. Bot de trading en segundo plano (thread + asyncio)
+bot_web_service.py — Punto de entrada para Render Web Service (LOBOBOT v2)
+==========================================================================
+Importa lobobot v2 (BITLOBO formalizado) y ejecuta:
+  1. Servidor Flask (health checks, uptime, config)
+  2. Bot de trading BITLOBO v2 en segundo plano (thread + asyncio)
 
-Uso en Render:
-    gunicorn bot_web_service:app
+Uso en Render (Procfile):
+    web: gunicorn bot_web_service:app --timeout 120 --workers 1 --threads 2
+
+Uso local:
+    python bot_web_service.py
 
 Endpoints:
-    GET /         → "BOTZG - online"
-    GET /health   → JSON status
+    GET /         → "LOBOBOT v2 - online"
+    GET /health   → JSON status + config BITLOBO v2
     GET /status   → JSON bot status + uptime
+    GET /config   → JSON config completa de las 18 reglas
 """
 import os
 import sys
@@ -25,44 +29,41 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("web")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
-# ── Importar el monolito ──────────────────────────────────────
+# ── Importar el monolito v2 ────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import botzg
+import lobobot
 
-# ── Flask App ─────────────────────────────────────────────────
+# ── Flask App ──────────────────────────────────────────────────
 try:
     from flask import Flask, jsonify
 except ImportError:
-    log.error("Flask no instalado. Ejecuta: pip install flask gunicorn")
+    log.error("Flask no instalado. pip install flask gunicorn")
     raise
 
 app = Flask(__name__)
 
-# Estado global del bot
+# Estado global del web service
 BOT_ACTIVE = False
 BOT_STARTED_AT = None
 
-
+# ── Endpoints ──────────────────────────────────────────────────
 @app.route("/")
 def index():
-    return "BOTZG - MoneyZG Scalping Bot - online", 200
-
+    return "LOBOBOT v2 (BITLOBO FORMALIZADO) - online", 200
 
 @app.route("/health")
 def health():
     uptime = round(time.time() - BOT_STARTED_AT, 1) if BOT_STARTED_AT else 0
     return jsonify({
         "status": "running",
-        "bot": "botzg",
+        "bot": "lobobot_v2",
+        "strategy": "BITLOBO_18_REGLAS",
         "active": BOT_ACTIVE,
-        "uptime": uptime,
-        "strategy": f"MACD({botzg.MACD_FAST},{botzg.MACD_SLOW},{botzg.MACD_SIGNAL}) SMA({botzg.SMA_LONG})",
-        "sl_pct": botzg.SL_PCT * 100,
-        "tp_pct": botzg.TP_MIN_PCT * 100,
-        "leverage": botzg.LEVERAGE,
-        "paper_mode": botzg.PAPER_TRADE,
+        "uptime_seconds": uptime,
+        "paper_mode": lobobot.PAPER_TRADE,
+        "top_n": lobobot.TOP_N,
+        "active_positions": len(lobobot.TRADE_ENTRIES),
     })
-
 
 @app.route("/status")
 def status_handler():
@@ -71,51 +72,95 @@ def status_handler():
         "bot_active": BOT_ACTIVE,
         "uptime_seconds": uptime,
         "started_at": BOT_STARTED_AT,
-        "paper_mode": botzg.PAPER_TRADE,
+        "paper_mode": lobobot.PAPER_TRADE,
+        "active_symbols": list(lobobot.TRADE_ENTRIES.keys()),
+        "active_count": len(lobobot.TRADE_ENTRIES),
+        "cooldown_count": len(lobobot.COOLDOWNS),
     })
-
 
 @app.route("/config")
 def config_handler():
-    """Devuelve la configuración actual del bot."""
     return jsonify({
-        "timeframe": botzg.ENTRY_TIMEFRAME,
-        "macd": {"fast": botzg.MACD_FAST, "slow": botzg.MACD_SLOW, "signal": botzg.MACD_SIGNAL},
-        "sma_long": botzg.SMA_LONG,
-        "sl_pct": botzg.SL_PCT * 100,
-        "tp_min_pct": botzg.TP_MIN_PCT * 100,
-        "leverage": botzg.LEVERAGE,
-        "max_positions": botzg.MAX_POSITIONS,
-        "max_trades_day": botzg.MAX_TRADES_DAY,
-        "paper_trade": botzg.PAPER_TRADE,
-        "poll_interval_sec": botzg.POLL_INTERVAL_SEC,
-        "top_n": botzg.TOP_N,
+        # Escaneo
+        "top_n": lobobot.TOP_N,
+        "timeframes": {
+            "h4": lobobot.TIMEFRAME_4H,
+            "d1": lobobot.TIMEFRAME_D1,
+        },
+        # Reglas BITLOBO
+        "rules": {
+            "R1_impulso": {
+                "min_velas": lobobot.LOBO_IMPULSO_MIN_VELAS,
+                "max_velas": lobobot.LOBO_IMPULSO_MAX_VELAS,
+                "pendiente_min_pct": lobobot.LOBO_IMPULSO_PEND_MIN * 100,
+            },
+            "R2_sma100_tolerancia_atr": lobobot.LOBO_SMA100_TOL_ATR,
+            "R3_adx": {
+                "periodo": lobobot.LOBO_ADX_PERIOD,
+                "rango": [lobobot.LOBO_ADX_MIN, lobobot.LOBO_ADX_MAX],
+                "descendente_velas": lobobot.LOBO_ADX_DESC_VELAS,
+            },
+            "R6_fvg": {
+                "min_gap_atr": lobobot.LOBO_FVG_MIN_GAP_ATR,
+                "max_velas_sin_rellenar": lobobot.LOBO_FVG_MAX_VELAS,
+            },
+            "R7_order_block": {
+                "min_mov_atr": lobobot.LOBO_OB_MIN_MOV_ATR,
+                "lookback": lobobot.LOBO_OB_LOOKBACK,
+            },
+            "R8_sweep": {
+                "lookback": lobobot.LOBO_SWEEP_LOOKBACK,
+                "max_penetracion_atr": lobobot.LOBO_SWEEP_MAX_PEN_ATR,
+            },
+            "R9_absorcion": {
+                "mecha_min_atr": lobobot.LOBO_MECHA_MIN_ATR,
+                "cuerpo_mecha_ratio": lobobot.LOBO_MECHA_CUERPO_RATIO,
+            },
+        },
+        # Riesgo
+        "risk": {
+            "risk_pct": round(lobobot.LOBO_RISK_PCT * 100, 2),
+            "max_positions": lobobot.LOBO_MAX_POSITIONS,
+            "leverage": lobobot.LEVERAGE,
+            "paper_trade": lobobot.PAPER_TRADE,
+        },
+        # TP/SL
+        "tp_sl": {
+            "tp1_size_pct": lobobot.LOBO_TP1_SIZE * 100,
+            "tp2_size_pct": lobobot.LOBO_TP2_SIZE * 100,
+            "tp3_size_pct": lobobot.LOBO_TP3_SIZE * 100,
+            "tp2_atr_mult": lobobot.LOBO_TP2_ATR_MULT,
+            "tp3_atr_mult": lobobot.LOBO_TP3_ATR_MULT,
+        },
+        # BE + Trailing
+        "be_trailing": {
+            "be_trigger_pct": round(lobobot.LOBO_BE_TRIGGER_PCT * 100, 2),
+            "be_offset_pct": round(lobobot.LOBO_BE_OFFSET_PCT * 100, 2),
+            "trail_atr_mult": lobobot.LOBO_TRAIL_ATR_MULT,
+        },
     })
 
-
-# ── Iniciar bot en segundo plano ──────────────────────────────
+# ── Iniciar bot en segundo plano ───────────────────────────────
 def _start_bot():
     global BOT_ACTIVE, BOT_STARTED_AT
     BOT_STARTED_AT = time.time()
     BOT_ACTIVE = True
-    log.info("BOTZG worker started in background thread")
-
+    log.info("LOBOBOT v2 worker started in background thread")
     try:
-        # web_worker() crea su propio event loop y corre bot.live()
-        botzg.BOTZG.web_worker()
+        if lobobot.exchange is None:
+            lobobot.init_exchange()
+        lobobot.main()
     except Exception as e:
-        log.error("BOTZG worker error: %s", e, exc_info=True)
+        log.error("LOBOBOT v2 worker error: %s", e, exc_info=True)
     finally:
         BOT_ACTIVE = False
-        log.info("BOTZG worker stopped")
+        log.info("LOBOBOT v2 worker stopped")
 
-
-bot_thread = threading.Thread(target=_start_bot, daemon=True, name="BOTZG")
+bot_thread = threading.Thread(target=_start_bot, daemon=True, name="LOBOBOT_v2")
 bot_thread.start()
-log.info("BOTZG thread launched")
+log.info("LOBOBOT v2 thread launched from bot_web_service")
 
-
-# ── Entry point ───────────────────────────────────────────────
+# ── Entry point directo ────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     log.info("Starting Flask on 0.0.0.0:%d", port)
