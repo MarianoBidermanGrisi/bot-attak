@@ -1285,22 +1285,23 @@ def evaluar_senal_bitlobo_v3(
         pos_value = MIN_ORDER_USDT
     
     qty = pos_value / precio_actual
-    apalancamiento = min(pos_value / max(riesgo_capital, 1), 10)
-    if apalancamiento < 1:
-        apalancamiento = 1
+    
+    # Apalancamiento fijo 10x (como solicitó usuario)
+    apalancamiento = 10.0
     liq_price = calcular_precio_liquidacion(precio_actual, apalancamiento, 'long' if es_long else 'short')
+    
+    # Margen real = valor posición / apalancamiento
+    margin_real = pos_value / apalancamiento if apalancamiento > 0 else 0
     riesgo_real_pct = (pos_value * distancia_sl) / capital_fut * 100
     
     senal['qty'] = qty
     senal['pos_value'] = pos_value
     senal['liq_price'] = liq_price
-    senal['size_usdt'] = pos_value / apalancamiento if apalancamiento > 0 else 0
+    senal['size_usdt'] = margin_real
     senal['leverage_calculado'] = apalancamiento
     senal['riesgo_real_pct'] = riesgo_real_pct
 
-    detal_sizing = f'SL_{sl_mult:.1f}ATR_lev{apalancamiento:.0f}x_liq{liq_price:.2f}'
-    score += 1
-    detalles.append(detal_sizing)
+    detal_sizing = f'SL_{sl_mult:.1f}ATR_lev{apalancamiento:.0f}x_mrg{margin_real:.2f}'
     score += 1
     detalles.append(detal_sizing)
 
@@ -1584,14 +1585,18 @@ def _manage_paper_positions_v3(balance_total: float):
                 elif hedge_side == 'long' and mark <= hedge_sl:
                     HEDGE_ENTRIES.pop(symbol, None)
 
-            # --- F3: Liquidación forzosa (SL como plan oculto) ---
+            # --- Salidas: SL → LIQ → TP3 → TP2 → TP1 ---
             exit_px = None
             status = None
             reason = None
 
             if side == 'long':
-                # Liquidación si el precio toca liq_price
-                if liq_price > 0 and mark <= liq_price:
+                # SL: prioridad sobre liquidación
+                if sl_price > 0 and mark <= sl_price:
+                    exit_px = mark
+                    status = 'SL'
+                    reason = 'sl'
+                elif liq_price > 0 and mark <= liq_price:
                     exit_px = mark
                     status = 'LIQ'
                     reason = 'liquidacion'
@@ -1608,7 +1613,11 @@ def _manage_paper_positions_v3(balance_total: float):
                     status = 'TP'
                     reason = 'tp'
             else:  # short
-                if liq_price > 0 and mark >= liq_price:
+                if sl_price > 0 and mark >= sl_price:
+                    exit_px = mark
+                    status = 'SL'
+                    reason = 'sl'
+                elif liq_price > 0 and mark >= liq_price:
                     exit_px = mark
                     status = 'LIQ'
                     reason = 'liquidacion'
@@ -1940,7 +1949,7 @@ def main():
                                            tp1_price, tp2_price, tp3_price, rr, taken=True)
                         continue
 
-                    # ── Orden real en Bitget (F3: sin SL visible) ──
+                    # ── Orden real en Bitget (con SL, como lobobot.py) ──
                     try:
                         exchange.set_leverage(int(lev_calc), symbol)
                     except Exception as e:
@@ -1950,8 +1959,8 @@ def main():
                         'marginCoin': 'USDT',
                         'marginMode': 'isolated',
                         'tradeSide': 'open',
-                        # NOTA: SIN presetStopLossPrice (F3: anti-cacería)
                         'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, tp1_price)),
+                        'presetStopLossPrice': str(exchange.price_to_precision(symbol, sl_price)),
                     }
                     try:
                         exchange.create_order(symbol, 'market', 'buy' if es_long else 'sell', qty, params=params)
