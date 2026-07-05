@@ -1372,12 +1372,17 @@ def evaluar_senal_bitlobo_v3(
     senal['tp3_price'] = tp3_price
     senal['rr'] = rr
 
-    # R:R mínimo 1.5 OBLIGATORIO (CORREGIDO — ya no es bonus)
-    if rr < 1.5:
-        log.debug("%s: R:R %.2f < 1.5, abortando (minimo obligatorio)", symbol, rr)
+    # R:R mínimo: TP debe estar al menos tan lejos como el SL (>= 1.0)
+    if rr < 1.0:
+        log.debug("%s: R:R %.2f < 1.0, TP mas cerca que SL, abortando", symbol, rr)
         return None
-    score += 1
-    detalles.append(f'R13:R:R_{rr:.2f}')
+    # R:R >= 1.5 suma punto extra
+    if rr >= 1.5:
+        score += 1
+        detalles.append(f'R13:R:R_{rr:.2f}')
+    else:
+        log.debug("%s: R:R %.2f entre 1.0 y 1.5", symbol, rr)
+        detalles.append(f'R13:R:R_{rr:.2f}')
 
     # --- SL: 1.5 ATR (original lobobot.py) ---
     sl_mult = LOBO_SL_ATR
