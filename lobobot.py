@@ -1819,24 +1819,195 @@ def _manage_paper_positions_v3(balance_total: float):
         except Exception as e:
             log.error("[PAPER v3] Error gestionando %s: %s", symbol, e)
 
+def _cerrar_pos_real(symbol: str, side: str, qty: float):
+    """Cierra una posición real en Bitget vía API."""
+    close_side = 'sell' if side == 'long' else 'buy'
+    exchange.create_order(symbol, 'market', close_side, qty, params={
+        'marginCoin': 'USDT', 'marginMode': 'isolated', 'tradeSide': 'close',
+    })
+
 def manage_escudo_pro_v3(balance_total: float = 0.0):
-    """Versión v3 de gestión de posiciones."""
+    """Versión v3 de gestión de posiciones (real + paper)."""
     if PAPER_TRADE:
         _manage_paper_positions_v3(balance_total)
         return
-    # Modo real (misma estructura que paper pero con órdenes reales)
-    try:
-        positions = exchange.fetch_positions()
-        active_symbols = {p['symbol'] for p in positions if float(p['contracts']) > 0}
-        for sym in list(SESSION_ACTIVE_SYMBOLS):
-            if sym not in active_symbols:
-                COOLDOWNS[sym] = time.time() + 3600
-                SESSION_ACTIVE_SYMBOLS.discard(sym)
-        for pos in positions:
-            # ... (lógica similar a paper pero usando API real de Bitget)
-            pass
-    except Exception as e:
-        log.error("Error manage_escudo_pro_v3: %s", e)
+
+    # Modo real — misma lógica que paper pero cerrando vía API
+    if not TRADE_ENTRIES:
+        return
+
+    capital_fut = capital_disponible_futuros(balance_total)
+
+    for symbol in list(TRADE_ENTRIES.keys()):
+        try:
+            entry = TRADE_ENTRIES[symbol]
+            side = entry.get('side', 'long')
+            entry_price = float(entry['entry_price'])
+            sl_price = float(entry.get('sl_price', 0))
+            tp1_price = float(entry.get('tp1_price', 0))
+            tp2_price = float(entry.get('tp2_price', 0))
+            tp3_price = float(entry.get('tp3_price', 0))
+            liq_price = float(entry.get('liq_price', 0))
+
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                mark = float(ticker['last'])
+            except Exception:
+                continue
+
+            profit_pct = (mark - entry_price) / entry_price if side == 'long' else (entry_price - mark) / entry_price
+
+            # --- F10: Validación D1 estructural ---
+            try:
+                ohlcv_d1 = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
+                if len(ohlcv_d1) >= 10:
+                    df_d1 = pd.DataFrame(ohlcv_d1, columns=['ts','o','h','l','c','v'])
+                    if not validar_estructura_d1(df_d1, entry_price, side):
+                        log.info("[REAL] %s: D1 invalida estructura - cerrando", symbol)
+                        size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
+                        pnl = size * entry.get('leverage', LEVERAGE) * profit_pct
+                        _cerrar_pos_real(symbol, side, entry['quantity'])
+                        guardar_trade_csv(entry, mark, pnl, 0, pnl, 'D1_INVALID', 'd1_estructura')
+                        TRADE_ENTRIES.pop(symbol, None); HEDGE_ENTRIES.pop(symbol, None)
+                        _save_trade_entries(); SESSION_ACTIVE_SYMBOLS.discard(symbol)
+                        COOLDOWNS[symbol] = time.time() + 7200
+                        send_telegram(f"[REAL] *{symbol}* Cerrada por D1 estructura")
+                        continue
+            except Exception:
+                pass
+
+            # --- F4: Evaluar cobertura asimétrica ---
+            if LOBO_HEDGE_ENABLED and symbol not in HEDGE_ENTRIES:
+                hedge_params = evaluar_cobertura(entry, mark)
+                if hedge_params:
+                    log.info("[REAL] %s: Activando cobertura %s lev=%.0fx",
+                             symbol, hedge_params['side'], hedge_params['leverage'])
+                    HEDGE_ENTRIES[symbol] = hedge_params
+                    # Abrir cobertura real
+                    try:
+                        exchange.set_leverage(int(hedge_params['leverage']), symbol)
+                    except Exception:
+                        pass
+                    try:
+                        hedge_qty = hedge_params['size_usdt'] / mark
+                        hs = hedge_params['side']
+                        exchange.create_order(symbol, 'market', 'buy' if hs == 'long' else 'sell',
+                                              hedge_qty, params={
+                            'marginCoin': 'USDT', 'marginMode': 'isolated', 'tradeSide': 'open',
+                            'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, hedge_params['tp_price'])),
+                        })
+                    except Exception as e:
+                        log.error("Error abriendo cobertura %s: %s", symbol, e)
+                    send_telegram(f"[REAL] *{symbol}* Cobertura {hedge_params['side']} activada")
+
+            # --- Gestionar cobertura activa ---
+            hedge = HEDGE_ENTRIES.get(symbol)
+            if hedge:
+                hedge_side = hedge['side']; hedge_tp = hedge['tp_price']; hedge_sl = hedge['sl_price']
+                hedge_lev = hedge['leverage']
+                if hedge_side == 'short' and mark <= hedge_tp:
+                    pnl_hedge = hedge.get('size_usdt', 0) * hedge_lev * ((hedge['entry_price'] - mark) / hedge['entry_price'])
+                    log.info("[REAL] %s: Cobertura TP! PnL=%.2f", symbol, pnl_hedge)
+                    HEDGE_ENTRIES.pop(symbol, None)
+                elif hedge_side == 'long' and mark >= hedge_tp:
+                    pnl_hedge = hedge.get('size_usdt', 0) * hedge_lev * ((mark - hedge['entry_price']) / hedge['entry_price'])
+                    log.info("[REAL] %s: Cobertura TP! PnL=%.2f", symbol, pnl_hedge)
+                    HEDGE_ENTRIES.pop(symbol, None)
+                if hedge_side == 'short' and mark >= hedge_sl:
+                    HEDGE_ENTRIES.pop(symbol, None)
+                elif hedge_side == 'long' and mark <= hedge_sl:
+                    HEDGE_ENTRIES.pop(symbol, None)
+
+            # --- Salidas: SL → LIQ → TP3 → TP2 → TP1 ---
+            exit_px = None; status = None; reason = None
+
+            if side == 'long':
+                if sl_price > 0 and mark <= sl_price:
+                    exit_px = mark; status = 'SL'; reason = 'sl'
+                elif liq_price > 0 and mark <= liq_price:
+                    exit_px = mark; status = 'LIQ'; reason = 'liquidacion'
+                elif tp3_price > 0 and mark >= tp3_price:
+                    exit_px = tp3_price; status = 'TP'; reason = 'tp'
+                elif tp2_price > 0 and mark >= tp2_price:
+                    exit_px = tp2_price; status = 'TP'; reason = 'tp'
+                elif tp1_price > 0 and mark >= tp1_price:
+                    exit_px = tp1_price; status = 'TP'; reason = 'tp'
+            else:
+                if sl_price > 0 and mark >= sl_price:
+                    exit_px = mark; status = 'SL'; reason = 'sl'
+                elif liq_price > 0 and mark >= liq_price:
+                    exit_px = mark; status = 'LIQ'; reason = 'liquidacion'
+                elif tp3_price > 0 and mark <= tp3_price:
+                    exit_px = tp3_price; status = 'TP'; reason = 'tp'
+                elif tp2_price > 0 and mark <= tp2_price:
+                    exit_px = tp2_price; status = 'TP'; reason = 'tp'
+                elif tp1_price > 0 and mark <= tp1_price:
+                    exit_px = tp1_price; status = 'TP'; reason = 'tp'
+
+            if exit_px is not None:
+                size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
+                lev = float(entry.get('leverage', LEVERAGE))
+                pnl_pct = (exit_px - entry_price) / entry_price if side == 'long' else (entry_price - exit_px) / entry_price
+                pnl = size * lev * pnl_pct
+                log.info("[REAL] %s %s | Entry=%.4f Exit=%.4f PnL=%.2f (lev=%.0f)",
+                         symbol, status, entry_price, exit_px, pnl, lev)
+                _cerrar_pos_real(symbol, side, entry['quantity'])
+                guardar_trade_csv(entry, exit_px, pnl, 0, pnl, status, reason)
+                TRADE_ENTRIES.pop(symbol, None); HEDGE_ENTRIES.pop(symbol, None)
+                _save_trade_entries(); SESSION_ACTIVE_SYMBOLS.discard(symbol)
+                COOLDOWNS[symbol] = time.time() + 3600
+                PEAK_PRICES.pop(symbol, None); ALERTS_HISTORY.pop(symbol, None)
+                TRAIL_COUNTS.pop(symbol, None)
+                send_telegram(f"[REAL] *{symbol} {status}*\nPnL: {pnl:.2f} USDT ({pnl_pct*100:.2f}%)")
+                continue
+
+            # --- Timeout ---
+            entry_time = entry.get('entry_time')
+            if isinstance(entry_time, datetime) and profit_pct < 0:
+                horas = (datetime.now() - entry_time).total_seconds() / 3600
+                if horas >= LOBO_TIMEOUT_HORAS:
+                    size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
+                    lev = float(entry.get('leverage', LEVERAGE))
+                    pnl = size * lev * profit_pct
+                    log.info("[REAL] %s TIMEOUT +%.0fh", symbol, horas)
+                    _cerrar_pos_real(symbol, side, entry['quantity'])
+                    guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
+                    TRADE_ENTRIES.pop(symbol, None); HEDGE_ENTRIES.pop(symbol, None)
+                    _save_trade_entries(); SESSION_ACTIVE_SYMBOLS.discard(symbol)
+                    COOLDOWNS[symbol] = time.time() + 3600
+                    continue
+
+            # --- Seguimiento de pico ---
+            if symbol not in PEAK_PRICES:
+                PEAK_PRICES[symbol] = mark
+            else:
+                if side == 'long':
+                    PEAK_PRICES[symbol] = max(PEAK_PRICES[symbol], mark)
+                else:
+                    PEAK_PRICES[symbol] = min(PEAK_PRICES[symbol], mark)
+            if symbol not in ADVERSE_PRICES:
+                ADVERSE_PRICES[symbol] = mark
+            else:
+                if side == 'long':
+                    ADVERSE_PRICES[symbol] = min(ADVERSE_PRICES[symbol], mark)
+                else:
+                    ADVERSE_PRICES[symbol] = max(ADVERSE_PRICES[symbol], mark)
+
+            # --- Trailing stop simple ---
+            if ALERTS_HISTORY.get(f"{symbol}_tp1_sold", False) and profit_pct > 0:
+                dist = LOBO_TRAIL_ATR_MULT * entry.get('atr_val', 0) * 1.5
+                if dist > 0:
+                    nuevo_sl = (PEAK_PRICES[symbol] - dist) if side == 'long' else (PEAK_PRICES[symbol] + dist)
+                    ultimo_sl = ALERTS_HISTORY.get(f"{symbol}_trail", 0 if side == 'long' else 999999)
+                    mejora = (nuevo_sl - ultimo_sl) if side == 'long' else (ultimo_sl - nuevo_sl)
+                    if mejora > (entry_price * 0.002):
+                        TRADE_ENTRIES[symbol]['sl_price'] = nuevo_sl
+                        ALERTS_HISTORY[f"{symbol}_trail"] = nuevo_sl
+                        TRAIL_COUNTS[symbol] = TRAIL_COUNTS.get(symbol, 0) + 1
+                        log.info("[REAL] %s Trail→%.4f", symbol, nuevo_sl)
+
+        except Exception as e:
+            log.error("[REAL] Error gestionando %s: %s", symbol, e)
 
 # =====================================================================
 # 12. BUCLE PRINCIPAL v3
@@ -1898,7 +2069,7 @@ def main():
                     balance_total = 0.0
 
             capital_fut = capital_disponible_futuros(balance_total)
-            log.info("Balance total=%.2f | Futuros(20%%)=%.2f | Liquidez(50%%)=%.2f | Spot(30%%)=%.2f",
+            log.info("Balance total=%.2f | Futuros(80%%)=%.2f | Liquidez(15%%)=%.2f | Spot(5%%)=%.2f",
                      balance_total, capital_fut,
                      capital_liquidez(balance_total), capital_spot(balance_total))
 
