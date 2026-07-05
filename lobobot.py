@@ -1624,6 +1624,22 @@ def init_exchange() -> bool:
 # =====================================================================
 # 11. GESTIÓN DE POSICIONES v3 (con SL por liquidación, BE, trailing, coberturas)
 # =====================================================================
+def _full_cleanup(symbol: str, cooldown: int = 3600):
+    """Limpia todos los rastros de una posición cerrada.
+    
+    Args:
+        symbol: símbolo a limpiar
+        cooldown: segundos de cooldown antes de re-entrar (default 1h, D1 usa 7200)
+    """
+    TRADE_ENTRIES.pop(symbol, None)
+    HEDGE_ENTRIES.pop(symbol, None)
+    _save_trade_entries()
+    SESSION_ACTIVE_SYMBOLS.discard(symbol)
+    COOLDOWNS[symbol] = time.time() + cooldown
+    PEAK_PRICES.pop(symbol, None)
+    ALERTS_HISTORY.pop(symbol, None)
+    TRAIL_COUNTS.pop(symbol, None)
+
 def _manage_paper_positions_v3(balance_total: float):
     """Gestiona posiciones simuladas en paper mode con TODAS las reglas v3."""
     global ALERTS_HISTORY, PEAK_PRICES, COOLDOWNS, DAILY_STATS
@@ -1661,14 +1677,14 @@ def _manage_paper_positions_v3(balance_total: float):
                     df_d1 = pd.DataFrame(ohlcv_d1, columns=['ts','o','h','l','c','v'])
                     if not validar_estructura_d1(df_d1, entry_price, side):
                         log.info("[PAPER v3] %s: D1 invalida estructura - cerrando", symbol)
-                        size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
-                        pnl = size * entry.get('leverage', LEVERAGE) * profit_pct
+                        remaining_qty = entry.get('remaining_qty', entry['quantity'])
+                        pnl = 0.0
+                        if side == 'long':
+                            pnl = (mark - entry_price) * remaining_qty
+                        else:
+                            pnl = (entry_price - mark) * remaining_qty
                         guardar_trade_csv(entry, mark, pnl, 0, pnl, 'D1_INVALID', 'd1_estructura')
-                        TRADE_ENTRIES.pop(symbol, None)
-                        HEDGE_ENTRIES.pop(symbol, None)
-                        _save_trade_entries()
-                        SESSION_ACTIVE_SYMBOLS.discard(symbol)
-                        COOLDOWNS[symbol] = time.time() + 7200
+                        _full_cleanup(symbol, cooldown=7200)
                         send_telegram(f"[PAPER v3] *{symbol}* Cerrada por D1 estructura")
                         continue
             except Exception:
@@ -1707,89 +1723,91 @@ def _manage_paper_positions_v3(balance_total: float):
                 elif hedge_side == 'long' and mark <= hedge_sl:
                     HEDGE_ENTRIES.pop(symbol, None)
 
-            # --- Salidas: SL → LIQ → TP3 → TP2 → TP1 ---
-            exit_px = None
-            status = None
-            reason = None
+            # --- TP PARCIAL + BE: SL → LIQ → TP3 → TP2(30%) → TP1(40%+BE) ---
+            long_side = side == 'long'
+            short_side = side == 'short'
+            original_qty = entry.get('original_qty', entry['quantity'])
+            remaining_qty = entry.get('remaining_qty', entry['quantity'])
+            tp1_taken = ALERTS_HISTORY.get(f"{symbol}_tp1_sold", False)
+            tp2_taken = ALERTS_HISTORY.get(f"{symbol}_tp2_sold", False)
 
-            if side == 'long':
-                # SL: prioridad sobre liquidación
-                if sl_price > 0 and mark <= sl_price:
-                    exit_px = mark
-                    status = 'SL'
-                    reason = 'sl'
-                elif liq_price > 0 and mark <= liq_price:
-                    exit_px = mark
-                    status = 'LIQ'
-                    reason = 'liquidacion'
-                elif tp3_price > 0 and mark >= tp3_price:
-                    exit_px = tp3_price
-                    status = 'TP'
-                    reason = 'tp'
-                elif tp2_price > 0 and mark >= tp2_price:
-                    exit_px = tp2_price
-                    status = 'TP'
-                    reason = 'tp'
-                elif tp1_price > 0 and mark >= tp1_price:
-                    exit_px = tp1_price
-                    status = 'TP'
-                    reason = 'tp'
-            else:  # short
-                if sl_price > 0 and mark >= sl_price:
-                    exit_px = mark
-                    status = 'SL'
-                    reason = 'sl'
-                elif liq_price > 0 and mark >= liq_price:
-                    exit_px = mark
-                    status = 'LIQ'
-                    reason = 'liquidacion'
-                elif tp3_price > 0 and mark <= tp3_price:
-                    exit_px = tp3_price
-                    status = 'TP'
-                    reason = 'tp'
-                elif tp2_price > 0 and mark <= tp2_price:
-                    exit_px = tp2_price
-                    status = 'TP'
-                    reason = 'tp'
-                elif tp1_price > 0 and mark <= tp1_price:
-                    exit_px = tp1_price
-                    status = 'TP'
-                    reason = 'tp'
+            sl_hit = (long_side and mark <= sl_price) or (short_side and mark >= sl_price)
+            liq_hit = (long_side and mark <= liq_price) or (short_side and mark >= liq_price)
+            tp3_hit = (long_side and mark >= tp3_price) or (short_side and mark <= tp3_price)
+            tp2_hit = (long_side and mark >= tp2_price) or (short_side and mark <= tp2_price)
+            tp1_hit = (long_side and mark >= tp1_price) or (short_side and mark <= tp1_price)
 
-            if exit_px is not None:
-                size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
-                lev = float(entry.get('leverage', LEVERAGE))
-                pnl_pct = (exit_px - entry_price) / entry_price if side == 'long' else (entry_price - exit_px) / entry_price
-                pnl = size * lev * pnl_pct
-                log.info("[PAPER v3] %s %s | Entry=%.4f Exit=%.4f PnL=%.2f (lev=%.0f)",
-                         symbol, status, entry_price, exit_px, pnl, lev)
-                guardar_trade_csv(entry, exit_px, pnl, 0, pnl, status, reason)
-                TRADE_ENTRIES.pop(symbol, None)
-                HEDGE_ENTRIES.pop(symbol, None)
-                _save_trade_entries()
-                SESSION_ACTIVE_SYMBOLS.discard(symbol)
-                COOLDOWNS[symbol] = time.time() + 3600
-                PEAK_PRICES.pop(symbol, None)
-                ALERTS_HISTORY.pop(symbol, None)
-                TRAIL_COUNTS.pop(symbol, None)
-                send_telegram(f"[PAPER v3] *{symbol} {status}*\nPnL: {pnl:.2f} USDT ({pnl_pct*100:.2f}%)")
+            lev = float(entry.get('leverage', LEVERAGE))
+
+            def _pnl_parcial(qty_sold: float, exit_px: float) -> float:
+                """Calcula PnL para una venta parcial."""
+                if side == 'long':
+                    return (exit_px - entry_price) * qty_sold
+                else:
+                    return (entry_price - exit_px) * qty_sold
+
+            # ── SL / LIQ: cierre completo de lo que quede ──
+            if sl_hit or liq_hit:
+                if remaining_qty > 0:
+                    pnl = _pnl_parcial(remaining_qty, mark)
+                    status = 'SL' if sl_hit else 'LIQ'
+                    reason = 'sl' if sl_hit else 'liquidacion'
+                    log.info("[PAPER v3] %s %s | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
+                             symbol, status, entry_price, mark, remaining_qty, pnl)
+                    guardar_trade_csv(entry, mark, pnl, 0, pnl, status, reason)
+                    send_telegram(f"[PAPER v3] *{symbol} {status}*\nPnL: {pnl:.2f} USDT ({pnl/(entry.get('size_usdt',1)*lev)*100:.2f}%)")
+                _full_cleanup(symbol)
                 continue
 
-            # --- Timeout ---
+            # ── TP3: cierre completo del remanente ──
+            if tp3_hit:
+                if remaining_qty > 0:
+                    pnl = _pnl_parcial(remaining_qty, tp3_price)
+                    log.info("[PAPER v3] %s TP3 | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
+                             symbol, entry_price, tp3_price, remaining_qty, pnl)
+                    guardar_trade_csv(entry, tp3_price, pnl, 0, pnl, 'TP3', 'tp3')
+                    send_telegram(f"[PAPER v3] *{symbol} TP3 COMPLETO*\nPnL: {pnl:.2f} USDT")
+                _full_cleanup(symbol)
+                continue
+
+            # ── TP2: parcial 30% (solo si TP1 ya se ejecutó) ──
+            if tp2_hit and tp1_taken and not tp2_taken and remaining_qty > 0:
+                tp2_qty = min(original_qty * LOBO_TP2_SIZE, remaining_qty)
+                pnl = _pnl_parcial(tp2_qty, tp2_price)
+                entry['remaining_qty'] = remaining_qty - tp2_qty
+                ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
+                log.info("[PAPER v3] %s TP2 PARCIAL(30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                         symbol, entry_price, tp2_price, tp2_qty, pnl, entry['remaining_qty'])
+                guardar_trade_csv(entry, tp2_price, pnl, 0, pnl, 'TP2_PARTIAL', 'tp2')
+                send_telegram(f"[PAPER v3] *{symbol} TP2 (30%)* PnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
+                _save_trade_entries()
+
+            # ── TP1: parcial 40% + BE (solo si no se ejecutó antes) ──
+            if tp1_hit and not tp1_taken and remaining_qty > 0:
+                tp1_qty = min(original_qty * LOBO_TP1_SIZE, entry.get('remaining_qty', remaining_qty))
+                pnl = _pnl_parcial(tp1_qty, tp1_price)
+                entry['remaining_qty'] = entry.get('remaining_qty', remaining_qty) - tp1_qty
+                ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
+                ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
+                entry['sl_price'] = entry_price  # Break Even
+                log.info("[PAPER v3] %s TP1 PARCIAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                         symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
+                guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
+                send_telegram(f"[PAPER v3] *{symbol} TP1 (40%) + BE* PnL: {pnl:.2f} USDT | SL→Entry")
+                _save_trade_entries()
+
+            # --- Timeout (cierra remanente si perdiendo) ---
             entry_time = entry.get('entry_time')
             if isinstance(entry_time, datetime) and profit_pct < 0:
                 horas = (datetime.now() - entry_time).total_seconds() / 3600
                 if horas >= LOBO_TIMEOUT_HORAS:
-                    size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
-                    lev = float(entry.get('leverage', LEVERAGE))
-                    pnl = size * lev * profit_pct
-                    log.info("[PAPER v3] %s TIMEOUT +%.0fh", symbol, horas)
-                    guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
-                    TRADE_ENTRIES.pop(symbol, None)
-                    HEDGE_ENTRIES.pop(symbol, None)
-                    _save_trade_entries()
-                    SESSION_ACTIVE_SYMBOLS.discard(symbol)
-                    COOLDOWNS[symbol] = time.time() + 3600
+                    remaining_qty = entry.get('remaining_qty', entry['quantity'])
+                    if remaining_qty > 0:
+                        pnl = _pnl_parcial(remaining_qty, mark)
+                        log.info("[PAPER v3] %s TIMEOUT +%.0fh Qty=%.4f PnL=%.2f", symbol, horas, remaining_qty, pnl)
+                        guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
+                        send_telegram(f"[PAPER v3] *{symbol} TIMEOUT* PnL: {pnl:.2f} USDT")
+                    _full_cleanup(symbol)
                     continue
 
             # --- Seguimiento de pico ---
@@ -1869,13 +1887,11 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                     df_d1 = pd.DataFrame(ohlcv_d1, columns=['ts','o','h','l','c','v'])
                     if not validar_estructura_d1(df_d1, entry_price, side):
                         log.info("[REAL] %s: D1 invalida estructura - cerrando", symbol)
-                        size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
-                        pnl = size * entry.get('leverage', LEVERAGE) * profit_pct
-                        _cerrar_pos_real(symbol, side, entry['quantity'])
+                        remaining_qty = entry.get('remaining_qty', entry['quantity'])
+                        pnl = (mark - entry_price) * remaining_qty if side == 'long' else (entry_price - mark) * remaining_qty
+                        _cerrar_pos_real(symbol, side, remaining_qty)
                         guardar_trade_csv(entry, mark, pnl, 0, pnl, 'D1_INVALID', 'd1_estructura')
-                        TRADE_ENTRIES.pop(symbol, None); HEDGE_ENTRIES.pop(symbol, None)
-                        _save_trade_entries(); SESSION_ACTIVE_SYMBOLS.discard(symbol)
-                        COOLDOWNS[symbol] = time.time() + 7200
+                        _full_cleanup(symbol, cooldown=7200)
                         send_telegram(f"[REAL] *{symbol}* Cerrada por D1 estructura")
                         continue
             except Exception:
@@ -1923,63 +1939,93 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 elif hedge_side == 'long' and mark <= hedge_sl:
                     HEDGE_ENTRIES.pop(symbol, None)
 
-            # --- Salidas: SL → LIQ → TP3 → TP2 → TP1 ---
-            exit_px = None; status = None; reason = None
+            # --- TP PARCIAL + BE: SL → LIQ → TP3 → TP2(30%) → TP1(40%+BE) ---
+            long_side = side == 'long'
+            short_side = side == 'short'
+            original_qty = entry.get('original_qty', entry['quantity'])
+            remaining_qty = entry.get('remaining_qty', entry['quantity'])
+            tp1_taken = ALERTS_HISTORY.get(f"{symbol}_tp1_sold", False)
+            tp2_taken = ALERTS_HISTORY.get(f"{symbol}_tp2_sold", False)
 
-            if side == 'long':
-                if sl_price > 0 and mark <= sl_price:
-                    exit_px = mark; status = 'SL'; reason = 'sl'
-                elif liq_price > 0 and mark <= liq_price:
-                    exit_px = mark; status = 'LIQ'; reason = 'liquidacion'
-                elif tp3_price > 0 and mark >= tp3_price:
-                    exit_px = tp3_price; status = 'TP'; reason = 'tp'
-                elif tp2_price > 0 and mark >= tp2_price:
-                    exit_px = tp2_price; status = 'TP'; reason = 'tp'
-                elif tp1_price > 0 and mark >= tp1_price:
-                    exit_px = tp1_price; status = 'TP'; reason = 'tp'
-            else:
-                if sl_price > 0 and mark >= sl_price:
-                    exit_px = mark; status = 'SL'; reason = 'sl'
-                elif liq_price > 0 and mark >= liq_price:
-                    exit_px = mark; status = 'LIQ'; reason = 'liquidacion'
-                elif tp3_price > 0 and mark <= tp3_price:
-                    exit_px = tp3_price; status = 'TP'; reason = 'tp'
-                elif tp2_price > 0 and mark <= tp2_price:
-                    exit_px = tp2_price; status = 'TP'; reason = 'tp'
-                elif tp1_price > 0 and mark <= tp1_price:
-                    exit_px = tp1_price; status = 'TP'; reason = 'tp'
+            sl_hit = (long_side and mark <= sl_price) or (short_side and mark >= sl_price)
+            liq_hit = (long_side and mark <= liq_price) or (short_side and mark >= liq_price)
+            tp3_hit = (long_side and mark >= tp3_price) or (short_side and mark <= tp3_price)
+            tp2_hit = (long_side and mark >= tp2_price) or (short_side and mark <= tp2_price)
+            tp1_hit = (long_side and mark >= tp1_price) or (short_side and mark <= tp1_price)
 
-            if exit_px is not None:
-                size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
-                lev = float(entry.get('leverage', LEVERAGE))
-                pnl_pct = (exit_px - entry_price) / entry_price if side == 'long' else (entry_price - exit_px) / entry_price
-                pnl = size * lev * pnl_pct
-                log.info("[REAL] %s %s | Entry=%.4f Exit=%.4f PnL=%.2f (lev=%.0f)",
-                         symbol, status, entry_price, exit_px, pnl, lev)
-                _cerrar_pos_real(symbol, side, entry['quantity'])
-                guardar_trade_csv(entry, exit_px, pnl, 0, pnl, status, reason)
-                TRADE_ENTRIES.pop(symbol, None); HEDGE_ENTRIES.pop(symbol, None)
-                _save_trade_entries(); SESSION_ACTIVE_SYMBOLS.discard(symbol)
-                COOLDOWNS[symbol] = time.time() + 3600
-                PEAK_PRICES.pop(symbol, None); ALERTS_HISTORY.pop(symbol, None)
-                TRAIL_COUNTS.pop(symbol, None)
-                send_telegram(f"[REAL] *{symbol} {status}*\nPnL: {pnl:.2f} USDT ({pnl_pct*100:.2f}%)")
+            def _pnl_parcial(qty_sold: float, exit_px: float) -> float:
+                if side == 'long':
+                    return (exit_px - entry_price) * qty_sold
+                else:
+                    return (entry_price - exit_px) * qty_sold
+
+            # ── SL / LIQ: cierre completo de lo que quede ──
+            if sl_hit or liq_hit:
+                if remaining_qty > 0:
+                    pnl = _pnl_parcial(remaining_qty, mark)
+                    status = 'SL' if sl_hit else 'LIQ'
+                    reason = 'sl' if sl_hit else 'liquidacion'
+                    log.info("[REAL] %s %s | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
+                             symbol, status, entry_price, mark, remaining_qty, pnl)
+                    _cerrar_pos_real(symbol, side, remaining_qty)
+                    guardar_trade_csv(entry, mark, pnl, 0, pnl, status, reason)
+                    send_telegram(f"[REAL] *{symbol} {status}*\nPnL: {pnl:.2f} USDT")
+                _full_cleanup(symbol)
                 continue
 
-            # --- Timeout ---
+            # ── TP3: cierre completo del remanente ──
+            if tp3_hit:
+                if remaining_qty > 0:
+                    pnl = _pnl_parcial(remaining_qty, tp3_price)
+                    log.info("[REAL] %s TP3 | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
+                             symbol, entry_price, tp3_price, remaining_qty, pnl)
+                    _cerrar_pos_real(symbol, side, remaining_qty)
+                    guardar_trade_csv(entry, tp3_price, pnl, 0, pnl, 'TP3', 'tp3')
+                    send_telegram(f"[REAL] *{symbol} TP3 COMPLETO*\nPnL: {pnl:.2f} USDT")
+                _full_cleanup(symbol)
+                continue
+
+            # ── TP2: parcial 30% (solo si TP1 ya se ejecutó) ──
+            if tp2_hit and tp1_taken and not tp2_taken and remaining_qty > 0:
+                tp2_qty = min(original_qty * LOBO_TP2_SIZE, remaining_qty)
+                pnl = _pnl_parcial(tp2_qty, tp2_price)
+                entry['remaining_qty'] = remaining_qty - tp2_qty
+                ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
+                log.info("[REAL] %s TP2 PARCIAL(30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                         symbol, entry_price, tp2_price, tp2_qty, pnl, entry['remaining_qty'])
+                _cerrar_pos_real(symbol, side, tp2_qty)
+                guardar_trade_csv(entry, tp2_price, pnl, 0, pnl, 'TP2_PARTIAL', 'tp2')
+                send_telegram(f"[REAL] *{symbol} TP2 (30%)* PnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
+                _save_trade_entries()
+
+            # ── TP1: parcial 40% + BE (solo si no se ejecutó antes) ──
+            if tp1_hit and not tp1_taken and remaining_qty > 0:
+                tp1_qty = min(original_qty * LOBO_TP1_SIZE, entry.get('remaining_qty', remaining_qty))
+                pnl = _pnl_parcial(tp1_qty, tp1_price)
+                entry['remaining_qty'] = entry.get('remaining_qty', remaining_qty) - tp1_qty
+                ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
+                ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
+                entry['sl_price'] = entry_price  # Break Even
+                log.info("[REAL] %s TP1 PARCIAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                         symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
+                _cerrar_pos_real(symbol, side, tp1_qty)
+                guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
+                send_telegram(f"[REAL] *{symbol} TP1 (40%) + BE* PnL: {pnl:.2f} USDT | SL→Entry")
+                _save_trade_entries()
+
+            # --- Timeout (cierra remanente si perdiendo) ---
             entry_time = entry.get('entry_time')
             if isinstance(entry_time, datetime) and profit_pct < 0:
                 horas = (datetime.now() - entry_time).total_seconds() / 3600
                 if horas >= LOBO_TIMEOUT_HORAS:
-                    size = float(entry.get('size_usdt', capital_fut * LOBO_RISK_PCT))
-                    lev = float(entry.get('leverage', LEVERAGE))
-                    pnl = size * lev * profit_pct
-                    log.info("[REAL] %s TIMEOUT +%.0fh", symbol, horas)
-                    _cerrar_pos_real(symbol, side, entry['quantity'])
-                    guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
-                    TRADE_ENTRIES.pop(symbol, None); HEDGE_ENTRIES.pop(symbol, None)
-                    _save_trade_entries(); SESSION_ACTIVE_SYMBOLS.discard(symbol)
-                    COOLDOWNS[symbol] = time.time() + 3600
+                    remaining_qty = entry.get('remaining_qty', entry['quantity'])
+                    if remaining_qty > 0:
+                        pnl = _pnl_parcial(remaining_qty, mark)
+                        log.info("[REAL] %s TIMEOUT +%.0fh Qty=%.4f PnL=%.2f", symbol, horas, remaining_qty, pnl)
+                        _cerrar_pos_real(symbol, side, remaining_qty)
+                        guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
+                        send_telegram(f"[REAL] *{symbol} TIMEOUT* PnL: {pnl:.2f} USDT")
+                    _full_cleanup(symbol)
                     continue
 
             # --- Seguimiento de pico ---
@@ -2225,6 +2271,8 @@ def main():
                         'tp2_price': tp2_price,
                         'tp3_price': tp3_price,
                         'quantity': qty,
+                        'original_qty': qty,
+                        'remaining_qty': qty,
                         'balance_before': balance_total,
                         'capital_futuros': capital_fut,
                         'atr_val': senal.get('atr_val', 0),
