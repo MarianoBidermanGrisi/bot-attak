@@ -942,10 +942,13 @@ def validar_estructura_d1(df_d1: pd.DataFrame, entry_price: float, side: str) ->
     """
     if len(df_d1) < 10:
         return True
-    lows = df_d1['low'].values
-    highs = df_d1['high'].values
+    # Mapear nombres de columnas (CCXT devuelve ['ts','o','h','l','c','v'])
+    col_low = 'low' if 'low' in df_d1.columns else 'l'
+    col_high = 'high' if 'high' in df_d1.columns else 'h'
+    col_close = 'close' if 'close' in df_d1.columns else 'c'
+    lows = df_d1[col_low].values
+    highs = df_d1[col_high].values
     n = len(lows)
-    # Encontrar swing lows (left=3, right=3)
     swing_lows = []
     swing_highs = []
     for i in range(3, n - 3):
@@ -953,7 +956,7 @@ def validar_estructura_d1(df_d1: pd.DataFrame, entry_price: float, side: str) ->
             swing_lows.append((i, lows[i]))
         if highs[i] == max(highs[i-3:i+4]):
             swing_highs.append((i, highs[i]))
-    ult_cierre = float(df_d1['close'].iloc[-1])
+    ult_cierre = float(df_d1[col_close].iloc[-1])
     if side == 'long':
         if swing_lows:
             ult_soporte = swing_lows[-1][1]
@@ -1637,7 +1640,10 @@ def _full_cleanup(symbol: str, cooldown: int = 3600):
     SESSION_ACTIVE_SYMBOLS.discard(symbol)
     COOLDOWNS[symbol] = time.time() + cooldown
     PEAK_PRICES.pop(symbol, None)
-    ALERTS_HISTORY.pop(symbol, None)
+    # Limpiar TODAS las claves de ALERTS_HISTORY que contengan el símbolo
+    keys_to_remove = [k for k in ALERTS_HISTORY if symbol in k]
+    for k in keys_to_remove:
+        ALERTS_HISTORY.pop(k, None)
     TRAIL_COUNTS.pop(symbol, None)
 
 def _manage_paper_positions_v3(balance_total: float):
