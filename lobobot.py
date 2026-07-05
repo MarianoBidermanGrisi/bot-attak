@@ -79,6 +79,8 @@ SPOT_POSITIONS: dict = {}      # F1: posiciones spot abiertas
 # Cache para F2: dominancias (evita llamadas API repetitivas)
 DOMINANCE_CACHE: dict = {'btc': None, 'usdtd': None, 'ts': 0}
 DOMINANCE_CACHE_TTL = 300  # 5 minutos
+# Historial de USDT.D proxy para detección de FVG
+USDTD_HISTORY: list = []  # [(timestamp, proxy_value), ...]
 
 # =====================================================================
 # 3. RUTAS DE ARCHIVOS
@@ -129,9 +131,9 @@ TIMEFRAME_D1      = os.environ.get('LOBO_TIMEFRAME_D1',     '1d')
 TIMEFRAME_1H      = os.environ.get('LOBO_TIMEFRAME_1H',     '1h')
 
 # === F1: Gestión de Capital en 3 Vectores ===
-LOBO_LIQUIDEZ_PCT    = float(os.environ.get('LOBO_LIQUIDEZ_PCT', '50')) / 100
-LOBO_SPOT_PCT        = float(os.environ.get('LOBO_SPOT_PCT', '30')) / 100
-LOBO_FUTUROS_PCT     = float(os.environ.get('LOBO_FUTUROS_PCT', '20')) / 100
+LOBO_LIQUIDEZ_PCT    = float(os.environ.get('LOBO_LIQUIDEZ_PCT', '15')) / 100
+LOBO_SPOT_PCT        = float(os.environ.get('LOBO_SPOT_PCT', '5')) / 100
+LOBO_FUTUROS_PCT     = float(os.environ.get('LOBO_FUTUROS_PCT', '80')) / 100
 # Martingala del 33% para spot: niveles de retroceso
 LOBO_SPOT_MARTINGALA_NIVELES = [
     float(os.environ.get('LOBO_SPOT_MART_1', '0.10')),  # -10%
@@ -393,18 +395,53 @@ def check_dominancia_btc_long() -> bool:
 def check_usdtd_resistencia_long() -> bool:
     """
     F2-R4: USDT.D en resistencia → favorable para Longs.
+    CORREGIDO: Detecta FVG (Fair Value Gap) en el proxy de USDT.D.
+    Si el valor actual está en un FVG alcista no rellenado → resistencia activa.
     Cacheado 5 min. Usa proxy calculado de Bitget.
     """
-    global DOMINANCE_CACHE
+    global DOMINANCE_CACHE, USDTD_HISTORY
     now = time.time()
     if now - DOMINANCE_CACHE['ts'] < DOMINANCE_CACHE_TTL and DOMINANCE_CACHE['usdtd'] is not None:
         return DOMINANCE_CACHE['usdtd']
 
     result = True
+    proxy = None
     try:
         proxy = calcular_proxy_usdtd()
         if proxy is not None:
-            result = proxy > 65.0
+            # Almacenar en historial para detección de FVG
+            USDTD_HISTORY.append((now, proxy))
+            if len(USDTD_HISTORY) > 80:
+                USDTD_HISTORY = USDTD_HISTORY[-80:]
+
+            # Detectar FVG alcista (resistencia) en los valores proxy
+            if len(USDTD_HISTORY) >= 15:
+                vals = [v for _, v in USDTD_HISTORY]
+                for i in range(2, len(vals) - 2):
+                    # Gap alcista en USDT.D → precio saltó arriba = resistencia
+                    gap_up = vals[i] - vals[i-2]
+                    if gap_up > 0.5:  # gap mínimo 0.5% de dominancia
+                        gap_alto = max(vals[i-2], vals[i])
+                        gap_bajo = min(vals[i-2], vals[i])
+                        # Verificar que NO se haya rellenado después
+                        rellenado = any(gap_bajo <= vals[j] <= gap_alto for j in range(i+1, len(vals)))
+                        if not rellenado:
+                            # FVG alcista vigente = USDT.D en resistencia
+                            if proxy >= gap_bajo * 0.99:
+                                log.debug("USDT.D FVG resistencia: proxy=%.2f en gap [%.2f, %.2f]",
+                                          proxy, gap_bajo, gap_alto)
+                                DOMINANCE_CACHE['usdtd'] = True
+                                DOMINANCE_CACHE['ts'] = now
+                                return True
+
+            # Fallback: percentil 85 de los últimos 30 valores
+            vals = [v for _, v in USDTD_HISTORY[-30:]]
+            if len(vals) >= 10:
+                p85 = sorted(vals)[int(len(vals) * 0.85)]
+                result = proxy >= p85 * 0.98
+                log.debug("USDT.D proxy=%.2f p85=%.2f resistencia=%s", proxy, p85, result)
+            else:
+                result = proxy > 62.0
     except Exception:
         pass
     DOMINANCE_CACHE['usdtd'] = result
@@ -971,13 +1008,15 @@ def evaluar_cobertura(pos_entry: dict, precio_actual: float) -> Optional[dict]:
         return None  # Aún no se activa
     # Calcular cobertura
     hedge_side = 'short' if side == 'long' else 'long'
-    hedge_lev = min(pos_entry.get('leverage', LEVERAGE) * LOBO_HEDGE_LEV_MULT, 125)
+    # CORREGIDO: Hedge leverage 5-10x (dinámico según el activo)
+    main_lev = pos_entry.get('leverage', LEVERAGE)
+    hedge_lev = min(max(main_lev / 2, 5.0), 10.0)
     # TP de la cobertura = precio de liquidación de la principal
-    liq_price = calcular_precio_liquidacion(entry_price, pos_entry.get('leverage', LEVERAGE), side)
+    liq_price = calcular_precio_liquidacion(entry_price, main_lev, side)
     # SL de la cobertura = entry price (para que no interfiera con la posición principal)
     hedge_sl = entry_price
-    # Tamaño de la cobertura: 30% del tamaño de la principal pero con más apalancamiento
-    hedge_size = pos_entry.get('size_usdt', 0) * 0.3
+    # CORREGIDO: Tamaño de cobertura = 100% del margen de la principal
+    hedge_size = pos_entry.get('size_usdt', 0) * 1.0
     return {
         'side': hedge_side,
         'leverage': hedge_lev,
@@ -1076,6 +1115,83 @@ def es_nueva_vela_h4(df_h4: pd.DataFrame) -> bool:
     diff_ms = ahora - ultimo_ts
     # 4h = 14,400,000 ms. Una vela "recién cerrada" tiene diff < 4h + 5min
     return diff_ms < 14_700_000  # 4h + 5min
+
+# =====================================================================
+# F3: Apalancamiento dinámico (liq price calza con la mecha)
+# =====================================================================
+HIGH_LIQUIDITY_ALTS = {'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'LINK', 'DOT', 'MATIC', 'TRX', 'SHIB', 'UNI', 'ATOM', 'LTC'}
+
+def calcular_apalancamiento_optimo(
+    entry_price: float, df_h4: pd.DataFrame,
+    zona_inf: float, zona_sup: float,
+    es_long: bool, sweeps: list, symbol: str,
+) -> tuple[float, float]:
+    """
+    F3 CORREGIDO: Apalancamiento dinámico.
+    Calcula el apalancamiento para que el precio de liquidación forzosa
+    calce JUSTO DEBAJO (long) / ENCIMA (short) de la mecha de absorción.
+    
+    - BTC: max 50X
+    - Altcoins alta liquidez (HIGH_LIQUIDITY_ALTS): max 20X
+    - Otros: max 10X
+    
+    Retorna (apalancamiento, liq_price).
+    """
+    # Determinar máximo apalancamiento según el activo
+    base = symbol.split('/')[0].replace(':USDT', '').strip()
+    if base == 'BTC':
+        max_lev = 50.0
+        log.debug("Apalancamiento: BTC -> max %.0fX", max_lev)
+    elif base in HIGH_LIQUIDITY_ALTS:
+        max_lev = 20.0
+        log.debug("Apalancamiento: %s (alt alta liquidez) -> max %.0fX", base, max_lev)
+    else:
+        max_lev = 10.0
+        log.debug("Apalancamiento: %s (otro) -> max %.0fX", base, max_lev)
+
+    # Encontrar el nivel extremo de la mecha (últimas 5 velas)
+    n_ultimas = min(8, len(df_h4))
+    ultimas = df_h4.iloc[-n_ultimas:]
+
+    if es_long:
+        # Low más bajo de velas recientes (wick de absorción/sweep)
+        nivel_extremo = float(ultimas['low'].min())
+        # También revisar sweeps por si hay un nivel más bajo
+        for s in sweeps:
+            if s['tipo'] == 'sweep_bajista_long':
+                nivel_extremo = min(nivel_extremo, s.get('nivel_roto', nivel_extremo))
+        # Asegurar que está por debajo del entry
+        if nivel_extremo >= entry_price:
+            nivel_extremo = entry_price * 0.97
+        # Target: 0.3% por debajo del extremo (colchón mínimo)
+        target_liq = nivel_extremo * 0.997
+        # Calcular apalancamiento: lev = 1 / (1 - liq/entry)
+        ratio = target_liq / entry_price
+        if ratio >= 1.0:
+            lev_needed = max_lev
+        else:
+            lev_needed = 1.0 / (1.0 - ratio)
+    else:
+        # High más alto de velas recientes
+        nivel_extremo = float(ultimas['high'].max())
+        for s in sweeps:
+            if s['tipo'] == 'sweep_alcista_short':
+                nivel_extremo = max(nivel_extremo, s.get('nivel_roto', nivel_extremo))
+        if nivel_extremo <= entry_price:
+            nivel_extremo = entry_price * 1.03
+        target_liq = nivel_extremo * 1.003
+        ratio = target_liq / entry_price
+        lev_needed = 1.0 / (ratio - 1.0)
+
+    # Limitar al máximo permitido y mínimo 2X
+    lev = min(max_lev, max(2.0, lev_needed))
+    liq_price = calcular_precio_liquidacion(entry_price, lev, 'long' if es_long else 'short')
+
+    log.debug("Apalancamiento óptimo: entry=%.4f extremo=%.4f target_liq=%.4f lev_needed=%.1f lev_final=%.1f",
+              entry_price, nivel_extremo, target_liq, lev_needed, lev)
+
+    return round(lev, 1), round(liq_price, 4)
+
 
 # =====================================================================
 # 6. EVALUACIÓN COMPLETA DE SEÑAL (v3 con todas las correcciones)
@@ -1256,17 +1372,12 @@ def evaluar_senal_bitlobo_v3(
     senal['tp3_price'] = tp3_price
     senal['rr'] = rr
 
-    # R:R mínimo: TP debe estar al menos tan lejos como el SL
-    if rr < 1.0:
-        log.debug("%s: R:R %.2f < 1.0, TP mas cerca que SL, abortando", symbol, rr)
+    # R:R mínimo 1.5 OBLIGATORIO (CORREGIDO — ya no es bonus)
+    if rr < 1.5:
+        log.debug("%s: R:R %.2f < 1.5, abortando (minimo obligatorio)", symbol, rr)
         return None
-    # R:R >= 1.5 suma punto extra
-    if rr >= 1.5:
-        score += 1
-        detalles.append(f'R13:R:R_{rr:.2f}')
-    else:
-        log.debug("%s: R:R %.2f entre 1.0 y 1.5", symbol, rr)
-        detalles.append(f'R13:R:R_{rr:.2f}')
+    score += 1
+    detalles.append(f'R13:R:R_{rr:.2f}')
 
     # --- SL: 1.5 ATR (original lobobot.py) ---
     sl_mult = LOBO_SL_ATR
@@ -1290,9 +1401,11 @@ def evaluar_senal_bitlobo_v3(
     
     qty = pos_value / precio_actual
     
-    # Apalancamiento fijo 10x (como solicitó usuario)
-    apalancamiento = 10.0
-    liq_price = calcular_precio_liquidacion(precio_actual, apalancamiento, 'long' if es_long else 'short')
+    # F3-CORREGIDO: Apalancamiento dinámico (liq price calza con la mecha)
+    apalancamiento, liq_price = calcular_apalancamiento_optimo(
+        precio_actual, df_h4, zona_inf, zona_sup,
+        es_long, sweeps, symbol,
+    )
     
     # Margen real = valor posición / apalancamiento
     margin_real = pos_value / apalancamiento if apalancamiento > 0 else 0
@@ -1868,8 +1981,21 @@ def main():
 
                     sweeps = detectar_sweep(df_4h)
                     hay_sweep_short = any(s['tipo'] == 'sweep_alcista_short' for s in sweeps)
+
+                    # CORREGIDO: Relajar Short — también con RSI>65 + FVG bajista
+                    fvgs = detectar_fvg(df_4h)
+                    hay_fvg_bajista = any(f['tipo'] == 'bajista' for f in fvgs)
+                    rsi_series = _rsi(df_4h['close'], LOBO_RSI_PERIOD)
+                    try:
+                        rsi_val_actual = float(rsi_series.iloc[-1])
+                    except (IndexError, ValueError):
+                        rsi_val_actual = 50.0
+                    hay_rsi_sobrecompra = not pd.isna(rsi_val_actual) and rsi_val_actual > LOBO_RSI_OVERBOUGHT
+
+                    condicion_short = hay_sweep_short or (hay_rsi_sobrecompra and hay_fvg_bajista)
+
                     senal_short = None
-                    if hay_sweep_short:
+                    if condicion_short:
                         senal_short = evaluar_senal_bitlobo_v3(
                             symbol, df_4h, df_d1, precio_actual, atr_val, balance_total, es_long=False
                         )
@@ -1953,7 +2079,7 @@ def main():
                                            tp1_price, tp2_price, tp3_price, rr, taken=True)
                         continue
 
-                    # ── Orden real en Bitget (con SL, como lobobot.py) ──
+                    # ── Orden real en Bitget (SIN SL visible — liquidación forzosa es el SL) ──
                     try:
                         exchange.set_leverage(int(lev_calc), symbol)
                     except Exception as e:
@@ -1964,7 +2090,8 @@ def main():
                         'marginMode': 'isolated',
                         'tradeSide': 'open',
                         'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, tp1_price)),
-                        'presetStopLossPrice': str(exchange.price_to_precision(symbol, sl_price)),
+                        # CORREGIDO: NO presetStopLossPrice — el SL es la liquidación forzosa
+                        # calculada por calcular_apalancamiento_optimo para calzar con la mecha
                     }
                     try:
                         exchange.create_order(symbol, 'market', 'buy' if es_long else 'sell', qty, params=params)
