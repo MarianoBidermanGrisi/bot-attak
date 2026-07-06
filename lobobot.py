@@ -174,11 +174,16 @@ LOBO_TP2_ATR_MULT        = float(os.environ.get('LOBO_TP2_ATR_MULT', '2.5'))
 LOBO_TP3_ATR_MULT        = float(os.environ.get('LOBO_TP3_ATR_MULT', '4.0'))
 LOBO_TRAIL_ATR_MULT      = float(os.environ.get('LOBO_TRAIL_ATR_MULT', '1.0'))
 
+# Fallback % sobre margen (cuando no hay FVG/OB)
+LOBO_TP_TARGET1_PCT      = float(os.environ.get('LOBO_TP_TARGET1_PCT', '0.50'))
+LOBO_TP_TARGET2_PCT      = float(os.environ.get('LOBO_TP_TARGET2_PCT', '0.75'))
+LOBO_TP_TARGET3_PCT      = float(os.environ.get('LOBO_TP_TARGET3_PCT', '1.00'))
+
 # F9: BE trigger ahora es "alcanzar TP1" (en vez de % fijo)
 # Se usa TP1 como trigger, no un porcentaje independiente
 
 # General
-LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '12'))
+LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
 LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '8'))
 MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
@@ -1033,16 +1038,31 @@ def evaluar_cobertura(pos_entry: dict, precio_actual: float) -> Optional[dict]:
 # F12: TPs en Zonas Reales
 # ================================================================
 def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
-                          ob_list: list, es_long: bool) -> tuple[float, float, float, float]:
+                          ob_list: list, es_long: bool,
+                          leverage: float = LEVERAGE) -> tuple[float, float, float, float]:
     """
-    F12: Calcula TP1, TP2, TP3 basados en zonas reales del mercado (original).
+    F12: Calcula TP1, TP2, TP3 basados en zonas reales del mercado.
     
     TP1: En el FVG más cercano (o primer OB si no hay FVG).
-    TP2: En el siguiente FVG/OB o 2.5 ATR si no hay.
-    TP3: En el siguiente nivel estructural o 4 ATR si no hay.
+    TP2: En el siguiente FVG/OB.
+    TP3: En el siguiente nivel estructural.
+    
+    Fallback (sin FVG/OB): % sobre margen usando LOBO_TP_TARGET{1,2,3}_PCT.
+    Cada TP se calcula como entry * (1 + target_pct / leverage) para long,
+    o entry * (1 - target_pct / leverage) para short.
     
     Retorna (tp1_price, tp2_price, tp3_price, rr_ratio).
     """
+    # Seguridad: leverage debe ser > 0
+    lev = leverage if leverage > 0 else LEVERAGE
+    
+    def fallback_tp(target_pct: float) -> float:
+        """Retorna precio TP para % sobre margen."""
+        if es_long:
+            return precio_actual * (1.0 + target_pct / lev)
+        else:
+            return precio_actual * (1.0 - target_pct / lev)
+    
     tp1, tp2, tp3 = 0, 0, 0
     
     if es_long:
@@ -1054,7 +1074,7 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
         elif obs_arriba:
             tp1 = min(o['low'] for o in obs_arriba)
         else:
-            tp1 = precio_actual + atr_val * 2.0
+            tp1 = fallback_tp(LOBO_TP_TARGET1_PCT)
         
         fvg_rest = [f for f in fvg_arriba if f['gap_inf'] > tp1 + atr_val * 0.5]
         ob_rest = [o for o in obs_arriba if o['low'] > tp1 + atr_val * 0.5]
@@ -1063,13 +1083,14 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
         elif ob_rest:
             tp2 = min(o['low'] for o in ob_rest)
         else:
-            tp2 = tp1 + atr_val * LOBO_TP2_ATR_MULT
+            tp2 = fallback_tp(LOBO_TP_TARGET2_PCT)
         
         tp3_candidates = [f for f in fvg_arriba if f['gap_inf'] > tp2]
         if tp3_candidates:
+            # Excluir el mismo FVG de TP1 si ya se uso
             tp3 = min(f['gap_inf'] for f in tp3_candidates)
         else:
-            tp3 = precio_actual + atr_val * LOBO_TP3_ATR_MULT
+            tp3 = fallback_tp(LOBO_TP_TARGET3_PCT)
     else:
         fvg_abajo = [f for f in fvg_list if f['tipo'] == 'bajista' and f['gap_sup'] < precio_actual]
         obs_abajo = [o for o in ob_list if o['tipo'] == 'bajista' and o['high'] < precio_actual]
@@ -1079,7 +1100,7 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
         elif obs_abajo:
             tp1 = max(o['high'] for o in obs_abajo)
         else:
-            tp1 = precio_actual - atr_val * 2.0
+            tp1 = fallback_tp(LOBO_TP_TARGET1_PCT)
         
         fvg_rest = [f for f in fvg_abajo if f['gap_sup'] < tp1 - atr_val * 0.5]
         ob_rest = [o for o in obs_abajo if o['high'] < tp1 - atr_val * 0.5]
@@ -1088,19 +1109,24 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
         elif ob_rest:
             tp2 = max(o['high'] for o in ob_rest)
         else:
-            tp2 = tp1 - atr_val * LOBO_TP2_ATR_MULT
+            tp2 = fallback_tp(LOBO_TP_TARGET2_PCT)
         
         tp3_candidates = [f for f in fvg_abajo if f['gap_sup'] < tp2]
         if tp3_candidates:
             tp3 = max(f['gap_sup'] for f in tp3_candidates)
         else:
-            tp3 = precio_actual - atr_val * LOBO_TP3_ATR_MULT
+            tp3 = fallback_tp(LOBO_TP_TARGET3_PCT)
     
-    # R:R basado en TP1 (riesgo = distancia SL 1.5 ATR, como lobobot.py)
+    # Garantizar orden: TP1 <= TP2 <= TP3 (long) o TP1 >= TP2 >= TP3 (short)
     if es_long:
-        riesgo = atr_val * 1.5
+        tp2 = max(tp1, tp2) if tp2 > 0 else tp1
+        tp3 = max(tp2, tp3) if tp3 > 0 else tp2
     else:
-        riesgo = atr_val * 1.5
+        tp2 = min(tp1, tp2) if tp2 > 0 else tp1
+        tp3 = min(tp2, tp3) if tp3 > 0 else tp2
+    
+    # R:R basado en TP1 (riesgo = distancia SL 1.5 ATR)
+    riesgo = atr_val * 1.5
     beneficio = abs(tp1 - precio_actual)
     rr = beneficio / riesgo if riesgo > 0 else 0
     
@@ -1366,9 +1392,16 @@ def evaluar_senal_bitlobo_v3(
         log.debug("%s: D1 invalida estructura", symbol)
         return None  # D1 invalida = no entrar
 
+    # --- F3: Apalancamiento dinámico (necesario antes de TPs para fallback % margen) ---
+    apalancamiento, liq_price = calcular_apalancamiento_optimo(
+        precio_actual, df_h4, zona_inf, zona_sup,
+        es_long, sweeps, symbol,
+    )
+
     # --- F12: TPs en zonas reales ---
     tp1_price, tp2_price, tp3_price, rr = calcular_tps_en_zonas(
-        precio_actual, atr_val, fvg_en_zona, ob_en_zona, es_long
+        precio_actual, atr_val, fvg_en_zona, ob_en_zona, es_long,
+        leverage=apalancamiento,
     )
     senal['tp1_price'] = tp1_price
     senal['tp2_price'] = tp2_price
@@ -1408,12 +1441,6 @@ def evaluar_senal_bitlobo_v3(
         pos_value = MIN_ORDER_USDT
     
     qty = pos_value / precio_actual
-    
-    # F3-CORREGIDO: Apalancamiento dinámico (liq price calza con la mecha)
-    apalancamiento, liq_price = calcular_apalancamiento_optimo(
-        precio_actual, df_h4, zona_inf, zona_sup,
-        es_long, sweeps, symbol,
-    )
     
     # Margen real = valor posición / apalancamiento
     margin_real = pos_value / apalancamiento if apalancamiento > 0 else 0
