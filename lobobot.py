@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-LOBOBOT v3 — BITLOBO TRADING (Alineación Completa con Estrategia Documentada)
+LOBOBOT v4 — BITLOBO TRADING (Alineación Completa con Estrategia Documentada)
 ================================================================================
 
 Correcciones respecto a v2:
-  F1 - Split de capital 50/30/20 (3 vectores de portafolio)
+  F1 - Split de capital 20/80/0 (liquidez/futuros/spot)
   F2 - Dominancias reales USDT.D / BTC.D (CoinGecko + proxy calculado)
   F3 - Stop Loss por liquidación forzosa (anti-cacería de stops)
   F4 - Coberturas asimétricas (hedging de emergencia hiper-apalancado)
   F5 - RSI filtro obligatorio + Volumen como validador
   F6 - Confirmación Pullback ("Rompe y Apoya")
   F7 - Timing de entrada al cierre de vela H4
-  F8 - Riesgo base 1.5-2% sobre el 20% de la cuenta de futuros
+  F8 - Riesgo base 1.5-2% sobre el 80% de la cuenta de futuros
   F9 - Break Even al alcanzar TP1 (no al 1.5%)
   F10- Invalidación D1 estructural (swing points)
   F11- Ondas Elliott con relaciones Fibonacci entre ondas
@@ -22,7 +22,7 @@ Uso:
     gunicorn lobobot_v3:app --workers 1 --threads 2   # Render
 
 Variables de entorno (nuevas respecto a v2):
-    LOBO_LIQUIDEZ_PCT=50    LOBO_SPOT_PCT=30    LOBO_FUTUROS_PCT=20
+    LOBO_LIQUIDEZ_PCT=20    LOBO_FUTUROS_PCT=80
     LOBO_SPOT_MARTINGALA_1=0.1  LOBO_SPOT_MARTINGALA_2=0.2  LOBO_SPOT_MARTINGALA_3=0.3
     LOBO_HEDGE_ENABLED=true     LOBO_HEDGE_LEV_MULT=3
 """
@@ -126,13 +126,13 @@ TELEGRAM_TOKEN  = os.environ.get('TELEGRAM_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 TOP_N             = int(os.environ.get('LOBO_TOP_N',          '100'))
-TIMEFRAME_4H      = os.environ.get('LOBO_TIMEFRAME_4H',     '4h')
-TIMEFRAME_D1      = os.environ.get('LOBO_TIMEFRAME_D1',     '1d')
-TIMEFRAME_1H      = os.environ.get('LOBO_TIMEFRAME_1H',     '1h')
+TIMEFRAME_1H      = os.environ.get('LOBO_TIMEFRAME_1H',     '1h')   # ← Principal (señal)
+TIMEFRAME_4H      = os.environ.get('LOBO_TIMEFRAME_4H',     '4h')   # ← Confirmación
+TIMEFRAME_15M     = os.environ.get('LOBO_TIMEFRAME_15M',    '15m')  # ← Microfractalidad
 
 # === F1: Gestión de Capital en 3 Vectores ===
-LOBO_LIQUIDEZ_PCT    = float(os.environ.get('LOBO_LIQUIDEZ_PCT', '15')) / 100
-LOBO_SPOT_PCT        = float(os.environ.get('LOBO_SPOT_PCT', '5')) / 100
+LOBO_LIQUIDEZ_PCT    = float(os.environ.get('LOBO_LIQUIDEZ_PCT', '20')) / 100
+# LOBO_SPOT_PCT eliminado en v4 (solo futuros en este scope)
 LOBO_FUTUROS_PCT     = float(os.environ.get('LOBO_FUTUROS_PCT', '80')) / 100
 # Martingala del 33% para spot: niveles de retroceso
 LOBO_SPOT_MARTINGALA_NIVELES = [
@@ -162,7 +162,7 @@ LOBO_ELLIOTT_LOOKBACK    = int(os.environ.get('LOBO_ELLIOTT_LOOKBACK', '60'))
 LOBO_ATR_PERIOD          = int(os.environ.get('LOBO_ATR_PERIOD', '14'))
 
 # === F8: Riesgo base 1.5-2% (sobre el 20% de futuros) ===
-LOBO_RISK_PCT            = float(os.environ.get('LOBO_RISK_PCT', '1.5')) / 100  # 1.5%
+LOBO_RISK_PCT            = float(os.environ.get('LOBO_RISK_PCT', '5')) / 100  # 5%
 LOBO_RISK_PCT_EXCEP      = float(os.environ.get('LOBO_RISK_PCT_EXCEP', '10')) / 100
 LOBO_MAX_POSITIONS       = int(os.environ.get('LOBO_MAX_POSITIONS', '5'))
 
@@ -175,8 +175,9 @@ LOBO_TP3_ATR_MULT        = float(os.environ.get('LOBO_TP3_ATR_MULT', '4.0'))
 LOBO_TRAIL_ATR_MULT      = float(os.environ.get('LOBO_TRAIL_ATR_MULT', '1.0'))
 
 # Fallback % sobre margen (cuando no hay FVG/OB)
-LOBO_TP_TARGET1_PCT      = float(os.environ.get('LOBO_TP_TARGET1_PCT', '0.50'))
-LOBO_TP_TARGET2_PCT      = float(os.environ.get('LOBO_TP_TARGET2_PCT', '0.75'))
+# TP1: 40% ganancia margen | TP2: 70% | TP3: 100%
+LOBO_TP_TARGET1_PCT      = float(os.environ.get('LOBO_TP_TARGET1_PCT', '0.40'))
+LOBO_TP_TARGET2_PCT      = float(os.environ.get('LOBO_TP_TARGET2_PCT', '0.70'))
 LOBO_TP_TARGET3_PCT      = float(os.environ.get('LOBO_TP_TARGET3_PCT', '1.00'))
 
 # F9: BE trigger ahora es "alcanzar TP1" (en vez de % fijo)
@@ -185,7 +186,7 @@ LOBO_TP_TARGET3_PCT      = float(os.environ.get('LOBO_TP_TARGET3_PCT', '1.00'))
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
-LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '8'))
+LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '14'))  # v5: subido de 12→14 (solo setups fuertes)
 MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 
@@ -200,6 +201,25 @@ LOBO_HEDGE_ENABLED       = os.environ.get('LOBO_HEDGE_ENABLED', 'true').lower() 
 LOBO_HEDGE_LEV_MULT      = float(os.environ.get('LOBO_HEDGE_LEV_MULT', '3.0'))
 LOBO_HEDGE_TRIGGER_PCT   = float(os.environ.get('LOBO_HEDGE_TRIGGER_PCT', '0.5'))
 
+# === v4: Cobertura asimétrica CORREGIDA (manual BITLOBO) ===
+LOBO_HEDGE_MARGIN_PCT    = float(os.environ.get('LOBO_HEDGE_MARGIN_PCT', '0.15'))  # 15% del margen principal
+
+# === v4: CHOCH (Change of Character) ===
+LOBO_CHOCH_LOOKBACK      = int(os.environ.get('LOBO_CHOCH_LOOKBACK', '30'))
+
+# === v4: Microfractalidad (ondas 1H) ===
+LOBO_MICRO_LOOKBACK_1H   = int(os.environ.get('LOBO_MICRO_LOOKBACK_1H', '72'))
+
+# === v4: Flat Continuación ===
+LOBO_FLAT_MIN_VELAS      = int(os.environ.get('LOBO_FLAT_MIN_VELAS', '3'))
+LOBO_FLAT_MAX_ATR        = float(os.environ.get('LOBO_FLAT_MAX_ATR', '1.5'))
+
+# === v4: BTC.D + Elliott ===
+LOBO_BTCD_ELLOTT_LOOKBACK = int(os.environ.get('LOBO_BTCD_ELLOTT_LOOKBACK', '60'))
+
+# === v4: D1 validación solo 00:00-00:05 UTC ===
+LOBO_D1_CHECK_START      = int(os.environ.get('LOBO_D1_CHECK_START', '0'))
+
 # === F5: RSI y Volumen ===
 LOBO_RSI_PERIOD           = int(os.environ.get('LOBO_RSI_PERIOD', '14'))
 LOBO_RSI_OVERSOLD         = float(os.environ.get('LOBO_RSI_OVERSOLD', '35'))
@@ -208,12 +228,12 @@ LOBO_VOL_RATIO_MIN        = float(os.environ.get('LOBO_VOL_RATIO_MIN', '1.5'))
 LOBO_VOL_PERIOD           = int(os.environ.get('LOBO_VOL_PERIOD', '20'))
 
 log.info(
-    "BITLOBO v3 Original Config: TOP=%d | Split %d/%d/%d | "
+    "BITLOBO v4 Config: TOP=%d | Split Liq:%d%%/Fut:%d%% | "
     "Risk=%.1f%%(sobre %d%%) | SL=%.1fATR | MaxPos=%d | "
     "Hedge=%s(%.0fx trig=%.0f%%) | RSI[%.0f,%.0f] | "
     "ScoreMin=%d | Paper=%s",
     TOP_N,
-    LOBO_LIQUIDEZ_PCT*100, LOBO_SPOT_PCT*100, LOBO_FUTUROS_PCT*100,
+    LOBO_LIQUIDEZ_PCT*100, LOBO_FUTUROS_PCT*100,
     LOBO_RISK_PCT*100, LOBO_FUTUROS_PCT*100, LOBO_SL_ATR, LOBO_MAX_POSITIONS,
     LOBO_HEDGE_ENABLED, LOBO_HEDGE_LEV_MULT, LOBO_HEDGE_TRIGGER_PCT*100,
     LOBO_RSI_OVERSOLD, LOBO_RSI_OVERBOUGHT,
@@ -221,7 +241,7 @@ log.info(
 )
 
 # =====================================================================
-# 5. INDICADORES BITLOBO v3 — CORREGIDOS Y EXTENDIDOS
+# 5. INDICADORES BITLOBO v4 — CORREGIDOS Y EXTENDIDOS
 # =====================================================================
 
 def _sma(series: pd.Series, period: int) -> pd.Series:
@@ -740,7 +760,7 @@ def validar_mecha_absorcion_en_zona(
         return False, 'pocos_datos'
     
     # Buscar en las últimas 3 velas (incluye la recién cerrada en -1)
-    # El bot solo llama a evaluar_senal_bitlobo_v3 cuando es_nueva_vela_h4 es True,
+    # El bot solo llama a evaluar_senal_bitlobo_v4 cuando es_nueva_vela_1h es True,
     # por lo que iloc[-1] es una vela cerrada.
     for idx in range(-1, -4, -1):
         try:
@@ -918,8 +938,8 @@ def capital_liquidez(balance_total: float) -> float:
     return balance_total * LOBO_LIQUIDEZ_PCT
 
 def capital_spot(balance_total: float) -> float:
-    """Retorna el capital para holding spot = 30% del balance total."""
-    return balance_total * LOBO_SPOT_PCT
+    """v4: SPOT eliminado del scope de futuros. Retorna 0."""
+    return 0.0
 
 # ================================================================
 # F3: SL por Liquidación (Anti-Cacería)
@@ -980,29 +1000,25 @@ def validar_estructura_d1(df_d1: pd.DataFrame, entry_price: float, side: str) ->
 # ================================================================
 # F4: Coberturas Asimétricas
 # ================================================================
-def evaluar_cobertura(pos_entry: dict, precio_actual: float) -> Optional[dict]:
+def evaluar_cobertura_v4(pos_entry: dict, precio_actual: float) -> Optional[dict]:
     """
-    F4: Evalúa si se debe activar una cobertura asimétrica (original).
-    
-    Condición: el precio ha recorrido >= LOBO_HEDGE_TRIGGER_PCT (50%)
-    de la distancia hacia el SL.
-    
-    Si se activa:
-    - Abre posición opuesta con apalancamiento 3x (LOBO_HEDGE_LEV_MULT)
-    - Take Profit de la cobertura = precio de liquidación de la posición principal
-    - Stop Loss de la cobertura = precio de entrada de la posición principal
+    v4 CORREGIDA: Cobertura ASIMÉTRICA manual BITLOBO.
+    - Margen del hedge: 15% del margen principal (NO 100%)
+    - Apalancamiento: MÁXIMO del activo (50X BTC, 20X alts, 10X otros)
+    - TP del hedge = precio de liquidación del principal
+    - SL del hedge = precio de entrada del principal
     """
-    if not LOBO_HEDGE_ENABLED:
-        return None
-    symbol = pos_entry['symbol']
+    symbol = pos_entry.get('symbol', '')
     if HEDGE_ENTRIES.get(symbol):
         return None
     side = pos_entry.get('side', 'long')
     entry_price = float(pos_entry['entry_price'])
     sl_price = float(pos_entry.get('sl_price', 0))
-    if sl_price <= 0:
+    liq_price = float(pos_entry.get('liq_price', 0))
+    main_margin = float(pos_entry.get('size_usdt', 0))
+    if sl_price <= 0 or liq_price <= 0 or main_margin <= 0:
         return None
-    # Distancia total al SL
+    # Distancia al SL
     if side == 'long':
         dist_total = entry_price - sl_price
         dist_recorrida = entry_price - precio_actual
@@ -1013,24 +1029,31 @@ def evaluar_cobertura(pos_entry: dict, precio_actual: float) -> Optional[dict]:
         return None
     pct_recorrido = dist_recorrida / dist_total
     if pct_recorrido < LOBO_HEDGE_TRIGGER_PCT:
-        return None  # Aún no se activa
-    # Calcular cobertura
+        return None
+    # Dirección opuesta
     hedge_side = 'short' if side == 'long' else 'long'
-    # CORREGIDO: Hedge leverage 5-10x (dinámico según el activo)
-    main_lev = pos_entry.get('leverage', LEVERAGE)
-    hedge_lev = min(max(main_lev / 2, 5.0), 10.0)
-    # TP de la cobertura = precio de liquidación de la principal
-    liq_price = calcular_precio_liquidacion(entry_price, main_lev, side)
-    # SL de la cobertura = entry price (para que no interfiera con la posición principal)
-    hedge_sl = entry_price
-    # CORREGIDO: Tamaño de cobertura = 100% del margen de la principal
-    hedge_size = pos_entry.get('size_usdt', 0) * 1.0
+    # v4: Margen = 15% del principal
+    hedge_margin = main_margin * LOBO_HEDGE_MARGIN_PCT
+    # v4: Leverage MÁXIMO del activo
+    base = symbol.split('/')[0].replace(':USDT', '').strip()
+    if base == 'BTC':
+        hedge_lev = 50.0
+    elif base in {'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'LINK', 'DOT', 'TRX', 'SHIB', 'UNI', 'ATOM', 'LTC'}:
+        hedge_lev = 20.0
+    else:
+        hedge_lev = 10.0
+    tp_price = liq_price  # TP del hedge = liquidación del principal
+    sl_hedge = entry_price  # SL del hedge = entry del principal
+    hedge_size_notional = hedge_margin * hedge_lev
+    log.info("Hedge v4 %s: margin=%.2f(15%% de %.2f) lev=%.0fx tp=%.4f sl=%.4f",
+             symbol, hedge_margin, main_margin, hedge_lev, tp_price, sl_hedge)
     return {
         'side': hedge_side,
         'leverage': hedge_lev,
-        'tp_price': liq_price,
-        'sl_price': hedge_sl,
-        'size_usdt': hedge_size,
+        'tp_price': tp_price,
+        'sl_price': sl_hedge,
+        'margin_usdt': round(hedge_margin, 2),
+        'size_usdt': round(hedge_size_notional, 2),
         'entry_price': precio_actual,
     }
 
@@ -1041,89 +1064,46 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
                           ob_list: list, es_long: bool,
                           leverage: float = LEVERAGE) -> tuple[float, float, float, float]:
     """
-    F12: Calcula TP1, TP2, TP3 basados en zonas reales del mercado.
-    
-    TP1: En el FVG más cercano (o primer OB si no hay FVG).
-    TP2: En el siguiente FVG/OB.
-    TP3: En el siguiente nivel estructural.
-    
-    Fallback (sin FVG/OB): % sobre margen usando LOBO_TP_TARGET{1,2,3}_PCT.
-    Cada TP se calcula como entry * (1 + target_pct / leverage) para long,
-    o entry * (1 - target_pct / leverage) para short.
-    
+    F12: Calcula TP1, TP2, TP3 como % sobre el margen (fallback).
+
+    TP1 = entry × (1 ± TARGET1_PCT / leverage)   → 40% del margen
+    TP2 = entry × (1 ± TARGET2_PCT / leverage)   → 70% del margen
+    TP3 = entry × (1 ± TARGET3_PCT / leverage)   → 100% del margen
+
     Retorna (tp1_price, tp2_price, tp3_price, rr_ratio).
     """
-    # Seguridad: leverage debe ser > 0
     lev = leverage if leverage > 0 else LEVERAGE
-    
-    def fallback_tp(target_pct: float) -> float:
-        """Retorna precio TP para % sobre margen."""
-        if es_long:
-            return precio_actual * (1.0 + target_pct / lev)
-        else:
-            return precio_actual * (1.0 - target_pct / lev)
-    
-    tp1, tp2, tp3 = 0, 0, 0
-    
+
     if es_long:
-        fvg_arriba = [f for f in fvg_list if f['tipo'] == 'alcista' and f['gap_inf'] > precio_actual]
-        obs_arriba = [o for o in ob_list if o['tipo'] == 'alcista' and o['low'] > precio_actual]
-        
-        if fvg_arriba:
-            tp1 = min(f['gap_inf'] for f in fvg_arriba)
-        elif obs_arriba:
-            tp1 = min(o['low'] for o in obs_arriba)
-        else:
-            tp1 = fallback_tp(LOBO_TP_TARGET1_PCT)
-        
-        fvg_rest = [f for f in fvg_arriba if f['gap_inf'] > tp1 + atr_val * 0.5]
-        ob_rest = [o for o in obs_arriba if o['low'] > tp1 + atr_val * 0.5]
-        if fvg_rest:
-            tp2 = min(f['gap_inf'] for f in fvg_rest)
-        elif ob_rest:
-            tp2 = min(o['low'] for o in ob_rest)
-        else:
-            tp2 = fallback_tp(LOBO_TP_TARGET2_PCT)
-        
-        tp3_candidates = [f for f in fvg_arriba if f['gap_inf'] > tp2]
-        if tp3_candidates:
-            # Excluir el mismo FVG de TP1 si ya se uso
-            tp3 = min(f['gap_inf'] for f in tp3_candidates)
-        else:
-            tp3 = fallback_tp(LOBO_TP_TARGET3_PCT)
+        tp1 = precio_actual * (1.0 + LOBO_TP_TARGET1_PCT / lev)
+        tp2 = precio_actual * (1.0 + LOBO_TP_TARGET2_PCT / lev)
+        tp3 = precio_actual * (1.0 + LOBO_TP_TARGET3_PCT / lev)
     else:
-        fvg_abajo = [f for f in fvg_list if f['tipo'] == 'bajista' and f['gap_sup'] < precio_actual]
-        obs_abajo = [o for o in ob_list if o['tipo'] == 'bajista' and o['high'] < precio_actual]
-        
-        if fvg_abajo:
-            tp1 = max(f['gap_sup'] for f in fvg_abajo)
-        elif obs_abajo:
-            tp1 = max(o['high'] for o in obs_abajo)
-        else:
-            tp1 = fallback_tp(LOBO_TP_TARGET1_PCT)
-        
-        fvg_rest = [f for f in fvg_abajo if f['gap_sup'] < tp1 - atr_val * 0.5]
-        ob_rest = [o for o in obs_abajo if o['high'] < tp1 - atr_val * 0.5]
-        if fvg_rest:
-            tp2 = max(f['gap_sup'] for f in fvg_rest)
-        elif ob_rest:
-            tp2 = max(o['high'] for o in ob_rest)
-        else:
-            tp2 = fallback_tp(LOBO_TP_TARGET2_PCT)
-        
-        tp3_candidates = [f for f in fvg_abajo if f['gap_sup'] < tp2]
-        if tp3_candidates:
-            tp3 = max(f['gap_sup'] for f in tp3_candidates)
-        else:
-            tp3 = fallback_tp(LOBO_TP_TARGET3_PCT)
+        tp1 = precio_actual * (1.0 - LOBO_TP_TARGET1_PCT / lev)
+        tp2 = precio_actual * (1.0 - LOBO_TP_TARGET2_PCT / lev)
+        tp3 = precio_actual * (1.0 - LOBO_TP_TARGET3_PCT / lev)
     
-    # Garantizar orden: TP1 <= TP2 <= TP3 (long) o TP1 >= TP2 >= TP3 (short)
+    # Capping: TP1/TP2/TP3 escalonados dentro de max_dist
+    max_dist_tp1 = atr_val * 3.0    # TP1: máx 3 ATR (permite R:R hasta 2.0 con SL=1.5ATR)
+    max_dist_tp2 = atr_val * 4.0    # TP2: máx 4 ATR
+    max_dist_tp3 = atr_val * 6.0    # TP3: máx 6 ATR
     if es_long:
-        tp2 = max(tp1, tp2) if tp2 > 0 else tp1
-        tp3 = max(tp2, tp3) if tp3 > 0 else tp2
+        tp1 = min(tp1, precio_actual + max_dist_tp1) if tp1 > 0 else precio_actual + atr_val * 0.8
+        tp2 = min(tp2, precio_actual + max_dist_tp2) if tp2 > 0 else precio_actual + atr_val * 1.5
+        tp3 = min(tp3, precio_actual + max_dist_tp3) if tp3 > 0 else precio_actual + atr_val * 3.0
+        # Garantizar orden estricto
+        if tp2 <= tp1:
+            tp2 = tp1 + atr_val * 0.3
+        if tp3 <= tp2:
+            tp3 = tp2 + atr_val * 0.5
     else:
-        tp2 = min(tp1, tp2) if tp2 > 0 else tp1
-        tp3 = min(tp2, tp3) if tp3 > 0 else tp2
+        tp1 = max(tp1, precio_actual - max_dist_tp1) if tp1 > 0 else precio_actual - atr_val * 0.8
+        tp2 = max(tp2, precio_actual - max_dist_tp2) if tp2 > 0 else precio_actual - atr_val * 1.5
+        tp3 = max(tp3, precio_actual - max_dist_tp3) if tp3 > 0 else precio_actual - atr_val * 3.0
+        if tp2 >= tp1:
+            tp2 = tp1 - atr_val * 0.3
+        if tp3 >= tp2:
+            tp3 = tp2 - atr_val * 0.5
     
     # R:R basado en TP1 (riesgo = distancia SL 1.5 ATR)
     riesgo = atr_val * 1.5
@@ -1133,17 +1113,17 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
     return tp1, tp2, tp3, rr
 
 # ================================================================
-# F7: Timing de entrada (cierre de vela H4)
+# F7: Timing de entrada (cierre de vela H1)
 # ================================================================
-def es_nueva_vela_h4(df_h4: pd.DataFrame) -> bool:
-    """F7: True si la última vela H4 acaba de cerrar (< 5 minutos desde cierre)."""
-    if df_h4.empty:
+def es_nueva_vela_1h(df_1h: pd.DataFrame) -> bool:
+    """F7: True si la última vela H1 acaba de cerrar (< 5 minutos desde cierre)."""
+    if df_1h.empty:
         return False
-    ultimo_ts = df_h4['timestamp'].iloc[-1]
+    ultimo_ts = df_1h['timestamp'].iloc[-1]
     ahora = int(time.time() * 1000)
     diff_ms = ahora - ultimo_ts
-    # 4h = 14,400,000 ms. Una vela "recién cerrada" tiene diff < 4h + 5min
-    return diff_ms < 14_700_000  # 4h + 5min
+    # 1h = 3,600,000 ms + 5min buffer
+    return diff_ms < 3_900_000
 
 # =====================================================================
 # F3: Apalancamiento dinámico (liq price calza con la mecha)
@@ -1223,24 +1203,293 @@ def calcular_apalancamiento_optimo(
 
 
 # =====================================================================
-# 6. EVALUACIÓN COMPLETA DE SEÑAL (v3 con todas las correcciones)
+# v4 — D2: EXPANDED FLAT / "DOUBLE KILL"
 # =====================================================================
-def evaluar_senal_bitlobo_v3(
+def detectar_expanded_flat(df_h4: pd.DataFrame, es_long: bool) -> dict:
+    """
+    D2: Patrón A-B-C donde C rompe A pero cierra con mecha (absorción).
+    Long: A(min) → B(max) → C(nuevo min < A) con cierre > A.
+    Short: A(max) → B(min) → C(nuevo max > A) con cierre < A.
+    """
+    left, right = 5, 5
+    if len(df_h4) < left + right + 10:
+        return {'encontrado': False, 'razon': 'pocos_datos'}
+    highs = df_h4['high'].values
+    lows = df_h4['low'].values
+    closes = df_h4['close'].values
+    opens = df_h4['open'].values
+    n = len(highs)
+    pivot_highs_idx = []
+    pivot_lows_idx = []
+    for i in range(left, n - right):
+        if highs[i] == max(highs[max(0, i-left):i+right+1]):
+            pivot_highs_idx.append(i)
+        if lows[i] == min(lows[max(0, i-left):i+right+1]):
+            pivot_lows_idx.append(i)
+    if len(pivot_highs_idx) < 2 or len(pivot_lows_idx) < 2:
+        return {'encontrado': False, 'razon': 'pocos_pivots'}
+    if es_long:
+        for i_a in range(len(pivot_lows_idx)):
+            idx_a = pivot_lows_idx[i_a]
+            level_a = lows[idx_a]
+            for i_b in range(i_a + 1, min(i_a + 4, len(pivot_highs_idx))):
+                idx_b = pivot_highs_idx[i_b]
+                if idx_b <= idx_a:
+                    continue
+                level_b = highs[idx_b]
+                if level_b <= level_a:
+                    continue
+                for i_c in range(i_b + 1, min(i_b + 4, len(pivot_lows_idx))):
+                    idx_c = pivot_lows_idx[i_c]
+                    if idx_c <= idx_b:
+                        continue
+                    level_c = lows[idx_c]
+                    if level_c < level_a:
+                        vela_c_range = highs[idx_c] - lows[idx_c]
+                        if vela_c_range > 0:
+                            mecha_inf = min(opens[idx_c], closes[idx_c]) - lows[idx_c]
+                            ratio_mecha = mecha_inf / vela_c_range
+                            if ratio_mecha >= 0.15:
+                                return {
+                                    'encontrado': True,
+                                    'tipo': 'exp_flat_long',
+                                    'nivel_a': float(level_a),
+                                    'nivel_c': float(level_c),
+                                    'nivel_b': float(level_b),
+                                    'distancia_ab': round((level_b - level_a) / level_a * 100, 2),
+                                    'mecha_c_ratio': round(ratio_mecha, 2),
+                                }
+    else:
+        for i_a in range(len(pivot_highs_idx)):
+            idx_a = pivot_highs_idx[i_a]
+            level_a = highs[idx_a]
+            for i_b in range(i_a + 1, min(i_a + 4, len(pivot_lows_idx))):
+                idx_b = pivot_lows_idx[i_b]
+                if idx_b <= idx_a:
+                    continue
+                level_b = lows[idx_b]
+                if level_b >= level_a:
+                    continue
+                for i_c in range(i_b + 1, min(i_b + 4, len(pivot_highs_idx))):
+                    idx_c = pivot_highs_idx[i_c]
+                    if idx_c <= idx_b:
+                        continue
+                    level_c = highs[idx_c]
+                    if level_c > level_a:
+                        vela_c_range = highs[idx_c] - lows[idx_c]
+                        if vela_c_range > 0:
+                            mecha_sup = highs[idx_c] - max(opens[idx_c], closes[idx_c])
+                            ratio_mecha = mecha_sup / vela_c_range
+                            if ratio_mecha >= 0.15:
+                                return {
+                                    'encontrado': True,
+                                    'tipo': 'exp_flat_short',
+                                    'nivel_a': float(level_a),
+                                    'nivel_c': float(level_c),
+                                    'nivel_b': float(level_b),
+                                    'distancia_ab': round((level_a - level_b) / level_a * 100, 2),
+                                    'mecha_c_ratio': round(ratio_mecha, 2),
+                                }
+    return {'encontrado': False}
+
+
+# =====================================================================
+# v4 — D3: CHOCH (Change of Character)
+# =====================================================================
+def detectar_choch(df_h4: pd.DataFrame, es_long: bool) -> dict:
+    """
+    D3: Quiebre de estructura — en tendencia bajista, CHOCH cuando
+    precio cierra sobre el último lower high (y viceversa).
+    """
+    if len(df_h4) < LOBO_CHOCH_LOOKBACK:
+        return {'choch': False, 'razon': 'pocos_datos'}
+    left, right = 3, 3
+    highs = df_h4['high'].values
+    lows = df_h4['low'].values
+    closes = df_h4['close'].values
+    n = len(highs)
+    pivot_highs_idx = []
+    pivot_lows_idx = []
+    for i in range(left, n - right):
+        if highs[i] == max(highs[max(0, i-left):i+right+1]):
+            pivot_highs_idx.append(i)
+        if lows[i] == min(lows[max(0, i-left):i+right+1]):
+            pivot_lows_idx.append(i)
+    if len(pivot_highs_idx) < 3 or len(pivot_lows_idx) < 2:
+        return {'choch': False, 'razon': 'pocos_pivots'}
+    if es_long:
+        ultimos_highs = [(i, highs[i]) for i in pivot_highs_idx[-4:]]
+        if len(ultimos_highs) < 3:
+            return {'choch': False}
+        lh_count = sum(1 for j in range(len(ultimos_highs)-1) if ultimos_highs[j][1] > ultimos_highs[j+1][1])
+        if lh_count < 2:
+            return {'choch': False, 'razon': 'sin_lower_highs'}
+        nivel_choch = ultimos_highs[-1][1]
+        if closes[-1] > nivel_choch:
+            body = closes[-1] - df_h4['open'].iloc[-1]
+            rango = highs[-1] - lows[-1]
+            if rango > 0 and body / rango > 0.3:
+                return {'choch': True, 'tipo': 'bullish_choch', 'nivel_roto': float(nivel_choch), 'pullback_confirmado': False}
+    else:
+        ultimos_lows = [(i, lows[i]) for i in pivot_lows_idx[-4:]]
+        if len(ultimos_lows) < 3:
+            return {'choch': False}
+        hl_count = sum(1 for j in range(len(ultimos_lows)-1) if ultimos_lows[j][1] < ultimos_lows[j+1][1])
+        if hl_count < 2:
+            return {'choch': False, 'razon': 'sin_higher_lows'}
+        nivel_choch = ultimos_lows[-1][1]
+        if closes[-1] < nivel_choch:
+            body = df_h4['open'].iloc[-1] - closes[-1]
+            rango = highs[-1] - lows[-1]
+            if rango > 0 and body / rango > 0.3:
+                return {'choch': True, 'tipo': 'bearish_choch', 'nivel_roto': float(nivel_choch), 'pullback_confirmado': False}
+    return {'choch': False}
+
+
+# =====================================================================
+# v4 — D4: MICROFRACTALIDAD (ondas en 1H)
+# =====================================================================
+def verificar_microfractalidad(df_1h: pd.DataFrame) -> dict:
+    """
+    D4: Detecta estructura de 5+ ondas en 1H para confirmar giro.
+    """
+    if len(df_1h) < 30:
+        return {'completo': False, 'razon': 'pocos_datos'}
+    left, right = 3, 3
+    highs = df_1h['high'].values
+    lows = df_1h['low'].values
+    n = len(highs)
+    pivot_highs_idx = []
+    pivot_lows_idx = []
+    for i in range(left, n - right):
+        if highs[i] == max(highs[max(0, i-left):i+right+1]):
+            pivot_highs_idx.append(i)
+        if lows[i] == min(lows[max(0, i-left):i+right+1]):
+            pivot_lows_idx.append(i)
+    pivots = sorted(
+        [(i, 'high', highs[i]) for i in pivot_highs_idx[-8:]] +
+        [(i, 'low', lows[i]) for i in pivot_lows_idx[-8:]],
+        key=lambda x: x[0]
+    )
+    if len(pivots) < 5:
+        return {'completo': False, 'razon': 'pocos_pivots'}
+    ondas = 1
+    for j in range(1, len(pivots)):
+        if pivots[j][1] != pivots[j-1][1]:
+            ondas += 1
+        else:
+            break
+    if ondas >= 5:
+        primer_pivot = pivots[0][2]
+        ultimo_pivot = pivots[-1][2]
+        if ultimo_pivot > primer_pivot:
+            tipo = 'impulsivo_alcista'
+        elif ultimo_pivot < primer_pivot:
+            tipo = 'impulsivo_bajista'
+        else:
+            tipo = 'zigzag'
+        return {'completo': True, 'ondas': ondas, 'tipo': tipo}
+    return {'completo': False, 'ondas': ondas}
+
+
+# =====================================================================
+# v4 — D5: PLANA DE CONTINUACION
+# =====================================================================
+def detectar_flat_continuacion(df_h4: pd.DataFrame, es_long: bool) -> bool:
+    """
+    D5: Ruptura de estructura + consolidación lateral sin nuevos extremos.
+    """
+    if len(df_h4) < 15:
+        return False
+    n = len(df_h4)
+    atr_vals = _atr(df_h4, LOBO_ATR_PERIOD)
+    lookback = min(20, n - LOBO_FLAT_MIN_VELAS - 5)
+    zone = df_h4.iloc[-(lookback + LOBO_FLAT_MIN_VELAS):-LOBO_FLAT_MIN_VELAS]
+    current = df_h4.iloc[-LOBO_FLAT_MIN_VELAS:]
+    if len(zone) < 5 or len(current) < LOBO_FLAT_MIN_VELAS:
+        return False
+    atr_avg = atr_vals.iloc[-LOBO_FLAT_MIN_VELAS:].mean()
+    if pd.isna(atr_avg) or atr_avg <= 0:
+        return False
+    if es_long:
+        resistencia = zone['high'].iloc[:-1].max()
+        rupture_velas = zone[zone['close'] > resistencia]
+        if rupture_velas.empty:
+            return False
+        min_rupture = rupture_velas['low'].min()
+        for _, vela in current.iterrows():
+            if vela['low'] < min_rupture * 0.995:
+                return False
+        rango_actual = current['high'].max() - current['low'].min()
+        if rango_actual < atr_avg * LOBO_FLAT_MAX_ATR:
+            return True
+    else:
+        soporte = zone['low'].iloc[:-1].min()
+        rupture_velas = zone[zone['close'] < soporte]
+        if rupture_velas.empty:
+            return False
+        max_rupture = rupture_velas['high'].max()
+        for _, vela in current.iterrows():
+            if vela['high'] > max_rupture * 1.005:
+                return False
+        rango_actual = current['high'].max() - current['low'].min()
+        if rango_actual < atr_avg * LOBO_FLAT_MAX_ATR:
+            return True
+    return False
+
+
+# =====================================================================
+# v4 — D8: BTC.D + Elliott (ventana altcoins)
+# =====================================================================
+def check_btcd_elliott_ventana_altcoins(df_btcd_4h: Optional[pd.DataFrame] = None) -> dict:
+    """
+    D8: BTC.D bajando + 5 ondas bajistas completas en H4 → ventana altcoins.
+    """
+    result = {'ventana_altcoins': False, 'btcd_bajista': False, 'elliott_completo': False}
+    btcd_subiendo = check_dominancia_btc_long()
+    if btcd_subiendo:
+        return result
+    result['btcd_bajista'] = True
+    if df_btcd_4h is not None and len(df_btcd_4h) >= LOBO_BTCD_ELLOTT_LOOKBACK:
+        elliott = detectar_estructura_elliott_v3(df_btcd_4h)
+        if elliott.get('fase') == 'estructura_5_ondas' and elliott.get('direccion') == 'bajista':
+            result['elliott_completo'] = True
+    result['ventana_altcoins'] = True
+    return result
+
+
+# =====================================================================
+# v4 — D9: INVALIDACION H4 STRUCTURAL (cada 4h)
+# =====================================================================
+def debe_validar_h4() -> bool:
+    """D9: Solo valida estructura H4 en los 5 min posteriores al cierre de vela H4."""
+    now_utc = datetime.utcnow()
+    # H4 cierra cada 4h: 00, 04, 08, 12, 16, 20 UTC
+    return now_utc.hour % 4 == 0 and now_utc.minute <= 5
+
+
+# =====================================================================
+# 6. EVALUACIÓN COMPLETA DE SEÑAL (v4 con todas las correcciones)
+# =====================================================================
+def evaluar_senal_bitlobo_v4(
     symbol: str, df_h4: pd.DataFrame, df_d1: pd.DataFrame,
     precio_actual: float, atr_val: float, balance_total: float,
-    es_long: bool,
+    es_long: bool, df_1h: Optional[pd.DataFrame] = None,
+    ventana_altcoins: Optional[dict] = None,
 ) -> Optional[dict]:
     """
-    Evalúa TODAS las reglas BITLOBO v3.
-    Retorna dict de señal si todas se cumplen, None si alguna falla.
+    v4: Evalúa TODAS las reglas BITLOBO con mejoras D2-D9.
+    Diferencias vs v3:
+      - Score max: 22 (era 16)
+      - R:R mínimo: 1.5 (era 1.0)
+      - Nuevos: CHOCH, Expanded Flat, Microfractalidad, Flat Continuación
+      - BTC.D usa Elliott para ventana altcoins
     """
-    # --- F1: Capital de futuros = 20% del total ---
     capital_fut = capital_disponible_futuros(balance_total)
-    
     senal = {'symbol': symbol, 'precio_actual': precio_actual, 'atr_val': atr_val, 'es_long': es_long}
     detalles = []
     score = 0
-    max_score = 16  # Más reglas que en v2
+    max_score = 22
 
     # --- R1: Impulso direccional + Fibonacci ---
     impulso = detectar_impulso(df_h4)
@@ -1253,20 +1502,16 @@ def evaluar_senal_bitlobo_v3(
     senal['fibo'] = fibo
     score += 1
     detalles.append(f'R1:impulso_{impulso["tipo"]}_{impulso["velas"]}v')
-
     zona_inf = min(fibo['level_0_5'], fibo['level_0_618'])
     zona_sup = max(fibo['level_0_5'], fibo['level_0_618'])
     senal['zona_ote_inf'] = zona_inf
     senal['zona_ote_sup'] = zona_sup
     tol = atr_val * 1.0
     if not (zona_inf - tol <= precio_actual <= zona_sup + tol):
-        log.debug("%s: Precio fuera de zona OTE+tol", symbol)
         return None
     if zona_inf <= precio_actual <= zona_sup:
         score += 1
         detalles.append('R1:en_OTE')
-    else:
-        detalles.append('R1:cerca_OTE')
 
     # --- R2: SMA 100 en zona OTE ---
     if len(df_h4) >= 100:
@@ -1274,36 +1519,36 @@ def evaluar_senal_bitlobo_v3(
         if not pd.isna(sma100) and sma100_en_zona_ote(sma100, fibo, atr_val):
             score += 1
             detalles.append('R2:SMA100_en_OTE')
-        else:
-            detalles.append('R2:SMA100_no')
-    else:
-        score += 1
 
     # --- R3: ADX ---
     if adx_permite_entrada(df_h4):
         score += 1
         detalles.append('R3:ADX_ok')
-    else:
-        detalles.append('R3:ADX_no')
 
-    # --- F2-R4: USDT.D ---
+    # --- R4: USDT.D ---
     if es_long:
         if check_usdtd_resistencia_long():
             score += 1
             detalles.append('R4:USDT.D_resistencia')
-        else:
-            detalles.append('R4:USDT.D_no')
     else:
         score += 1
         detalles.append('R4:Short_ok')
 
-    # --- F2-R5: BTC.D ---
-    btcd_subiendo = check_dominancia_btc_long()
-    if not (btcd_subiendo and 'BTC' not in symbol):
-        score += 1
-        detalles.append(f'R5:BTC.D_{"sube" if btcd_subiendo else "baja"}')
+    # --- R5: BTC.D con Elliott (D8) ---
+    if ventana_altcoins:
+        if not (ventana_altcoins.get('btcd_bajista', False) and 'BTC' not in symbol):
+            score += 1
+            detalles.append('R5:BTC.D_ok')
+        elif 'BTC' in symbol and ventana_altcoins.get('btcd_bajista', False):
+            score += 1
+            detalles.append('R5:BTC_fav')
+        else:
+            detalles.append('R5:BTC.D_bloquea_alt')
     else:
-        detalles.append('R5:BTC.D_bloquea_alt')
+        btcd_subiendo = check_dominancia_btc_long()
+        if not (btcd_subiendo and 'BTC' not in symbol):
+            score += 1
+            detalles.append(f'R5:BTC.D_{"sube" if btcd_subiendo else "baja"}')
 
     # --- R6: FVG ---
     fvgs = detectar_fvg(df_h4)
@@ -1312,8 +1557,6 @@ def evaluar_senal_bitlobo_v3(
     if fvg_en_zona:
         score += 1
         detalles.append(f'R6:FVG_{len(fvg_en_zona)}')
-    else:
-        detalles.append('R6:FVG_no')
 
     # --- R7: Order Block ---
     obs = detectar_order_blocks(df_h4)
@@ -1322,8 +1565,6 @@ def evaluar_senal_bitlobo_v3(
     if ob_en_zona:
         score += 1
         detalles.append(f'R7:OB_{len(ob_en_zona)}')
-    else:
-        detalles.append('R7:OB_no')
 
     # --- R8: Liquidity Sweep ---
     sweeps = detectar_sweep(df_h4)
@@ -1336,35 +1577,26 @@ def evaluar_senal_bitlobo_v3(
         )
         if sweep_ok:
             score += 1
-            detalles.append(f'R8:Sweep')
-        else:
-            detalles.append('R8:Sweep_dir_no')
-    else:
-        detalles.append('R8:Sweep_no')
+            detalles.append('R8:Sweep')
 
-    # --- [GAP 1] R9: Sin Mecha hay Sospecha (validación en zona OTE) ---
+    # --- R9: Mecha/Absorción ---
     mecha_ok, mecha_det = validar_mecha_absorcion_en_zona(df_h4, zona_inf, zona_sup, es_long, atr_val)
     if not mecha_ok:
-        log.debug("%s: Sin Mecha hay Sospecha — %s", symbol, mecha_det)
-        return None  # GAP 1: abortar, no es una entrada válida
+        return None
     score += 1
     detalles.append(f'R9:Mecha_{mecha_det}')
 
-    # --- F5: RSI Filtro ---
+    # --- F5: RSI ---
     rsi_ok, rsi_val = filtro_rsi(df_h4, es_long)
     if rsi_ok:
         score += 1
         detalles.append(f'F5:RSI_{rsi_val:.0f}')
-    else:
-        detalles.append(f'F5:RSI_{rsi_val:.0f}_bloquea')
 
     # --- F5: Volumen ---
     vol_ok, vol_ratio = validar_volumen(df_h4, es_long)
     if vol_ok:
         score += 1
         detalles.append(f'F5:Vol_{vol_ratio:.1f}x')
-    else:
-        detalles.append(f'F5:Vol_{vol_ratio:.1f}x_bloquea')
 
     # --- F6: Pullback ---
     nivel_ref = zona_sup if es_long else zona_inf
@@ -1372,30 +1604,54 @@ def evaluar_senal_bitlobo_v3(
     if pullback_ok:
         score += 1
         detalles.append('F6:Pullback_ok')
-    else:
-        detalles.append('F6:Pullback_no')
 
     # --- F11: Elliott ---
     elliott = detectar_estructura_elliott_v3(df_h4)
     senal['elliott'] = elliott
     if elliott['fase'] == 'estructura_5_ondas':
         score += 1
-        detalles.append(f'F11:Elliott_5ondas')
-    else:
-        detalles.append(f'F11:Elliott_{elliott["fase"]}')
+        detalles.append('F11:Elliott_5ondas')
 
-    # --- F10: Validación D1 estructural ---
+    # --- D3: CHOCH ---
+    choch = detectar_choch(df_h4, es_long)
+    senal['choch'] = choch
+    if choch.get('choch', False):
+        score += 1
+        detalles.append(f'D3:{choch["tipo"]}')
+
+    # --- D2: Expanded Flat / Double Kill (+2 pts) ---
+    exp_flat = detectar_expanded_flat(df_h4, es_long)
+    senal['expanded_flat'] = exp_flat
+    if exp_flat.get('encontrado', False):
+        score += 2
+        detalles.append(f'D2:DoubleKill_{exp_flat["tipo"]}')
+
+    # --- D4: Microfractalidad ---
+    if df_1h is not None and len(df_1h) > 0:
+        micro = verificar_microfractalidad(df_1h)
+        senal['microfractal'] = micro
+        if micro.get('completo', False):
+            if (es_long and micro.get('tipo') == 'impulsivo_alcista') or \
+               (not es_long and micro.get('tipo') == 'impulsivo_bajista'):
+                score += 1
+                detalles.append(f'D4:micro_{micro["tipo"]}')
+
+    # --- D5: Flat Continuación ---
+    flat_cont = detectar_flat_continuacion(df_h4, es_long)
+    if flat_cont:
+        score += 1
+        detalles.append('D5:flat_continuacion')
+
+    # --- F10: Validación D1 ---
     if validar_estructura_d1(df_d1, precio_actual, 'long' if es_long else 'short'):
         score += 1
-        detalles.append('F10:D1_estructura_ok')
+        detalles.append('F10:D1_ok')
     else:
-        log.debug("%s: D1 invalida estructura", symbol)
-        return None  # D1 invalida = no entrar
+        return None
 
-    # --- F3: Apalancamiento dinámico (necesario antes de TPs para fallback % margen) ---
+    # --- F3: Apalancamiento dinámico ---
     apalancamiento, liq_price = calcular_apalancamiento_optimo(
-        precio_actual, df_h4, zona_inf, zona_sup,
-        es_long, sweeps, symbol,
+        precio_actual, df_h4, zona_inf, zona_sup, es_long, sweeps, symbol,
     )
 
     # --- F12: TPs en zonas reales ---
@@ -1408,56 +1664,48 @@ def evaluar_senal_bitlobo_v3(
     senal['tp3_price'] = tp3_price
     senal['rr'] = rr
 
-    # R:R mínimo: TP debe estar al menos tan lejos como el SL (>= 1.0)
-    if rr < 1.0:
-        log.debug("%s: R:R %.2f < 1.0, TP mas cerca que SL, abortando", symbol, rr)
+    # v4: R:R mínimo 1.5:1 (subido desde 1.0)
+    if rr < 1.5:
         return None
-    # R:R >= 1.5 suma punto extra
     if rr >= 1.5:
         score += 1
         detalles.append(f'R13:R:R_{rr:.2f}')
-    else:
-        log.debug("%s: R:R %.2f entre 1.0 y 1.5", symbol, rr)
-        detalles.append(f'R13:R:R_{rr:.2f}')
 
-    # --- SL: 1.5 ATR (original lobobot.py) ---
+    # --- SL ---
     sl_mult = LOBO_SL_ATR
-    if es_long:
-        sl_price = precio_actual - (atr_val * sl_mult)
-    else:
-        sl_price = precio_actual + (atr_val * sl_mult)
+    sl_price = precio_actual - (atr_val * sl_mult) if es_long else precio_actual + (atr_val * sl_mult)
     senal['sl_price'] = sl_price
 
-    # --- Position Sizing (idéntico a lobobot.py) ---
+    # --- Safety: liq_price debe quedar más allá del SL (buffer de 1 ATR) ---
+    if es_long:
+        liq_min = sl_price - atr_val * 1.0  # liq 1 ATR por debajo de SL
+        if liq_price >= sl_price:
+            liq_price = liq_min  # Recalcular liq para que esté más abajo
+    else:
+        liq_max = sl_price + atr_val * 1.0  # liq 1 ATR por encima de SL
+        if liq_price <= sl_price:
+            liq_price = liq_max
+
+    # --- Position Sizing ---
     riesgo_capital = capital_fut * LOBO_RISK_PCT
     distancia_sl = abs(precio_actual - sl_price) / precio_actual
-    if distancia_sl > 0:
-        pos_value = riesgo_capital / distancia_sl
-    else:
+    if distancia_sl <= 0:
         return None
-    
+    pos_value = riesgo_capital / distancia_sl
     if pos_value < MIN_ORDER_USDT:
-        log.info("%s: pos_value %.2f < min %d, ajustando", symbol, pos_value, MIN_ORDER_USDT)
         pos_value = MIN_ORDER_USDT
-    
     qty = pos_value / precio_actual
-    
-    # Margen real = valor posición / apalancamiento
     margin_real = pos_value / apalancamiento if apalancamiento > 0 else 0
-    riesgo_real_pct = (pos_value * distancia_sl) / capital_fut * 100
-    
+
     senal['qty'] = qty
     senal['pos_value'] = pos_value
     senal['liq_price'] = liq_price
     senal['size_usdt'] = margin_real
     senal['leverage_calculado'] = apalancamiento
-    senal['riesgo_real_pct'] = riesgo_real_pct
-
-    detal_sizing = f'SL_{sl_mult:.1f}ATR_lev{apalancamiento:.0f}x_mrg{margin_real:.2f}'
+    senal['riesgo_real_pct'] = round((pos_value * distancia_sl) / capital_fut * 100, 2)
     score += 1
-    detalles.append(detal_sizing)
+    detalles.append(f'F3:lev{apalancamiento:.0f}x_mrg{margin_real:.2f}')
 
-    # Score mínimo
     if score < LOBO_SCORE_MIN:
         log.debug("%s: Score %d < minimo %d", symbol, score, LOBO_SCORE_MIN)
         return None
@@ -1466,7 +1714,6 @@ def evaluar_senal_bitlobo_v3(
     senal['max_score'] = max_score
     senal['detalles'] = detalles
     senal['fvg_usado'] = fvg_en_zona[0] if fvg_en_zona else None
-    
     return senal
 
 # =====================================================================
@@ -1483,7 +1730,7 @@ def send_telegram(message: str):
         pass
 
 # =====================================================================
-# 8. CSV LOGGING (adaptado a v3)
+# 8. CSV LOGGING (adaptado a v4)
 # =====================================================================
 TRADE_CSV_HEADERS_V3 = [
     'entry_time', 'exit_time', 'symbol', 'side', 'entry_price', 'exit_price',
@@ -1603,11 +1850,12 @@ def guardar_signal_log(symbol, side, price, score, max_score, detalles,
 # =====================================================================
 async def _fetch_symbol_async(exch, symbol):
     try:
-        ohlcv_4h = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_4H, limit=100)
-        ohlcv_d1 = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_D1, limit=60)
-        return symbol, ohlcv_4h, ohlcv_d1
+        ohlcv_1h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_1H,  limit=200)  # Principal
+        ohlcv_4h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_4H,  limit=100)  # Confirmación
+        ohlcv_15m = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_15M, limit=200)  # Micro
+        return symbol, ohlcv_1h, ohlcv_4h, ohlcv_15m
     except Exception:
-        return symbol, None, None
+        return symbol, None, None, None
 
 async def fetch_all_ohlcv(symbols):
     exch = ccxt_async.bitget({
@@ -1618,7 +1866,7 @@ async def fetch_all_ohlcv(symbols):
         results = await asyncio.gather(*[_fetch_symbol_async(exch, s) for s in symbols])
     finally:
         await exch.close()
-    return {r[0]: (r[1], r[2]) for r in results}
+    return {r[0]: (r[1], r[2], r[3]) for r in results}
 
 # =====================================================================
 # 10. EXCHANGE — CONEXIÓN Y ÓRDENES
@@ -1628,11 +1876,11 @@ exchange: ccxt.bitget | None = None
 def init_exchange() -> bool:
     global exchange
     if PAPER_TRADE:
-        log.info("PAPER_TRADE v3 activo")
+        log.info("PAPER_TRADE v4 activo")
         try:
             exchange = ccxt.bitget({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
             exchange.load_markets()
-            log.info("Exchange paper v3 listo (%d mercados)", len(exchange.markets))
+            log.info("Exchange paper v4 listo (%d mercados)", len(exchange.markets))
             return True
         except Exception as e:
             log.critical("Error exchange paper: %s", e)
@@ -1645,14 +1893,14 @@ def init_exchange() -> bool:
             'apiKey': API_KEY, 'secret': SECRET_KEY, 'password': PASSPHRASE,
             'enableRateLimit': True, 'options': {'defaultType': 'swap'},
         })
-        log.info("Conexion Bitget v3 exitosa")
+        log.info("Conexion Bitget v4 exitosa")
         return True
     except Exception as e:
         log.critical("Error conectando Bitget: %s", e)
         return False
 
 # =====================================================================
-# 11. GESTIÓN DE POSICIONES v3 (con SL por liquidación, BE, trailing, coberturas)
+# 11. GESTIÓN DE POSICIONES v4 (con SL por liquidación, BE, trailing, coberturas)
 # =====================================================================
 def _full_cleanup(symbol: str, cooldown: int = 3600):
     """Limpia todos los rastros de una posición cerrada.
@@ -1674,7 +1922,7 @@ def _full_cleanup(symbol: str, cooldown: int = 3600):
     TRAIL_COUNTS.pop(symbol, None)
 
 def _manage_paper_positions_v3(balance_total: float):
-    """Gestiona posiciones simuladas en paper mode con TODAS las reglas v3."""
+    """Gestiona posiciones simuladas en paper mode con TODAS las reglas v4."""
     global ALERTS_HISTORY, PEAK_PRICES, COOLDOWNS, DAILY_STATS
     global SESSION_ACTIVE_SYMBOLS, TRAIL_COUNTS, HEDGE_ENTRIES
     global ADVERSE_PRICES, PRICE_PATHS, LAST_KNOWN_INDICATORS
@@ -1703,34 +1951,35 @@ def _manage_paper_positions_v3(balance_total: float):
 
             profit_pct = (mark - entry_price) / entry_price if side == 'long' else (entry_price - mark) / entry_price
 
-            # --- F10: Validación D1 estructural ---
-            try:
-                ohlcv_d1 = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
-                if len(ohlcv_d1) >= 10:
-                    df_d1 = pd.DataFrame(ohlcv_d1, columns=['ts','o','h','l','c','v'])
-                    if not validar_estructura_d1(df_d1, entry_price, side):
-                        log.info("[PAPER v3] %s: D1 invalida estructura - cerrando", symbol)
-                        remaining_qty = entry.get('remaining_qty', entry['quantity'])
-                        pnl = 0.0
-                        if side == 'long':
-                            pnl = (mark - entry_price) * remaining_qty
-                        else:
-                            pnl = (entry_price - mark) * remaining_qty
-                        guardar_trade_csv(entry, mark, pnl, 0, pnl, 'D1_INVALID', 'd1_estructura')
-                        _full_cleanup(symbol, cooldown=7200)
-                        send_telegram(f"[PAPER v3] *{symbol}* Cerrada por D1 estructura")
-                        continue
-            except Exception:
-                pass
+            # --- F10: Validación H4 estructural (v4: cada 4h en cierre de vela) ---
+            if debe_validar_h4():
+                try:
+                    ohlcv_4h_val = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=30)
+                    if len(ohlcv_4h_val) >= 10:
+                        df_4h_val = pd.DataFrame(ohlcv_4h_val, columns=['ts','o','h','l','c','v'])
+                        if not validar_estructura_d1(df_4h_val, entry_price, side):
+                            log.info("[PAPER v4] %s: H4 invalida estructura - cerrando", symbol)
+                            remaining_qty = entry.get('remaining_qty', entry['quantity'])
+                            pnl = 0.0
+                            if side == 'long':
+                                pnl = (mark - entry_price) * remaining_qty
+                            else:
+                                pnl = (entry_price - mark) * remaining_qty
+                            guardar_trade_csv(entry, mark, pnl, 0, pnl, 'D1_INVALID', 'd1_estructura')
+                            _full_cleanup(symbol, cooldown=7200)
+                            send_telegram(f"[PAPER v4] *{symbol}* Cerrada por D1 estructura")
+                            continue
+                except Exception:
+                    pass
 
-            # --- F4: Evaluar cobertura asimétrica ---
+            # --- F4: Evaluar cobertura asimétrica v4 ---
             if LOBO_HEDGE_ENABLED and symbol not in HEDGE_ENTRIES:
-                hedge_params = evaluar_cobertura(entry, mark)
+                hedge_params = evaluar_cobertura_v4(entry, mark)
                 if hedge_params:
-                    log.info("[PAPER v3] %s: Activando cobertura asimetrica %s lev=%.0fx tp=%.4f",
+                    log.info("[PAPER v4] %s: Activando cobertura %s lev=%.0fx tp=%.4f",
                              symbol, hedge_params['side'], hedge_params['leverage'], hedge_params['tp_price'])
                     HEDGE_ENTRIES[symbol] = hedge_params
-                    send_telegram(f"[PAPER v3] *{symbol}* Cobertura {hedge_params['side']} activada")
+                    send_telegram(f"[PAPER v4] *{symbol}* Cobertura {hedge_params['side']} activada")
 
             # --- Gestionar cobertura activa ---
             hedge = HEDGE_ENTRIES.get(symbol)
@@ -1743,12 +1992,12 @@ def _manage_paper_positions_v3(balance_total: float):
                 if hedge_side == 'short' and mark <= hedge_tp:
                     pnl_hedge = hedge.get('size_usdt', 0) * hedge_lev * \
                                 ((hedge['entry_price'] - mark) / hedge['entry_price'])
-                    log.info("[PAPER v3] %s: Cobertura TP alcanzado! PnL=%.2f", symbol, pnl_hedge)
+                    log.info("[PAPER v4] %s: Cobertura TP alcanzado! PnL=%.2f", symbol, pnl_hedge)
                     HEDGE_ENTRIES.pop(symbol, None)
                 elif hedge_side == 'long' and mark >= hedge_tp:
                     pnl_hedge = hedge.get('size_usdt', 0) * hedge_lev * \
                                 ((mark - hedge['entry_price']) / hedge['entry_price'])
-                    log.info("[PAPER v3] %s: Cobertura TP alcanzado! PnL=%.2f", symbol, pnl_hedge)
+                    log.info("[PAPER v4] %s: Cobertura TP alcanzado! PnL=%.2f", symbol, pnl_hedge)
                     HEDGE_ENTRIES.pop(symbol, None)
                 # Si la cobertura alcanza SL
                 if hedge_side == 'short' and mark >= hedge_sl:
@@ -1785,10 +2034,10 @@ def _manage_paper_positions_v3(balance_total: float):
                     pnl = _pnl_parcial(remaining_qty, mark)
                     status = 'SL' if sl_hit else 'LIQ'
                     reason = 'sl' if sl_hit else 'liquidacion'
-                    log.info("[PAPER v3] %s %s | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
+                    log.info("[PAPER v4] %s %s | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
                              symbol, status, entry_price, mark, remaining_qty, pnl)
                     guardar_trade_csv(entry, mark, pnl, 0, pnl, status, reason)
-                    send_telegram(f"[PAPER v3] *{symbol} {status}*\nPnL: {pnl:.2f} USDT ({pnl/(entry.get('size_usdt',1)*lev)*100:.2f}%)")
+                    send_telegram(f"[PAPER v4] *{symbol} {status}*\nPnL: {pnl:.2f} USDT ({pnl/(entry.get('size_usdt',1)*lev)*100:.2f}%)")
                 _full_cleanup(symbol)
                 continue
 
@@ -1796,10 +2045,10 @@ def _manage_paper_positions_v3(balance_total: float):
             if tp3_hit:
                 if remaining_qty > 0:
                     pnl = _pnl_parcial(remaining_qty, tp3_price)
-                    log.info("[PAPER v3] %s TP3 | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
+                    log.info("[PAPER v4] %s TP3 | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
                              symbol, entry_price, tp3_price, remaining_qty, pnl)
                     guardar_trade_csv(entry, tp3_price, pnl, 0, pnl, 'TP3', 'tp3')
-                    send_telegram(f"[PAPER v3] *{symbol} TP3 COMPLETO*\nPnL: {pnl:.2f} USDT")
+                    send_telegram(f"[PAPER v4] *{symbol} TP3 COMPLETO*\nPnL: {pnl:.2f} USDT")
                 _full_cleanup(symbol)
                 continue
 
@@ -1809,10 +2058,10 @@ def _manage_paper_positions_v3(balance_total: float):
                 pnl = _pnl_parcial(tp2_qty, tp2_price)
                 entry['remaining_qty'] = remaining_qty - tp2_qty
                 ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
-                log.info("[PAPER v3] %s TP2 PARCIAL(30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                log.info("[PAPER v4] %s TP2 PARCIAL(30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                          symbol, entry_price, tp2_price, tp2_qty, pnl, entry['remaining_qty'])
                 guardar_trade_csv(entry, tp2_price, pnl, 0, pnl, 'TP2_PARTIAL', 'tp2')
-                send_telegram(f"[PAPER v3] *{symbol} TP2 (30%)* PnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
+                send_telegram(f"[PAPER v4] *{symbol} TP2 (30%)* PnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
                 _save_trade_entries()
 
             # ── TP1: parcial 40% + BE (solo si no se ejecutó antes) ──
@@ -1823,10 +2072,10 @@ def _manage_paper_positions_v3(balance_total: float):
                 ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
                 ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
                 entry['sl_price'] = entry_price  # Break Even
-                log.info("[PAPER v3] %s TP1 PARCIAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                log.info("[PAPER v4] %s TP1 PARCIAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                          symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
                 guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
-                send_telegram(f"[PAPER v3] *{symbol} TP1 (40%) + BE* PnL: {pnl:.2f} USDT | SL→Entry")
+                send_telegram(f"[PAPER v4] *{symbol} TP1 (40%) + BE* PnL: {pnl:.2f} USDT | SL→Entry")
                 _save_trade_entries()
 
             # --- Timeout (cierra remanente si perdiendo) ---
@@ -1837,9 +2086,9 @@ def _manage_paper_positions_v3(balance_total: float):
                     remaining_qty = entry.get('remaining_qty', entry['quantity'])
                     if remaining_qty > 0:
                         pnl = _pnl_parcial(remaining_qty, mark)
-                        log.info("[PAPER v3] %s TIMEOUT +%.0fh Qty=%.4f PnL=%.2f", symbol, horas, remaining_qty, pnl)
+                        log.info("[PAPER v4] %s TIMEOUT +%.0fh Qty=%.4f PnL=%.2f", symbol, horas, remaining_qty, pnl)
                         guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
-                        send_telegram(f"[PAPER v3] *{symbol} TIMEOUT* PnL: {pnl:.2f} USDT")
+                        send_telegram(f"[PAPER v4] *{symbol} TIMEOUT* PnL: {pnl:.2f} USDT")
                     _full_cleanup(symbol)
                     continue
 
@@ -1870,20 +2119,37 @@ def _manage_paper_positions_v3(balance_total: float):
                         TRADE_ENTRIES[symbol]['sl_price'] = nuevo_sl
                         ALERTS_HISTORY[f"{symbol}_trail"] = nuevo_sl
                         TRAIL_COUNTS[symbol] = TRAIL_COUNTS.get(symbol, 0) + 1
-                        log.info("[PAPER v3] %s Trail→%.4f", symbol, nuevo_sl)
+                        log.info("[PAPER v4] %s Trail→%.4f", symbol, nuevo_sl)
 
         except Exception as e:
-            log.error("[PAPER v3] Error gestionando %s: %s", symbol, e)
+            log.error("[PAPER v4] Error gestionando %s: %s", symbol, e)
 
-def _cerrar_pos_real(symbol: str, side: str, qty: float):
-    """Cierra una posición real en Bitget vía API."""
+def _cerrar_pos_real(symbol: str, side: str, qty: float) -> bool:
+    """Cierra una posición real en Bitget vía API.
+    Retorna True si se cerró (o ya estaba cerrada), False si falló por otra razón."""
     close_side = 'sell' if side == 'long' else 'buy'
-    exchange.create_order(symbol, 'market', close_side, qty, params={
-        'marginCoin': 'USDT', 'marginMode': 'isolated', 'tradeSide': 'close',
-    })
+    try:
+        exchange.create_order(symbol, 'market', close_side, qty, params={
+            'marginCoin': 'USDT', 'marginMode': 'isolated', 'tradeSide': 'close',
+        })
+        return True
+    except ccxt.ExchangeError as e:
+        err_str = str(e)
+        # 22002: No position to close — posición ya cerrada por exchange (TP/LIQ) o manualmente
+        if '22002' in err_str or 'No position to close' in err_str:
+            log.warning("[REAL] %s: Posición ya cerrada en exchange (22002) — limpiando local", symbol)
+            return True  # La posición ya no existe → tratar como éxito
+        log.error("[REAL] %s: ExchangeError cerrando: %s", symbol, e)
+        return False
+    except ccxt.NetworkError as e:
+        log.error("[REAL] %s: NetworkError cerrando: %s", symbol, e)
+        return False
+    except Exception as e:
+        log.error("[REAL] %s: Error inesperado cerrando: %s", symbol, e)
+        return False
 
 def manage_escudo_pro_v3(balance_total: float = 0.0):
-    """Versión v3 de gestión de posiciones (real + paper)."""
+    """Versión v4 de gestión de posiciones (real + paper)."""
     if PAPER_TRADE:
         _manage_paper_positions_v3(balance_total)
         return
@@ -1913,28 +2179,29 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
 
             profit_pct = (mark - entry_price) / entry_price if side == 'long' else (entry_price - mark) / entry_price
 
-            # --- F10: Validación D1 estructural ---
-            try:
-                ohlcv_d1 = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=30)
-                if len(ohlcv_d1) >= 10:
-                    df_d1 = pd.DataFrame(ohlcv_d1, columns=['ts','o','h','l','c','v'])
-                    if not validar_estructura_d1(df_d1, entry_price, side):
-                        log.info("[REAL] %s: D1 invalida estructura - cerrando", symbol)
-                        remaining_qty = entry.get('remaining_qty', entry['quantity'])
-                        pnl = (mark - entry_price) * remaining_qty if side == 'long' else (entry_price - mark) * remaining_qty
-                        _cerrar_pos_real(symbol, side, remaining_qty)
-                        guardar_trade_csv(entry, mark, pnl, 0, pnl, 'D1_INVALID', 'd1_estructura')
-                        _full_cleanup(symbol, cooldown=7200)
-                        send_telegram(f"[REAL] *{symbol}* Cerrada por D1 estructura")
-                        continue
-            except Exception:
-                pass
+            # --- F10: Validación H4 estructural (v4: cada 4h en cierre de vela) ---
+            if debe_validar_h4():
+                try:
+                    ohlcv_4h_val = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=30)
+                    if len(ohlcv_4h_val) >= 10:
+                        df_4h_val = pd.DataFrame(ohlcv_4h_val, columns=['ts','o','h','l','c','v'])
+                        if not validar_estructura_d1(df_4h_val, entry_price, side):
+                            log.info("[REAL v4] %s: H4 invalida estructura - cerrando", symbol)
+                            remaining_qty = entry.get('remaining_qty', entry['quantity'])
+                            pnl = (mark - entry_price) * remaining_qty if side == 'long' else (entry_price - mark) * remaining_qty
+                            _cerrar_pos_real(symbol, side, remaining_qty)
+                            guardar_trade_csv(entry, mark, pnl, 0, pnl, 'D1_INVALID', 'd1_estructura')
+                            _full_cleanup(symbol, cooldown=7200)
+                            send_telegram(f"[REAL v4] *{symbol}* Cerrada por D1 estructura")
+                            continue
+                except Exception:
+                    pass
 
-            # --- F4: Evaluar cobertura asimétrica ---
+            # --- F4: Evaluar cobertura asimétrica v4 ---
             if LOBO_HEDGE_ENABLED and symbol not in HEDGE_ENTRIES:
-                hedge_params = evaluar_cobertura(entry, mark)
+                hedge_params = evaluar_cobertura_v4(entry, mark)
                 if hedge_params:
-                    log.info("[REAL] %s: Activando cobertura %s lev=%.0fx",
+                    log.info("[REAL v4] %s: Activando cobertura %s lev=%.0fx",
                              symbol, hedge_params['side'], hedge_params['leverage'])
                     HEDGE_ENTRIES[symbol] = hedge_params
                     # Abrir cobertura real
@@ -1952,7 +2219,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                         })
                     except Exception as e:
                         log.error("Error abriendo cobertura %s: %s", symbol, e)
-                    send_telegram(f"[REAL] *{symbol}* Cobertura {hedge_params['side']} activada")
+                    send_telegram(f"[REAL v4] *{symbol}* Cobertura {hedge_params['side']} activada")
 
             # --- Gestionar cobertura activa ---
             hedge = HEDGE_ENTRIES.get(symbol)
@@ -2022,29 +2289,35 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
             if tp2_hit and tp1_taken and not tp2_taken and remaining_qty > 0:
                 tp2_qty = min(original_qty * LOBO_TP2_SIZE, remaining_qty)
                 pnl = _pnl_parcial(tp2_qty, tp2_price)
-                entry['remaining_qty'] = remaining_qty - tp2_qty
-                ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
-                log.info("[REAL] %s TP2 PARCIAL(30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
-                         symbol, entry_price, tp2_price, tp2_qty, pnl, entry['remaining_qty'])
-                _cerrar_pos_real(symbol, side, tp2_qty)
-                guardar_trade_csv(entry, tp2_price, pnl, 0, pnl, 'TP2_PARTIAL', 'tp2')
-                send_telegram(f"[REAL] *{symbol} TP2 (30%)* PnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
-                _save_trade_entries()
+                cerrado = _cerrar_pos_real(symbol, side, tp2_qty)
+                if cerrado:
+                    entry['remaining_qty'] = remaining_qty - tp2_qty
+                    ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
+                    log.info("[REAL] %s TP2 PARCIAL(30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                             symbol, entry_price, tp2_price, tp2_qty, pnl, entry['remaining_qty'])
+                    guardar_trade_csv(entry, tp2_price, pnl, 0, pnl, 'TP2_PARTIAL', 'tp2')
+                    send_telegram(f"[REAL] *{symbol} TP2 (30%)* PnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
+                    _save_trade_entries()
+                else:
+                    log.warning("[REAL] %s TP2 parcial falló (reintentará en próximo ciclo)", symbol)
 
             # ── TP1: parcial 40% + BE (solo si no se ejecutó antes) ──
             if tp1_hit and not tp1_taken and remaining_qty > 0:
                 tp1_qty = min(original_qty * LOBO_TP1_SIZE, entry.get('remaining_qty', remaining_qty))
                 pnl = _pnl_parcial(tp1_qty, tp1_price)
-                entry['remaining_qty'] = entry.get('remaining_qty', remaining_qty) - tp1_qty
-                ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
-                ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
-                entry['sl_price'] = entry_price  # Break Even
-                log.info("[REAL] %s TP1 PARCIAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
-                         symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
-                _cerrar_pos_real(symbol, side, tp1_qty)
-                guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
-                send_telegram(f"[REAL] *{symbol} TP1 (40%) + BE* PnL: {pnl:.2f} USDT | SL→Entry")
-                _save_trade_entries()
+                cerrado = _cerrar_pos_real(symbol, side, tp1_qty)
+                if cerrado:
+                    entry['remaining_qty'] = entry.get('remaining_qty', remaining_qty) - tp1_qty
+                    ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
+                    ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
+                    entry['sl_price'] = entry_price  # Break Even
+                    log.info("[REAL] %s TP1 PARCIAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                             symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
+                    guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
+                    send_telegram(f"[REAL] *{symbol} TP1 (40%) + BE* PnL: {pnl:.2f} USDT | SL→Entry")
+                    _save_trade_entries()
+                else:
+                    log.warning("[REAL] %s TP1 parcial falló (reintentará en próximo ciclo)", symbol)
 
             # --- Timeout (cierra remanente si perdiendo) ---
             entry_time = entry.get('entry_time')
@@ -2094,7 +2367,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
             log.error("[REAL] Error gestionando %s: %s", symbol, e)
 
 # =====================================================================
-# 12. BUCLE PRINCIPAL v3
+# 12. BUCLE PRINCIPAL v4
 # =====================================================================
 def main():
     global LAST_KNOWN_INDICATORS, ALERTS_HISTORY, PEAK_PRICES, COOLDOWNS
@@ -2102,7 +2375,7 @@ def main():
     global HEDGE_ENTRIES, ADVERSE_PRICES, PRICE_PATHS, exchange
 
     log.info("=" * 60)
-    log.info("LOBOBOT v3 — BITLOBO FORMALIZADO (F1-F12) iniciando")
+    log.info("LOBOBOT v4 — BITLOBO FORMALIZADO (F1-F12 + D2-D9) iniciando")
     log.info("=" * 60)
 
     if exchange is None:
@@ -2134,7 +2407,7 @@ def main():
                 pnl_total = sum(float(r['net_pnl']) for r in today_trades)
                 wr = len(tps) / max(total, 1) * 100
                 msg = (
-                    f"*REPORTE DIARIO v3* ({now.strftime('%d/%m')})\n"
+                    f"*REPORTE DIARIO v4* ({now.strftime('%d/%m')})\n"
                     f"Ops: {total} | TP:{len(tps)} SL:{len(sls)}\n"
                     f"WR: {wr:.0f}% | PnL: {pnl_total:+.2f} USDT"
                 )
@@ -2153,9 +2426,9 @@ def main():
                     balance_total = 0.0
 
             capital_fut = capital_disponible_futuros(balance_total)
-            log.info("Balance total=%.2f | Futuros(80%%)=%.2f | Liquidez(15%%)=%.2f | Spot(5%%)=%.2f",
+            log.info("Balance total=%.2f | Futuros(30%%)=%.2f | Liquidez(50%%)=%.2f",
                      balance_total, capital_fut,
-                     capital_liquidez(balance_total), capital_spot(balance_total))
+                     capital_liquidez(balance_total))
 
             # ── Gestión de posiciones activas ──
             manage_escudo_pro_v3(balance_total)
@@ -2211,48 +2484,55 @@ def main():
                     del COOLDOWNS[symbol]
 
                 try:
-                    ohlcv_4h, ohlcv_d1 = ohlcv_data.get(symbol, (None, None))
-                    if not ohlcv_4h or not ohlcv_d1:
+                    ohlcv_1h, ohlcv_4h, ohlcv_15m = ohlcv_data.get(symbol, (None, None, None))
+                    if not ohlcv_1h or not ohlcv_4h:
                         continue
-                    if len(ohlcv_4h) < 50 or len(ohlcv_d1) < 10:
-                        continue
-
-                    df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_d1 = pd.DataFrame(ohlcv_d1, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-                    # F7: Solo evaluar al cierre de vela H4
-                    if not es_nueva_vela_h4(df_4h):
+                    if len(ohlcv_1h) < 50 or len(ohlcv_4h) < 10:
                         continue
 
-                    precio_actual = float(df_4h['close'].iloc[-1])
-                    atr_val = float(_atr(df_4h, LOBO_ATR_PERIOD).iloc[-1])
+                    df_1h  = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_4h  = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']) if ohlcv_15m else None
+
+                    # F7: Solo evaluar al cierre de vela H1
+                    if not es_nueva_vela_1h(df_1h):
+                        continue
+
+                    precio_actual = float(df_1h['close'].iloc[-1])
+                    atr_val = float(_atr(df_1h, LOBO_ATR_PERIOD).iloc[-1])
                     if atr_val == 0 or pd.isna(atr_val):
                         continue
 
-                    # Evaluar señal BITLOBO v3
-                    senal_long = evaluar_senal_bitlobo_v3(
-                        symbol, df_4h, df_d1, precio_actual, atr_val, balance_total, es_long=True
+                    # v4: Ventana altcoins (BTC.D + Elliott)
+                    ventana_altcoins = check_btcd_elliott_ventana_altcoins()
+
+                    # Evaluar señal BITLOBO v4
+                    # Evaluar señal BITLOBO v5
+                    # Mapeo: df_1h→df_h4 (principal), df_4h→df_d1 (confirmación), df_15m→df_1h (micro)
+                    senal_long = evaluar_senal_bitlobo_v4(
+                        symbol, df_1h, df_4h, precio_actual, atr_val, balance_total,
+                        es_long=True, df_1h=df_15m, ventana_altcoins=ventana_altcoins,
                     )
 
-                    sweeps = detectar_sweep(df_4h)
+                    sweeps = detectar_sweep(df_1h)
                     hay_sweep_short = any(s['tipo'] == 'sweep_alcista_short' for s in sweeps)
 
-                    # CORREGIDO: Relajar Short — también con RSI>65 + FVG bajista
-                    fvgs = detectar_fvg(df_4h)
+                    fvgs = detectar_fvg(df_1h)
                     hay_fvg_bajista = any(f['tipo'] == 'bajista' for f in fvgs)
-                    rsi_series = _rsi(df_4h['close'], LOBO_RSI_PERIOD)
+                    rsi_series = _rsi(df_1h['close'], LOBO_RSI_PERIOD)
                     try:
                         rsi_val_actual = float(rsi_series.iloc[-1])
                     except (IndexError, ValueError):
                         rsi_val_actual = 50.0
                     hay_rsi_sobrecompra = not pd.isna(rsi_val_actual) and rsi_val_actual > LOBO_RSI_OVERBOUGHT
 
-                    condicion_short = hay_sweep_short or (hay_rsi_sobrecompra and hay_fvg_bajista)
+                    condicion_short = hay_sweep_short or hay_rsi_sobrecompra  # v5: relax (sin FVG requerido)
 
                     senal_short = None
                     if condicion_short:
-                        senal_short = evaluar_senal_bitlobo_v3(
-                            symbol, df_4h, df_d1, precio_actual, atr_val, balance_total, es_long=False
+                        senal_short = evaluar_senal_bitlobo_v4(
+                            symbol, df_1h, df_4h, precio_actual, atr_val, balance_total,
+                            es_long=False, df_1h=df_15m, ventana_altcoins=ventana_altcoins,
                         )
 
                     senal = senal_long or senal_short
@@ -2316,9 +2596,9 @@ def main():
                     }
 
                     if PAPER_TRADE:
-                        log.info("[PAPER v3] %s %s qty=%.6f lev=%.0f", side_name, symbol, qty, lev_calc)
+                        log.info("[PAPER v4] %s %s qty=%.6f lev=%.0f", side_name, symbol, qty, lev_calc)
                         send_telegram(
-                            f"[PAPER v3] *{symbol} {side_name}* (BITLOBO v3)\n"
+                            f"[PAPER v4] *{symbol} {side_name}* (BITLOBO v4)\n"
                             f"Entry: `{exchange.price_to_precision(symbol, precio_actual)}`\n"
                             f"SL/Liq: `{exchange.price_to_precision(symbol, sl_price)}` / `{exchange.price_to_precision(symbol, liq_price)}`\n"
                             f"Lev: {lev_calc:.0f}x\n"
@@ -2331,6 +2611,7 @@ def main():
                         _save_trade_entries()
                         busy_symbols.add(symbol)
                         SESSION_ACTIVE_SYMBOLS.add(symbol)
+                        COOLDOWNS[symbol] = time.time() + 14400  # v5: cooldown 4h post-entrada
                         guardar_signal_log(symbol, side_name, precio_actual, score, max_score,
                                            senal['detalles'], sl_price, liq_price, lev_calc,
                                            tp1_price, tp2_price, tp3_price, rr, taken=True)
@@ -2346,8 +2627,10 @@ def main():
                         'marginCoin': 'USDT',
                         'marginMode': 'isolated',
                         'tradeSide': 'open',
-                        'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, tp1_price)),
-                        # CORREGIDO: NO presetStopLossPrice — el SL es la liquidación forzosa
+                        # v4 OP1: TP3 como safety en exchange (cierra remanente si bot cae)
+                        # TP1 y TP2 se gestionan internamente con parciales
+                        'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, tp3_price)),
+                        # NO presetStopLossPrice — el SL es la liquidación forzosa
                         # calculada por calcular_apalancamiento_optimo para calzar con la mecha
                     }
                     try:
@@ -2357,7 +2640,7 @@ def main():
                         continue
 
                     send_telegram(
-                        f"*{symbol} {side_name}* (BITLOBO v3)\n"
+                        f"*{symbol} {side_name}* (BITLOBO v4)\n"
                         f"Entry: `{exchange.price_to_precision(symbol, precio_actual)}`\n"
                         f"Lev: {lev_calc:.0f}x | Liq: `{exchange.price_to_precision(symbol, liq_price)}`\n"
                         f"Score: {score}/{max_score}"
@@ -2366,6 +2649,7 @@ def main():
                     _save_trade_entries()
                     busy_symbols.add(symbol)
                     SESSION_ACTIVE_SYMBOLS.add(symbol)
+                    COOLDOWNS[symbol] = time.time() + 14400  # v5: cooldown 4h post-entrada
                     guardar_signal_log(symbol, side_name, precio_actual, score, max_score,
                                        senal['detalles'], sl_price, liq_price, lev_calc,
                                        tp1_price, tp2_price, tp3_price, rr, taken=True)
@@ -2377,14 +2661,14 @@ def main():
             time.sleep(60)
 
         except Exception as e:
-            log.error("Error en ciclo principal v3: %s", e, exc_info=True)
+            log.error("Error en ciclo principal v4: %s", e, exc_info=True)
             time.sleep(60)
 
 # =====================================================================
 # 13. ENTRY POINT
 # =====================================================================
 if __name__ == "__main__":
-    log.info("LOBOBOT v3 iniciando en modo standalone...")
+    log.info("LOBOBOT v4 iniciando en modo standalone...")
     if exchange is None:
         init_exchange()
     main()
