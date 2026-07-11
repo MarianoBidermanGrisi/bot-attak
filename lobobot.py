@@ -2160,6 +2160,16 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
 
     capital_fut = capital_disponible_futuros(balance_total)
 
+    # v5 HYBRID: Fetch posiciones reales una vez por ciclo (detecta TP1/TP3 del exchange)
+    pos_by_symbol = {}
+    try:
+        all_positions = exchange.fetch_positions()
+        for p in all_positions:
+            if float(p.get('contracts', 0)) > 0:
+                pos_by_symbol[p['symbol']] = p
+    except Exception as e:
+        log.warning("[REAL] Error fetching positions: %s", e)
+
     for symbol in list(TRADE_ENTRIES.keys()):
         try:
             entry = TRADE_ENTRIES[symbol]
@@ -2178,6 +2188,40 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 continue
 
             profit_pct = (mark - entry_price) / entry_price if side == 'long' else (entry_price - mark) / entry_price
+
+            # v5 HYBRID: Detectar fills del exchange (TP1 plan order / TP3 safety)
+            original_qty = entry.get('original_qty', entry['quantity'])
+            remaining_qty = entry.get('remaining_qty', entry['quantity'])
+            tp1_taken = ALERTS_HISTORY.get(f"{symbol}_tp1_sold", False)
+            tp2_taken = ALERTS_HISTORY.get(f"{symbol}_tp2_sold", False)
+
+            pos_data = pos_by_symbol.get(symbol)
+            exchange_qty = float(pos_data['contracts']) if pos_data else remaining_qty
+
+            # Si la posición ya no existe en exchange pero la tenemos local → cerrada por exchange
+            if pos_data is None and remaining_qty > 0:
+                pnl = (mark - entry_price) * remaining_qty if side == 'long' else (entry_price - mark) * remaining_qty
+                log.info("[REAL] %s Posición cerrada en exchange (TP3/LIQ). PnL≈%.2f", symbol, pnl)
+                guardar_trade_csv(entry, mark, pnl, 0, pnl, 'EXCHANGE_CLOSE', 'exchange')
+                _full_cleanup(symbol)
+                continue
+
+            # Detectar TP1 fill del plan order en exchange
+            if entry.get('tp1_plan') and not tp1_taken and pos_data:
+                expected_after_tp1 = original_qty * (1.0 - LOBO_TP1_SIZE)
+                if exchange_qty <= expected_after_tp1 * 1.05:
+                    tp1_taken = True
+                    entry['remaining_qty'] = exchange_qty
+                    remaining_qty = exchange_qty
+                    ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
+                    ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
+                    entry['sl_price'] = entry_price  # Break Even
+                    tp1_pnl = (tp1_price - entry_price) * original_qty * LOBO_TP1_SIZE if side == 'long' \
+                        else (entry_price - tp1_price) * original_qty * LOBO_TP1_SIZE
+                    log.info("[REAL] %s TP1 EXCHANGE fill → BE. Remaining=%.4f PnL≈%.2f",
+                             symbol, exchange_qty, tp1_pnl)
+                    guardar_trade_csv(entry, tp1_price, tp1_pnl, 0, tp1_pnl, 'TP1_EXCHANGE', 'tp1_exchange')
+                    _save_trade_entries()
 
             # --- F10: Validación H4 estructural (v4: cada 4h en cierre de vela) ---
             if debe_validar_h4():
@@ -2239,13 +2283,9 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 elif hedge_side == 'long' and mark <= hedge_sl:
                     HEDGE_ENTRIES.pop(symbol, None)
 
-            # --- TP PARCIAL + BE: SL → LIQ → TP3 → TP2(30%) → TP1(40%+BE) ---
+            # --- TP PARCIAL + BE: SL → LIQ → TP3 → TP2(30%) → TP1(exchange+BE) ---
             long_side = side == 'long'
             short_side = side == 'short'
-            original_qty = entry.get('original_qty', entry['quantity'])
-            remaining_qty = entry.get('remaining_qty', entry['quantity'])
-            tp1_taken = ALERTS_HISTORY.get(f"{symbol}_tp1_sold", False)
-            tp2_taken = ALERTS_HISTORY.get(f"{symbol}_tp2_sold", False)
 
             sl_hit = (long_side and mark <= sl_price) or (short_side and mark >= sl_price)
             liq_hit = (long_side and mark <= liq_price) or (short_side and mark >= liq_price)
@@ -2301,7 +2341,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 else:
                     log.warning("[REAL] %s TP2 parcial falló (reintentará en próximo ciclo)", symbol)
 
-            # ── TP1: parcial 40% + BE (solo si no se ejecutó antes) ──
+            # ── TP1 LOCAL: fallback solo si plan order no ejecutó ──
             if tp1_hit and not tp1_taken and remaining_qty > 0:
                 tp1_qty = min(original_qty * LOBO_TP1_SIZE, entry.get('remaining_qty', remaining_qty))
                 pnl = _pnl_parcial(tp1_qty, tp1_price)
@@ -2623,15 +2663,13 @@ def main():
                     except Exception as e:
                         log.warning("Error set_leverage %s %.0f: %s", symbol, lev_calc, e)
 
+                    # v5 HYBRID: TP3 como safety en exchange (cierra remanente si bot cae)
                     params = {
                         'marginCoin': 'USDT',
                         'marginMode': 'isolated',
                         'tradeSide': 'open',
-                        # v4 OP1: TP3 como safety en exchange (cierra remanente si bot cae)
-                        # TP1 y TP2 se gestionan internamente con parciales
                         'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, tp3_price)),
                         # NO presetStopLossPrice — el SL es la liquidación forzosa
-                        # calculada por calcular_apalancamiento_optimo para calzar con la mecha
                     }
                     try:
                         exchange.create_order(symbol, 'market', 'buy' if es_long else 'sell', qty, params=params)
@@ -2639,12 +2677,34 @@ def main():
                         log.error("Error orden %s %s: %s", side_name, symbol, e)
                         continue
 
+                    # v5 HYBRID: TP1 como plan order reduce-only en Bitget
+                    tp1_plan_ok = False
+                    try:
+                        close_side = 'sell' if es_long else 'buy'
+                        tp1_qty_plan = qty * LOBO_TP1_SIZE
+                        tp1_plan_params = {
+                            'tdOrderType': 'plan',
+                            'triggerPrice': str(exchange.price_to_precision(symbol, tp1_price)),
+                            'triggerType': 'MARKET_PRICE',
+                            'reduceOnly': True,
+                            'marginCoin': 'USDT',
+                            'size': str(exchange.amount_to_precision(symbol, tp1_qty_plan)),
+                        }
+                        exchange.create_order(symbol, 'market', close_side, tp1_qty_plan, params=tp1_plan_params)
+                        tp1_plan_ok = True
+                        log.info("[REAL] %s TP1 plan order @ %s qty=%.4f (40%%)", symbol, tp1_price, tp1_qty_plan)
+                    except Exception as e:
+                        log.warning("[REAL] %s Error TP1 plan order: %s (fallback local)", symbol, e)
+
                     send_telegram(
-                        f"*{symbol} {side_name}* (BITLOBO v4)\n"
+                        f"*{symbol} {side_name}* (BITLOBO v5)\n"
                         f"Entry: `{exchange.price_to_precision(symbol, precio_actual)}`\n"
                         f"Lev: {lev_calc:.0f}x | Liq: `{exchange.price_to_precision(symbol, liq_price)}`\n"
+                        f"TP1: `{exchange.price_to_precision(symbol, tp1_price)}` [{'EXCHANGE' if tp1_plan_ok else 'LOCAL'}]\n"
+                        f"TP3: `{exchange.price_to_precision(symbol, tp3_price)}` [EXCHANGE-SAFETY]\n"
                         f"Score: {score}/{max_score}"
                     )
+                    entry_record['tp1_plan'] = tp1_plan_ok
                     TRADE_ENTRIES[symbol] = entry_record
                     _save_trade_entries()
                     busy_symbols.add(symbol)
