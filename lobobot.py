@@ -195,21 +195,19 @@ LOBO_TP2_ATR_MULT        = float(os.environ.get('LOBO_TP2_ATR_MULT', '2.5'))
 LOBO_TP3_ATR_MULT        = float(os.environ.get('LOBO_TP3_ATR_MULT', '4.0'))
 LOBO_TRAIL_ATR_MULT      = float(os.environ.get('LOBO_TRAIL_ATR_MULT', '1.0'))
 
-# --- CIERRES PARCIALES 3 NIVELES (extraído de bot_v6) ---
+# --- CIERRES PARCIALES 3 NIVELES (PnL-based) ---
 PARTIAL_ENABLED    = True
-TP1_CLOSE_PCT      = LOBO_TP1_SIZE   # 40% en TP1
-TP1_RATIO          = 0.40            # TP1 al 40% del recorrido al TP final
-TP2_CLOSE_PCT      = LOBO_TP2_SIZE   # 30% en TP2
-TP2_RATIO          = 0.70            # TP2 al 70% del recorrido al TP final
-RR_RATIO           = float(os.environ.get('LOBO_RR_RATIO', '2.5'))  # R:R ratio
+TP1_CLOSE_PCT      = LOBO_TP1_SIZE   # 40% de la qty en TP1
+TP2_CLOSE_PCT      = LOBO_TP2_SIZE   # 30% de la qty en TP2
+# TP3 cierra el 30% restante (trailing o safety net)
 MAX_SL_PCT         = float(os.environ.get('LOBO_MAX_SL_PCT', '0.030'))  # 3% max SL
 SL_LOOKBACK        = int(os.environ.get('LOBO_SL_LOOKBACK', '20'))  # velas para SL
 
-# Fallback % sobre margen (cuando no hay FVG/OB)
-# TP1: 40% ganancia margen | TP2: 70% | TP3: 100%
-LOBO_TP_TARGET1_PCT      = float(os.environ.get('LOBO_TP_TARGET1_PCT', '0.40'))
-LOBO_TP_TARGET2_PCT      = float(os.environ.get('LOBO_TP_TARGET2_PCT', '0.70'))
-LOBO_TP_TARGET3_PCT      = float(os.environ.get('LOBO_TP_TARGET3_PCT', '1.00'))
+# --- TARGETS DE PNL FIJOS (sobre margin, sin importar leverage) ---
+TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.25'))  # 25% PnL en TP1
+TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.50'))  # 50% PnL en TP2
+TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '1.00'))  # 100% PnL safety net
+RR_RATIO           = float(os.environ.get('LOBO_RR_RATIO', '2.5'))  # Solo para evaluación R:R mínimo
 
 # F9: BE trigger ahora es "alcanzar TP1" (en vez de % fijo)
 # Se usa TP1 como trigger, no un porcentaje independiente
@@ -1096,62 +1094,53 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
                           leverage: float = LEVERAGE,
                           sl_price: float = 0.0) -> tuple[float, float, float, float, float]:
     """
-    F12 REEMPLAZADO: Calcula TP1/TP2/Full basado en distancia SL y R:R ratio.
+    F12 PnL-BASED: Calcula TP1/TP2/TP3 basado en targets fijos de PnL sobre margin.
 
-    Lógica (extraída de bot_v6):
-      1. TP_final = entry ± (distancia_SL * RR_RATIO)
-      2. TP1 = entry + (TP_final - entry) * TP1_RATIO   (40% del recorrido)
-      3. TP2 = entry + (TP_final - entry) * TP2_RATIO   (70% del recorrido)
-      4. Full TP = TP_final (100%)
+    Fórmula: TP_price = entry ± (entry × target_pnl / leverage)
+    - TP1: 25% PnL → cierra 40% de la qty
+    - TP2: 50% PnL → cierra 30% de la qty
+    - TP3: 100% PnL → safety net, cierra el 30% restante
 
-    Retorna (tp1_price, tp2_price, tp3_price, rr_ratio, step).
-    tp3_price = TP final (full close del remanente).
+    Retorna (tp1_price, tp2_price, tp3_price, rr_ratio, dist_sl).
     """
     lev = leverage if leverage > 0 else LEVERAGE
 
-    # Calcular distancia SL real
+    # Calcular distancia SL real (para R:R mínimo y dist_sl de retorno)
     if sl_price > 0:
         dist_sl = abs(precio_actual - sl_price)
     else:
-        # Fallback: usar ATR * SL_ATR como distancia
         dist_sl = atr_val * LOBO_SL_ATR
 
-    # TP final = entry ± (distancia_SL * RR_RATIO)
-    if es_long:
-        tp_final = precio_actual + dist_sl * RR_RATIO
-    else:
-        tp_final = precio_actual - dist_sl * RR_RATIO
+    # --- TPs basados en PnL fijo sobre margin ---
+    # PnL = (TP_price - entry) × qty = (TP_price - entry) × (margin × lev / entry)
+    # Para PnL = target% × margin:
+    #   target% × margin = (TP_price - entry) × (margin × lev / entry)
+    #   TP_price - entry = (target% × entry) / lev
+    sign = 1 if es_long else -1
 
-    # TP1 y TP2 como porcentaje del recorrido al TP final
-    if es_long:
-        tp1 = precio_actual + (tp_final - precio_actual) * TP1_RATIO
-        tp2 = precio_actual + (tp_final - precio_actual) * TP2_RATIO
-    else:
-        tp1 = precio_actual - (precio_actual - tp_final) * TP1_RATIO
-        tp2 = precio_actual - (precio_actual - tp_final) * TP2_RATIO
+    tp1_dist = (precio_actual * TP1_PNL_TARGET) / lev
+    tp2_dist = (precio_actual * TP2_PNL_TARGET) / lev
+    tp3_dist = (precio_actual * TP3_PNL_TARGET) / lev
 
-    # Garantizar mínimo sobre ATR para que la posición no sea ridículamente pequeña
+    tp1 = precio_actual + sign * tp1_dist
+    tp2 = precio_actual + sign * tp2_dist
+    tp3 = precio_actual + sign * tp3_dist
+
+    # Garantizar mínimo sobre ATR para mercados de muy bajo ruido
     min_dist = atr_val * 0.3
     if es_long:
-        if tp1 <= precio_actual + min_dist:
-            tp1 = precio_actual + min_dist
-        if tp2 <= tp1 + min_dist * 0.5:
-            tp2 = tp1 + min_dist * 0.5
-        if tp_final <= tp2 + min_dist:
-            tp_final = tp2 + min_dist
+        tp1 = max(tp1, precio_actual + min_dist)
+        tp2 = max(tp2, tp1 + min_dist * 0.5)
+        tp3 = max(tp3, tp2 + min_dist)
     else:
-        if tp1 >= precio_actual - min_dist:
-            tp1 = precio_actual - min_dist
-        if tp2 >= tp1 - min_dist * 0.5:
-            tp2 = tp1 - min_dist * 0.5
-        if tp_final >= tp2 - min_dist:
-            tp_final = tp2 - min_dist
+        tp1 = min(tp1, precio_actual - min_dist)
+        tp2 = min(tp2, tp1 - min_dist * 0.5)
+        tp3 = min(tp3, tp2 - min_dist)
 
-    # R:R basado en TP1
-    beneficio = abs(tp1 - precio_actual)
-    rr = beneficio / dist_sl if dist_sl > 0 else 0
+    # R:R evaluación (basado en TP1 vs SL)
+    rr = tp1_dist / dist_sl if dist_sl > 0 else 0
 
-    return tp1, tp2, tp_final, rr, dist_sl
+    return tp1, tp2, tp3, rr, dist_sl
 
 # ================================================================
 # F7: Timing de entrada (cierre de vela H1)
@@ -1710,7 +1699,7 @@ def evaluar_senal_bitlobo_v4(
         if liq_price <= sl_price:
             liq_price = liq_max
 
-    # --- F12: TPs en zonas reales (RR-based) ---
+    # --- F12: TPs PnL-based (targets fijos sobre margin) ---
     tp1_price, tp2_price, tp3_price, rr, dist_sl = calcular_tps_en_zonas(
         precio_actual, atr_val, fvg_en_zona, ob_en_zona, es_long,
         leverage=apalancamiento, sl_price=sl_price,
