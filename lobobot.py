@@ -147,9 +147,9 @@ TELEGRAM_TOKEN  = os.environ.get('TELEGRAM_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 TOP_N             = int(os.environ.get('LOBO_TOP_N',          '100'))
-TIMEFRAME_1H      = os.environ.get('LOBO_TIMEFRAME_1H',     '1h')   # ← Principal (señal)
-TIMEFRAME_4H      = os.environ.get('LOBO_TIMEFRAME_4H',     '4h')   # ← Confirmación
-TIMEFRAME_15M     = os.environ.get('LOBO_TIMEFRAME_15M',    '15m')  # ← Microfractalidad
+TIMEFRAME_PRINCIPAL  = os.environ.get('LOBO_TIMEFRAME_PRINCIPAL',  '15m')  # ← Principal (señal)
+TIMEFRAME_CONFIRMACION = os.environ.get('LOBO_TIMEFRAME_CONFIRMACION', '4h')  # ← Confirmación
+TIMEFRAME_MICRO    = os.environ.get('LOBO_TIMEFRAME_MICRO',     '5m')   # ← Microfractalidad
 
 # === F1: Gestión de Capital en 3 Vectores ===
 LOBO_LIQUIDEZ_PCT    = float(os.environ.get('LOBO_LIQUIDEZ_PCT', '20')) / 100
@@ -789,7 +789,7 @@ def validar_mecha_absorcion_en_zona(
         return False, 'pocos_datos'
     
     # Buscar en las últimas 3 velas (incluye la recién cerrada en -1)
-    # El bot solo llama a evaluar_senal_bitlobo_v4 cuando es_nueva_vela_1h es True,
+    # El bot solo llama a evaluar_senal_bitlobo_v4 cuando es_nueva_vela_principal es True,
     # por lo que iloc[-1] es una vela cerrada.
     for idx in range(-1, -4, -1):
         try:
@@ -1145,15 +1145,15 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
 # ================================================================
 # F7: Timing de entrada (cierre de vela H1)
 # ================================================================
-def es_nueva_vela_1h(df_1h: pd.DataFrame) -> bool:
-    """F7: True si la última vela H1 acaba de cerrar (< 5 minutos desde cierre)."""
-    if df_1h.empty:
+def es_nueva_vela_principal(df: pd.DataFrame) -> bool:
+    """F7: True si la última vela principal (15m) acaba de cerrar (< 5 minutos desde cierre)."""
+    if df.empty:
         return False
-    ultimo_ts = df_1h['timestamp'].iloc[-1]
+    ultimo_ts = df['timestamp'].iloc[-1]
     ahora = int(time.time() * 1000)
     diff_ms = ahora - ultimo_ts
-    # 1h = 3,600,000 ms + 5min buffer
-    return diff_ms < 3_900_000
+    # 15m = 900,000 ms + 5min buffer = 1,200,000 ms
+    return diff_ms < 1_200_000
 
 # =====================================================================
 # F3: Apalancamiento dinámico (liq price calza con la mecha)
@@ -1482,7 +1482,9 @@ def check_btcd_elliott_ventana_altcoins(df_btcd_4h: Optional[pd.DataFrame] = Non
     result['btcd_bajista'] = True
     if df_btcd_4h is not None and len(df_btcd_4h) >= LOBO_BTCD_ELLOTT_LOOKBACK:
         elliott = detectar_estructura_elliott_v3(df_btcd_4h)
-        if elliott.get('fase') == 'estructura_5_ondas' and elliott.get('direccion') == 'bajista':
+        # BUG-M1 FIX: detectar_estructura_elliott_v3 retorna 'ultimo_pivot', no 'direccion'
+        # ultimo_pivot='maximo' = BTC.D hizo techo = bajista = ventana altcoins
+        if elliott.get('fase') == 'estructura_5_ondas' and elliott.get('ultimo_pivot') == 'maximo':
             result['elliott_completo'] = True
     result['ventana_altcoins'] = True
     return result
@@ -1565,20 +1567,21 @@ def evaluar_senal_bitlobo_v4(
         detalles.append('R4:Short_ok')
 
     # --- R5: BTC.D con Elliott (D8) ---
-    if ventana_altcoins:
-        if not (ventana_altcoins.get('btcd_bajista', False) and 'BTC' not in symbol):
-            score += 1
-            detalles.append('R5:BTC.D_ok')
-        elif 'BTC' in symbol and ventana_altcoins.get('btcd_bajista', False):
+    # Lógica correcta: BTC.D bajando = capital fluye a altcoins = FAVORABLE
+    #                   BTC.D subiendo = capital fluye a BTC = bloquea altcoins
+    btcd_bajista = ventana_altcoins.get('btcd_bajista', False) if ventana_altcoins else False
+    if 'BTC' in symbol:
+        if not btcd_bajista:
             score += 1
             detalles.append('R5:BTC_fav')
         else:
-            detalles.append('R5:BTC.D_bloquea_alt')
+            detalles.append('R5:BTC.D_baja_neutro')
     else:
-        btcd_subiendo = check_dominancia_btc_long()
-        if not (btcd_subiendo and 'BTC' not in symbol):
+        if btcd_bajista:
             score += 1
-            detalles.append(f'R5:BTC.D_{"sube" if btcd_subiendo else "baja"}')
+            detalles.append('R5:BTC.D_baja_alt_ok')
+        else:
+            detalles.append('R5:BTC.D_sube_bloquea_alt')
 
     # --- R6: FVG ---
     fvgs = detectar_fvg(df_h4)
@@ -1881,9 +1884,9 @@ def guardar_signal_log(symbol, side, price, score, max_score, detalles,
 # =====================================================================
 async def _fetch_symbol_async(exch, symbol):
     try:
-        ohlcv_1h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_1H,  limit=200)  # Principal
-        ohlcv_4h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_4H,  limit=100)  # Confirmación
-        ohlcv_15m = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_15M, limit=200)  # Micro
+        ohlcv_1h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_PRINCIPAL,  limit=200)  # Principal (15m)
+        ohlcv_4h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_CONFIRMACION,  limit=100)  # Confirmación (4h)
+        ohlcv_15m = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MICRO, limit=200)  # Micro (5m)
         return symbol, ohlcv_1h, ohlcv_4h, ohlcv_15m
     except Exception:
         return symbol, None, None, None
@@ -1985,8 +1988,157 @@ def _cancel_tp_plans(sym: str):
     except Exception as e:
         log.warning("Error cancelando TP plans %s: %s", sym, e)
 
+
+def _cancel_sl_plans(sym: str):
+    """Cancela todos los stop_loss_plan activos de un símbolo."""
+    if not exchange or PAPER_TRADE:
+        return
+    try:
+        market_info = exchange.market(sym)
+        params = {
+            'productType': 'usdt-futures',
+            'symbol': market_info['id'].lower(),
+            'planType': 'stop_loss_plan',
+        }
+        pending = exchange.privateMixGetV2MixOrderOrdersPending(params)
+        for plan in (pending.get('data', {}).get('entrustedList', []) or []):
+            if plan.get('planType') == 'stop_loss_plan':
+                exchange.privateMixPostV2MixOrderCancelTpslOrder({
+                    'symbol': market_info['id'].lower(),
+                    'productType': 'usdt-futures',
+                    'marginCoin': market_info['settleId'],
+                    'planType': 'stop_loss_plan',
+                    'orderId': plan['orderId'],
+                })
+                log.info("Cancelado SL plan %s orderId=%s", sym, plan['orderId'])
+    except Exception as e:
+        log.warning("Error cancelando SL plans %s: %s", sym, e)
+
+
+def _place_sl_plan(sym: str, sl_price: float, sl_qty: float, side: str,
+                   max_retries: int = 3) -> bool:
+    """Coloca una stop-loss plan order vía API directa (hedge mode).
+    
+    BUG #4 FIX: Reintentos con backoff exponencial (2s, 4s, 8s).
+    
+    Args:
+        sym: símbolo del par
+        sl_price: precio de stop-loss
+        sl_qty: cantidad a cerrar
+        side: 'long' o 'short' (lado de la posición, NO el lado de la orden)
+        max_retries: número máximo de reintentos (default 3)
+    
+    Returns:
+        True si se colocó correctamente
+    """
+    if not exchange or PAPER_TRADE:
+        return False
+    
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            market_info = exchange.market(sym)
+            # Para hedge mode: holdSide = lado de la posición que se cierra
+            params = {
+                'marginCoin': market_info['settleId'],
+                'productType': 'usdt-futures',
+                'symbol': market_info['id'].lower(),
+                'planType': 'stop_loss_plan',
+                'triggerPrice': exchange.price_to_precision(sym, sl_price),
+                'triggerType': 'mark_price',
+                'holdSide': side,  # 'long' o 'short'
+                'size': exchange.amount_to_precision(sym, sl_qty),
+            }
+            exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
+            log.info("SL plan placed %s @ %s qty=%s side=%s (attempt %d/%d)",
+                     sym, sl_price, sl_qty, side, attempt, max_retries)
+            return True
+        except Exception as e:
+            last_err = str(e)
+            if '43030' in last_err:
+                # Plan ya existe en exchange — tratar como éxito
+                log.info("SL plan ya existe %s @ %s (attempt %d)", sym, sl_price, attempt)
+                return True
+            if attempt < max_retries:
+                wait = 2 ** attempt  # backoff: 2s, 4s
+                log.warning("SL plan attempt %d/%d falló %s @ %s: %s — retry en %ds",
+                            attempt, max_retries, sym, sl_price, e, wait)
+                time.sleep(wait)
+            else:
+                log.error("SL plan FAILED tras %d intentos %s @ %s: %s",
+                          max_retries, sym, sl_price, e)
+    return False
+
+
+def _calc_pnl_parcial(side: str, entry_price: float, qty_sold: float, exit_px: float) -> float:
+    """Calcula PnL para una venta parcial (extraído de _pnl_parcial anidada)."""
+    if side == 'long':
+        return (exit_px - entry_price) * qty_sold
+    else:
+        return (entry_price - exit_px) * qty_sold
+
+
+def _update_sl_to_be(sym: str, entry: dict, new_sl_price: float, reason: str = 'BE') -> bool:
+    """Actualiza el SL de una posición en el exchange: cancela el viejo y coloca el nuevo.
+    
+    BUG-C1 FIX v2: Si el nuevo SL falla tras cancelar el viejo → CERRAR posición.
+    La ventana sin SL en exchange es solo la latencia entre API calls (< 1s).
+    
+    Args:
+        sym: símbolo
+        entry: dict de TRADE_ENTRIES[sym]
+        new_sl_price: nuevo precio de SL
+        reason: 'BE', 'TRAIL', etc.
+    
+    Returns:
+        True si se actualizó correctamente
+    """
+    if not exchange or PAPER_TRADE:
+        # En paper mode solo actualiza in-memory
+        entry['sl_price'] = new_sl_price
+        if reason == 'BE':
+            ALERTS_HISTORY[f"{sym}_be_price"] = new_sl_price
+        elif reason == 'TRAIL':
+            ALERTS_HISTORY[f"{sym}_trail"] = new_sl_price
+        log.info("[PAPER] %s SL→%.4f (%s)", sym, new_sl_price, reason)
+        return True
+
+    side = entry.get('side', 'long')
+    remaining_qty = float(entry.get('remaining_qty', entry.get('quantity', 0)))
+    
+    if remaining_qty <= 0:
+        return False
+
+    # 1) Cancelar SL viejo PRIMERO (Bitget solo permite 1 stop_loss_plan por símbolo)
+    _cancel_sl_plans(sym)
+    
+    # 2) Colocar NUEVO SL plan
+    placed = _place_sl_plan(sym, new_sl_price, remaining_qty, side)
+    
+    if not placed:
+        # CRITICAL: Sin SL en exchange → cerrar posición para evitar liquidación
+        log.error("[REAL] %s SL UPDATE FALLÓ (%s→%.4f) — cerrando posición (sin SL en exchange)",
+                  sym, reason, new_sl_price)
+        _cerrar_pos_real(sym, side, remaining_qty)
+        _full_cleanup(sym)
+        send_telegram(
+            f"❌ *{sym} CERRADA* ({reason} falló)\n"
+            f"SL→{new_sl_price} falló — posición cerrada preventivamente"
+        )
+        return False
+    
+    # 3) Actualizar in-memory solo tras confirmar que el exchange tiene el nuevo SL
+    entry['sl_price'] = new_sl_price
+    if reason == 'BE':
+        ALERTS_HISTORY[f"{sym}_be_price"] = new_sl_price
+    elif reason == 'TRAIL':
+        ALERTS_HISTORY[f"{sym}_trail"] = new_sl_price
+    
+    log.info("[REAL] %s SL→%.4f (%s) api_ok=%s remaining=%.4f", sym, new_sl_price, reason, placed, remaining_qty)
+    return placed
+
 def restaurar_tp_exchange():
-    """Coloca TP1/TP2/Full en exchange (plan orders) para posiciones abiertas post-reinicio."""
+    """Coloca TP1/TP2/Full y SL en exchange (plan orders) para posiciones abiertas post-reinicio."""
     if not exchange or PAPER_TRADE:
         return
     try:
@@ -2010,6 +2162,7 @@ def restaurar_tp_exchange():
                 continue
 
             _cancel_tp_plans(sym)
+            _cancel_sl_plans(sym)
 
             # TP1 si aún no se ejecutó
             tp1_qty = ((original_qty * TP1_CLOSE_PCT) // step) * step
@@ -2035,6 +2188,13 @@ def restaurar_tp_exchange():
                 if notional >= 5:
                     if _place_tp_plan(sym, tp_full, full_qty, side):
                         log.info("%s Full TP plan restaurado: %s @ %s", sym, full_qty, tp_full)
+
+            # F9: Restaurar SL plan (si no se ejecutó TP1 aún → SL original, si TP1 ya ejecutó → BE)
+            current_sl = float(ed.get('sl_price', 0))
+            if current_sl > 0 and cur_qty >= step:
+                sl_placed = _place_sl_plan(sym, current_sl, cur_qty, side)
+                if sl_placed:
+                    log.info("%s SL plan restaurado: %s @ %s (partial_lvl=%d)", sym, cur_qty, current_sl, PARTIAL_LEVEL.get(sym, 0))
     except Exception as e:
         log.error("Error en restaurar_tp_exchange: %s", e)
 
@@ -2062,8 +2222,9 @@ def _full_cleanup(symbol: str, cooldown: int = 3600):
     TRAIL_COUNTS.pop(symbol, None)
     PARTIAL_LEVEL.pop(symbol, None)
     _save_partial_level()
-    # Cancelar TP plan orders en exchange
+    # Cancelar TP y SL plan orders en exchange
     _cancel_tp_plans(symbol)
+    _cancel_sl_plans(symbol)
 
 def _manage_paper_positions_v3(balance_total: float):
     """Gestiona posiciones simuladas en paper mode con TODAS las reglas v4."""
@@ -2158,13 +2319,6 @@ def _manage_paper_positions_v3(balance_total: float):
             partial_lvl = PARTIAL_LEVEL.get(symbol, 0)
             lev = float(entry.get('leverage', LEVERAGE))
 
-            def _pnl_parcial(qty_sold: float, exit_px: float) -> float:
-                """Calcula PnL para una venta parcial."""
-                if side == 'long':
-                    return (exit_px - entry_price) * qty_sold
-                else:
-                    return (entry_price - exit_px) * qty_sold
-
             sl_hit = (long_side and mark <= sl_price) or (short_side and mark >= sl_price)
             liq_hit = (long_side and mark <= liq_price) or (short_side and mark >= liq_price)
             tp_full_hit = (long_side and mark >= tp3_price) or (short_side and mark <= tp3_price)
@@ -2172,7 +2326,7 @@ def _manage_paper_positions_v3(balance_total: float):
             # ── SL / LIQ: cierre completo de lo que quede ──
             if sl_hit or liq_hit:
                 if remaining_qty > 0:
-                    pnl = _pnl_parcial(remaining_qty, mark)
+                    pnl = _calc_pnl_parcial(side, entry_price,remaining_qty, mark)
                     status = 'SL' if sl_hit else 'LIQ'
                     reason = 'sl' if sl_hit else 'liquidacion'
                     log.info("[PAPER] %s %s | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
@@ -2185,7 +2339,7 @@ def _manage_paper_positions_v3(balance_total: float):
             # ── Full TP (TP3): cierre completo del remanente ──
             if tp_full_hit:
                 if remaining_qty > 0:
-                    pnl = _pnl_parcial(remaining_qty, tp3_price)
+                    pnl = _calc_pnl_parcial(side, entry_price,remaining_qty, tp3_price)
                     log.info("[PAPER] %s TP3 FULL | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
                              symbol, entry_price, tp3_price, remaining_qty, pnl)
                     guardar_trade_csv(entry, tp3_price, pnl, 0, pnl, 'TP3', 'tp3')
@@ -2202,12 +2356,12 @@ def _manage_paper_positions_v3(balance_total: float):
                         tp1_qty = ((original_qty * TP1_CLOSE_PCT) // step_p) * step_p
                         tp1_qty = min(tp1_qty, remaining_qty - step_p)  # Reservar al menos 1 step
                         if tp1_qty >= step_p:
-                            pnl = _pnl_parcial(tp1_qty, tp1_price)
+                            pnl = _calc_pnl_parcial(side, entry_price,tp1_qty, tp1_price)
                             entry['remaining_qty'] = remaining_qty - tp1_qty
                             PARTIAL_LEVEL[symbol] = 1
                             ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
-                            ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
-                            entry['sl_price'] = entry_price  # Break Even
+                            # F9: Mover SL a Break Even (paper: solo in-memory)
+                            _update_sl_to_be(symbol, entry, entry_price, reason='BE')
                             log.info("[PAPER] %s TP1 (40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                                      symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
                             guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
@@ -2225,7 +2379,7 @@ def _manage_paper_positions_v3(balance_total: float):
                         tp2_qty = ((remaining_after_tp1 * TP2_CLOSE_PCT / (1 - TP1_CLOSE_PCT)) // step_p) * step_p
                         tp2_qty = min(tp2_qty, remaining_qty - step_p)
                         if tp2_qty >= step_p:
-                            pnl = _pnl_parcial(tp2_qty, tp2_price)
+                            pnl = _calc_pnl_parcial(side, entry_price,tp2_qty, tp2_price)
                             entry['remaining_qty'] = remaining_qty - tp2_qty
                             PARTIAL_LEVEL[symbol] = 2
                             ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
@@ -2243,7 +2397,7 @@ def _manage_paper_positions_v3(balance_total: float):
                 if horas >= LOBO_TIMEOUT_HORAS:
                     remaining_qty = float(entry.get('remaining_qty', entry.get('quantity', 0)))
                     if remaining_qty > 0:
-                        pnl = _pnl_parcial(remaining_qty, mark)
+                        pnl = _calc_pnl_parcial(side, entry_price,remaining_qty, mark)
                         log.info("[PAPER] %s TIMEOUT +%.0fh Qty=%.4f PnL=%.2f", symbol, horas, remaining_qty, pnl)
                         guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
                         send_telegram(f"[PAPER] *{symbol} TIMEOUT*\nPnL: {pnl:.2f} USDT")
@@ -2266,17 +2420,15 @@ def _manage_paper_positions_v3(balance_total: float):
                 else:
                     ADVERSE_PRICES[symbol] = max(ADVERSE_PRICES[symbol], mark)
 
-            # --- Trailing stop simple (original) ---
-            if ALERTS_HISTORY.get(f"{symbol}_tp1_sold", False) and profit_pct > 0:
+            # --- Trailing stop: solo después de TP2 (partial_lvl >= 2) ---
+            if PARTIAL_LEVEL.get(symbol, 0) >= 2 and profit_pct > 0:
                 dist = LOBO_TRAIL_ATR_MULT * entry.get('atr_val', 0) * 1.5
                 if dist > 0:
                     nuevo_sl = (PEAK_PRICES[symbol] - dist) if side == 'long' else (PEAK_PRICES[symbol] + dist)
                     ultimo_sl = ALERTS_HISTORY.get(f"{symbol}_trail", 0 if side == 'long' else 999999)
                     mejora = (nuevo_sl - ultimo_sl) if side == 'long' else (ultimo_sl - nuevo_sl)
                     if mejora > (entry_price * 0.002):
-                        TRADE_ENTRIES[symbol]['sl_price'] = nuevo_sl
-                        ALERTS_HISTORY[f"{symbol}_trail"] = nuevo_sl
-                        TRAIL_COUNTS[symbol] = TRAIL_COUNTS.get(symbol, 0) + 1
+                        _update_sl_to_be(symbol, entry, nuevo_sl, reason='TRAIL')
                         log.info("[PAPER v4] %s Trail→%.4f", symbol, nuevo_sl)
 
         except Exception as e:
@@ -2441,8 +2593,8 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                     remaining_qty = exchange_qty
                     PARTIAL_LEVEL[symbol] = 1
                     ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
-                    ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
-                    entry['sl_price'] = entry_price  # Break Even
+                    # F9: Mover SL a Break Even en el exchange
+                    _update_sl_to_be(symbol, entry, entry_price, reason='BE')
                     log.info("[REAL] %s TP1 EXCHANGE fill → BE. Remaining=%.4f PnL≈%.2f",
                              symbol, exchange_qty, tp1_pnl)
                     guardar_trade_csv(entry, tp1_p, tp1_pnl, 0, tp1_pnl, 'TP1_EXCHANGE', 'tp1_exchange')
@@ -2463,11 +2615,8 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                     _save_trade_entries()
                     _save_partial_level()
 
-            def _pnl_parcial(qty_sold: float, exit_px: float) -> float:
-                if side == 'long':
-                    return (exit_px - entry_price) * qty_sold
-                else:
-                    return (entry_price - exit_px) * qty_sold
+            # Re-leer sl_price después de posible BE update por TP1 exchange fill
+            sl_price = float(entry.get('sl_price', 0))
 
             sl_hit = (long_side and mark <= sl_price) or (short_side and mark >= sl_price)
             liq_hit = (long_side and mark <= liq_price) or (short_side and mark >= liq_price)
@@ -2476,7 +2625,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
             # ── SL / LIQ: cierre completo de lo que quede ──
             if sl_hit or liq_hit:
                 if remaining_qty > 0:
-                    pnl = _pnl_parcial(remaining_qty, mark)
+                    pnl = _calc_pnl_parcial(side, entry_price,remaining_qty, mark)
                     status = 'SL' if sl_hit else 'LIQ'
                     reason = 'sl' if sl_hit else 'liquidacion'
                     log.info("[REAL] %s %s | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
@@ -2490,7 +2639,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
             # ── Full TP (TP3): cierre completo del remanente ──
             if tp_full_hit:
                 if remaining_qty > 0:
-                    pnl = _pnl_parcial(remaining_qty, tp3_price)
+                    pnl = _calc_pnl_parcial(side, entry_price,remaining_qty, tp3_price)
                     log.info("[REAL] %s TP3 FULL | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f",
                              symbol, entry_price, tp3_price, remaining_qty, pnl)
                     _cerrar_pos_real(symbol, side, remaining_qty)
@@ -2508,14 +2657,14 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                         tp1_qty = ((original_qty * TP1_CLOSE_PCT) // step_p) * step_p
                         tp1_qty = min(tp1_qty, remaining_qty - step_p)
                         if tp1_qty >= step_p:
-                            pnl = _pnl_parcial(tp1_qty, tp1_price)
+                            pnl = _calc_pnl_parcial(side, entry_price,tp1_qty, tp1_price)
                             cerrado = _cerrar_pos_real(symbol, side, tp1_qty)
                             if cerrado:
                                 entry['remaining_qty'] = remaining_qty - tp1_qty
                                 PARTIAL_LEVEL[symbol] = 1
                                 ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
-                                ALERTS_HISTORY[f"{symbol}_be_price"] = entry_price
-                                entry['sl_price'] = entry_price  # Break Even
+                                # F9: Mover SL a Break Even en el exchange
+                                _update_sl_to_be(symbol, entry, entry_price, reason='BE')
                                 log.info("[REAL] %s TP1 LOCAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                                          symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
                                 guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
@@ -2535,7 +2684,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                         tp2_qty = ((remaining_after_tp1 * TP2_CLOSE_PCT / (1 - TP1_CLOSE_PCT)) // step_p) * step_p
                         tp2_qty = min(tp2_qty, remaining_qty - step_p)
                         if tp2_qty >= step_p:
-                            pnl = _pnl_parcial(tp2_qty, tp2_price)
+                            pnl = _calc_pnl_parcial(side, entry_price,tp2_qty, tp2_price)
                             cerrado = _cerrar_pos_real(symbol, side, tp2_qty)
                             if cerrado:
                                 entry['remaining_qty'] = remaining_qty - tp2_qty
@@ -2557,7 +2706,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 if horas >= LOBO_TIMEOUT_HORAS:
                     remaining_qty = float(entry.get('remaining_qty', entry.get('quantity', 0)))
                     if remaining_qty > 0:
-                        pnl = _pnl_parcial(remaining_qty, mark)
+                        pnl = _calc_pnl_parcial(side, entry_price,remaining_qty, mark)
                         log.info("[REAL] %s TIMEOUT +%.0fh Qty=%.4f PnL=%.2f", symbol, horas, remaining_qty, pnl)
                         _cerrar_pos_real(symbol, side, remaining_qty)
                         guardar_trade_csv(entry, mark, pnl, 0, pnl, 'Timeout', 'timeout')
@@ -2581,16 +2730,16 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 else:
                     ADVERSE_PRICES[symbol] = max(ADVERSE_PRICES[symbol], mark)
 
-            # --- Trailing stop (solo después de TP1 → BE activado) ---
-            if ALERTS_HISTORY.get(f"{symbol}_tp1_sold", False) and profit_pct > 0:
+            # --- Trailing stop: solo después de TP2 (partial_lvl >= 2) ---
+            if PARTIAL_LEVEL.get(symbol, 0) >= 2 and profit_pct > 0:
                 dist = LOBO_TRAIL_ATR_MULT * entry.get('atr_val', 0) * 1.5
                 if dist > 0:
                     nuevo_sl = (PEAK_PRICES[symbol] - dist) if side == 'long' else (PEAK_PRICES[symbol] + dist)
                     ultimo_sl = ALERTS_HISTORY.get(f"{symbol}_trail", 0 if side == 'long' else 999999)
                     mejora = (nuevo_sl - ultimo_sl) if side == 'long' else (ultimo_sl - nuevo_sl)
                     if mejora > (entry_price * 0.002):
-                        TRADE_ENTRIES[symbol]['sl_price'] = nuevo_sl
-                        ALERTS_HISTORY[f"{symbol}_trail"] = nuevo_sl
+                        # Actualizar SL en exchange (cancela anterior, coloca nuevo)
+                        _update_sl_to_be(symbol, entry, nuevo_sl, reason='TRAIL')
                         TRAIL_COUNTS[symbol] = TRAIL_COUNTS.get(symbol, 0) + 1
                         log.info("[REAL] %s Trail→%.4f", symbol, nuevo_sl)
 
@@ -2659,7 +2808,7 @@ def main():
                     balance_total = 0.0
 
             capital_fut = capital_disponible_futuros(balance_total)
-            log.info("Balance total=%.2f | Futuros(30%%)=%.2f | Liquidez(50%%)=%.2f",
+            log.info("Balance total=%.2f | Futuros(80%%)=%.2f | Liquidez(50%%)=%.2f",
                      balance_total, capital_fut,
                      capital_liquidez(balance_total))
 
@@ -2705,6 +2854,9 @@ def main():
                 time.sleep(60)
                 continue
 
+            # BUG-M2 FIX: Calcular ventana_altcoins UNA vez antes del loop (no N veces)
+            ventana_altcoins = check_btcd_elliott_ventana_altcoins()
+
             # ── Analizar cada símbolo ──
             for symbol in top_symbols:
                 if symbol in busy_symbols:
@@ -2727,8 +2879,8 @@ def main():
                     df_4h  = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']) if ohlcv_15m else None
 
-                    # F7: Solo evaluar al cierre de vela H1
-                    if not es_nueva_vela_1h(df_1h):
+                    # F7: Solo evaluar al cierre de vela principal (15m)
+                    if not es_nueva_vela_principal(df_1h):
                         continue
 
                     precio_actual = float(df_1h['close'].iloc[-1])
@@ -2736,11 +2888,7 @@ def main():
                     if atr_val == 0 or pd.isna(atr_val):
                         continue
 
-                    # v4: Ventana altcoins (BTC.D + Elliott)
-                    ventana_altcoins = check_btcd_elliott_ventana_altcoins()
-
-                    # Evaluar señal BITLOBO v4
-                    # Evaluar señal BITLOBO v5
+                    # v4: Evaluar señal BITLOBO v5
                     # Mapeo: df_1h→df_h4 (principal), df_4h→df_d1 (confirmación), df_15m→df_1h (micro)
                     senal_long = evaluar_senal_bitlobo_v4(
                         symbol, df_1h, df_4h, precio_actual, atr_val, balance_total,
@@ -2872,14 +3020,16 @@ def main():
                         log.error("Error orden %s %s: %s", side_name, symbol, e)
                         continue
 
-                    # Colocar TP1 y TP2 como plan orders en exchange
+                    # Colocar TP1, TP2 y SL como plan orders en exchange
                     trade_side = 'long' if es_long else 'short'
                     tp1_qty_plan = ((qty * TP1_CLOSE_PCT) // step) * step
                     tp2_remaining = qty - tp1_qty_plan
                     tp2_qty_plan = ((tp2_remaining * TP2_CLOSE_PCT / (1 - TP1_CLOSE_PCT)) // step) * step
                     tp1_ok = False
                     tp2_ok = False
-                    time.sleep(1)
+                    sl_ok = False
+                    # BUG #3 FIX: sleep(1) → sleep(3) para que el position se refleje en Bitget
+                    time.sleep(3)
                     if tp1_qty_plan >= step and tp1_qty_plan * tp1_price >= 5:
                         tp1_ok = _place_tp_plan(symbol, tp1_price, tp1_qty_plan, trade_side)
                         if tp1_ok:
@@ -2889,10 +3039,43 @@ def main():
                         if tp2_ok:
                             log.info("[REAL] %s TP2 plan: %s @ %s (30%%)", symbol, tp2_qty_plan, tp2_price)
 
+                    # BUG #5 FIX: Leer qty REAL del position tras la orden market
+                    real_qty = qty
+                    try:
+                        _pos_check = exchange.fetch_positions([symbol])
+                        for _pc in _pos_check:
+                            if float(_pc.get('contracts', 0)) > 0:
+                                real_qty = float(_pc['contracts'])
+                                if abs(real_qty - qty) / max(qty, 1e-10) > 0.1:
+                                    log.warning("[REAL] %s Qty drift: signal=%.4f real=%.4f (slippage)",
+                                                symbol, qty, real_qty)
+                                break
+                    except Exception as _e_qty:
+                        log.warning("[REAL] %s No pudo leer qty real, usando signal qty: %s", symbol, _e_qty)
+
+                    # BUG #4 FIX: _place_sl_plan ahora tiene retry 3x con backoff
+                    sl_ok = _place_sl_plan(symbol, sl_price, real_qty, trade_side)
+                    if sl_ok:
+                        log.info("[REAL] %s SL plan: %s @ %s [EX]", symbol, real_qty, sl_price)
+                    else:
+                        # BUG #1 FIX: Si SL falla tras 3 reintentos → CERRAR posición
+                        log.error("[REAL] %s SL PLAN FALLÓ — cerrando posición para evitar liquidación sin SL", symbol)
+                        _cerrar_pos_real(symbol, trade_side, real_qty)
+                        _full_cleanup(symbol)
+                        send_telegram(
+                            f"❌ *{symbol} ABORTADA*\n"
+                            f"SL plan falló tras 3 reintentos\n"
+                            f"Posición cerrada — sin protección en exchange"
+                        )
+                        continue
+
+                    # BUG #2 FIX: Telegram muestra [EX] solo si sl_ok, sino [LOCAL]
+                    sl_label = '[EX]' if sl_ok else '[LOCAL]'
                     send_telegram(
                         f"*{symbol} {side_name}* (BITLOBO)\n"
                         f"Entry: `{exchange.price_to_precision(symbol, precio_actual)}`\n"
                         f"Lev: {lev_calc:.0f}x | Liq: `{exchange.price_to_precision(symbol, liq_price)}`\n"
+                        f"SL: `{exchange.price_to_precision(symbol, sl_price)}` {sl_label}\n"
                         f"TP1(40%): `{exchange.price_to_precision(symbol, tp1_price)}` [{'EX' if tp1_ok else 'LOCAL'}]\n"
                         f"TP2(30%): `{exchange.price_to_precision(symbol, tp2_price)}` [{'EX' if tp2_ok else 'LOCAL'}]\n"
                         f"TP3(30%): `{exchange.price_to_precision(symbol, tp3_price)}` [EX-SAFETY]\n"
