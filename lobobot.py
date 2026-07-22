@@ -1726,6 +1726,14 @@ def evaluar_senal_bitlobo_v4(
     if distancia_sl <= 0:
         return None
     pos_value = riesgo_capital / distancia_sl
+
+    # FIX 40762: Cap position value — margin (pos_value/leverage) must not exceed available capital
+    MAX_MARGIN_USE_PCT = 0.90  # Nunca usar más del 90% del capital de futuros
+    max_margin = capital_fut * MAX_MARGIN_USE_PCT
+    if apalancamiento > 0:
+        max_pos_value = max_margin * apalancamiento
+        pos_value = min(pos_value, max_pos_value)
+
     if pos_value < MIN_ORDER_USDT:
         pos_value = MIN_ORDER_USDT
     qty = pos_value / precio_actual
@@ -1990,7 +1998,7 @@ def _cancel_tp_plans(sym: str):
 
 
 def _cancel_sl_plans(sym: str):
-    """Cancela todos los stop_loss_plan activos de un símbolo."""
+    """Cancela todos los loss_plan activos de un símbolo."""
     if not exchange or PAPER_TRADE:
         return
     try:
@@ -1998,16 +2006,16 @@ def _cancel_sl_plans(sym: str):
         params = {
             'productType': 'usdt-futures',
             'symbol': market_info['id'].lower(),
-            'planType': 'stop_loss_plan',
+            'planType': 'loss_plan',
         }
         pending = exchange.privateMixGetV2MixOrderOrdersPending(params)
         for plan in (pending.get('data', {}).get('entrustedList', []) or []):
-            if plan.get('planType') == 'stop_loss_plan':
+            if plan.get('planType') == 'loss_plan':
                 exchange.privateMixPostV2MixOrderCancelTpslOrder({
                     'symbol': market_info['id'].lower(),
                     'productType': 'usdt-futures',
                     'marginCoin': market_info['settleId'],
-                    'planType': 'stop_loss_plan',
+                    'planType': 'loss_plan',
                     'orderId': plan['orderId'],
                 })
                 log.info("Cancelado SL plan %s orderId=%s", sym, plan['orderId'])
@@ -2043,7 +2051,7 @@ def _place_sl_plan(sym: str, sl_price: float, sl_qty: float, side: str,
                 'marginCoin': market_info['settleId'],
                 'productType': 'usdt-futures',
                 'symbol': market_info['id'].lower(),
-                'planType': 'stop_loss_plan',
+                'planType': 'loss_plan',
                 'triggerPrice': exchange.price_to_precision(sym, sl_price),
                 'triggerType': 'mark_price',
                 'holdSide': side,  # 'long' o 'short'
@@ -2109,7 +2117,7 @@ def _update_sl_to_be(sym: str, entry: dict, new_sl_price: float, reason: str = '
     if remaining_qty <= 0:
         return False
 
-    # 1) Cancelar SL viejo PRIMERO (Bitget solo permite 1 stop_loss_plan por símbolo)
+    # 1) Cancelar SL viejo PRIMERO (Bitget solo permite 1 loss_plan por símbolo)
     _cancel_sl_plans(sym)
     
     # 2) Colocar NUEVO SL plan
@@ -2945,6 +2953,18 @@ def main():
                         raw_qty = min_qty
                     qty = math.ceil(raw_qty / step) * step
                     actual_margin = (qty * precio_actual) / lev_calc
+
+                    # FIX 40762: Verificar que el margen no exceda el capital disponible
+                    max_margin_real = capital_fut * 0.90
+                    if actual_margin > max_margin_real:
+                        log.info("%s: margin %.2f > max %.2f, ajustando qty", symbol, actual_margin, max_margin_real)
+                        qty = math.floor((max_margin_real * lev_calc / precio_actual) / step) * step
+                        actual_margin = (qty * precio_actual) / lev_calc
+
+                    # Guard: si el cap redujo qty por debajo del mínimo, saltar
+                    if qty < min_qty or qty <= 0:
+                        log.info("%s: qty %.6f < min_qty %.6f tras cap — capital insuficiente, saltando", symbol, qty, min_qty)
+                        continue
 
                     log.info(
                         "%s %s | Entry=%.4f SL=%.4f Liq=%.4f Lev=%.0f TP1=%.4f TP2=%.4f TP3=%.4f R:R=%.2f | Score=%d/%d",
