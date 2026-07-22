@@ -236,8 +236,8 @@ LOBO_HEDGE_MARGIN_PCT    = float(os.environ.get('LOBO_HEDGE_MARGIN_PCT', '0.15')
 # === v4: CHOCH (Change of Character) ===
 LOBO_CHOCH_LOOKBACK      = int(os.environ.get('LOBO_CHOCH_LOOKBACK', '30'))
 
-# === v4: Microfractalidad (ondas 1H) ===
-LOBO_MICRO_LOOKBACK_1H   = int(os.environ.get('LOBO_MICRO_LOOKBACK_1H', '72'))
+# === v4: Microfractalidad (ondas 5m) ===
+LOBO_MICRO_LOOKBACK      = int(os.environ.get('LOBO_MICRO_LOOKBACK', '72'))
 
 # === v4: Flat Continuación ===
 LOBO_FLAT_MIN_VELAS      = int(os.environ.get('LOBO_FLAT_MIN_VELAS', '3'))
@@ -1377,17 +1377,18 @@ def detectar_choch(df_h4: pd.DataFrame, es_long: bool) -> dict:
 
 
 # =====================================================================
-# v4 — D4: MICROFRACTALIDAD (ondas en 1H)
+# v4 — D4: MICROFRACTALIDAD (ondas en 5m)
 # =====================================================================
-def verificar_microfractalidad(df_1h: pd.DataFrame) -> dict:
+def verificar_microfractalidad(df_5m: pd.DataFrame) -> dict:
     """
-    D4: Detecta estructura de 5+ ondas en 1H para confirmar giro.
+    D4: Detecta estructura de 5+ ondas en 5m para confirmar giro microestructural.
+    Recibe velas de 5 minutos (TIMEFRAME_MICRO).
     """
-    if len(df_1h) < 30:
+    if len(df_5m) < LOBO_MICRO_LOOKBACK:
         return {'completo': False, 'razon': 'pocos_datos'}
     left, right = 3, 3
-    highs = df_1h['high'].values
-    lows = df_1h['low'].values
+    highs = df_5m['high'].values
+    lows = df_5m['low'].values
     n = len(highs)
     pivot_highs_idx = []
     pivot_lows_idx = []
@@ -1504,13 +1505,51 @@ def debe_validar_h4() -> bool:
 # 6. EVALUACIÓN COMPLETA DE SEÑAL (v4 con todas las correcciones)
 # =====================================================================
 def evaluar_senal_bitlobo_v4(
-    symbol: str, df_h4: pd.DataFrame, df_d1: pd.DataFrame,
+    symbol: str, df_principal: pd.DataFrame, df_confirmacion: pd.DataFrame,
     precio_actual: float, atr_val: float, balance_total: float,
-    es_long: bool, df_1h: Optional[pd.DataFrame] = None,
+    es_long: bool, df_micro: Optional[pd.DataFrame] = None,
     ventana_altcoins: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     v4: Evalúa TODAS las reglas BITLOBO con mejoras D2-D9.
+
+    Parámetros de dataframes (CORREGIDO v4.1 — names matching actual timeframes):
+      - df_principal   : Velas de 15m (TIMEFRAME_PRINCIPAL) — Corazón del análisis
+      - df_confirmacion: Velas de 4h  (TIMEFRAME_CONFIRMACION) — Validación estructural
+      - df_micro       : Velas de 5m  (TIMEFRAME_MICRO) — Microfractalidad D4
+
+    MAPA DE SCORING COMPLETO (22 puntos máximo):
+    ┌──────┬──────────────────────────────────────┬──────┬─────────────────────┐
+    │ Regla│ Descripción                          │ Pts  │ Condición           │
+    ├──────┼──────────────────────────────────────┼──────┼─────────────────────┤
+    │ R1   │ Impulso direccional detectado        │ +1   │ Pendiente > 2%      │
+    │ R1b  │ Precio dentro de zona OTE (Fibonacci)│ +1   │ Entre 0.5-0.618    │
+    │ R2   │ SMA 100 dentro de zona OTE           │ +1   │ SMA en 0.5-0.618   │
+    │      │  (Tolerancia: ±1 ATR)               │      │ ± 1×ATR            │
+    │ R3   │ ADX en rango válido                  │ +1   │ 15 ≤ ADX ≤ 50      │
+    │ R4   │ USDT.D en resistencia (long)         │ +1   │ FVG/percentil 85    │
+    │ R5   │ BTC.D favorables (Elliott D8)        │ +1   │ Bajista→altcoins    │
+    │ R6   │ FVG en zona OTE                      │ +1   │ Gap > 0.3×ATR       │
+    │ R7   │ Order Block en zona OTE              │ +1   │ Rally/Caída > 2×ATR │
+    │ R8   │ Liquidity Sweep direccional          │ +1   │ Sweep correcto      │
+    │ R9   │ Mecha/Absorción en zona OTE          │ +1   │ Mecha ≥ 0.5×ATR     │
+    │ F5a  │ RSI en zona favorable                │ +1   │ Long<35 / Short>65  │
+    │ F5b  │ Volumen validador                    │ +1   │ Ratio > 1.5× media  │
+    │ F6   │ Pullback confirmado ("Rompe y Apoya")│ +1   │ Retest + rebote     │
+    │ F11  │ Elliott 5 ondas estructurado         │ +1   │ Fibo ratios válidos │
+    │ D3   │ CHOCH (Change of Character)          │ +1   │ Break estructura    │
+    │ D2   │ Expanded Flat / Double Kill          │ +2   │ A-B-C + mecha > 15% │
+    │ D4   │ Microfractalidad (5m) 5+ ondas       │ +1   │ Impulsiva direcc.   │
+    │ D5   │ Flat de Continuación                 │ +1   │ Lateral + ruptura   │
+    │ F10  │ Validación D1 estructural            │ +1   │ Swing points OK     │
+    │ R13  │ Risk:Reward mínimo 1.5:1             │ +1   │ RR ≥ 1.5            │
+    │ F3   │ Apalancamiento dinámico calculado    │ +1   │ Liq alineada mecha  │
+    ├──────┼──────────────────────────────────────┼──────┼─────────────────────┤
+    │      │ TOTAL MÁXIMO                         │ 22   │                     │
+    └──────┴──────────────────────────────────────┴──────┴─────────────────────┘
+
+    UMBRAL DE ENTRADA: score >= LOBO_SCORE_MIN (14/22)
+
     Diferencias vs v3:
       - Score max: 22 (era 16)
       - R:R mínimo: 1.5 (era 1.0)
@@ -1524,7 +1563,7 @@ def evaluar_senal_bitlobo_v4(
     max_score = 22
 
     # --- R1: Impulso direccional + Fibonacci ---
-    impulso = detectar_impulso(df_h4)
+    impulso = detectar_impulso(df_principal)
     if not impulso:
         return None
     fibo = calcular_fibonacci(impulso)
@@ -1545,15 +1584,15 @@ def evaluar_senal_bitlobo_v4(
         score += 1
         detalles.append('R1:en_OTE')
 
-    # --- R2: SMA 100 en zona OTE ---
-    if len(df_h4) >= 100:
-        sma100 = _sma(df_h4['close'], 100).iloc[-1]
+    # --- R2: SMA 100 en zona OTE (+1 punto — visible en tabla de scoring) ---
+    if len(df_principal) >= 100:
+        sma100 = _sma(df_principal['close'], 100).iloc[-1]
         if not pd.isna(sma100) and sma100_en_zona_ote(sma100, fibo, atr_val):
             score += 1
             detalles.append('R2:SMA100_en_OTE')
 
     # --- R3: ADX ---
-    if adx_permite_entrada(df_h4):
+    if adx_permite_entrada(df_principal):
         score += 1
         detalles.append('R3:ADX_ok')
 
@@ -1584,7 +1623,7 @@ def evaluar_senal_bitlobo_v4(
             detalles.append('R5:BTC.D_sube_bloquea_alt')
 
     # --- R6: FVG ---
-    fvgs = detectar_fvg(df_h4)
+    fvgs = detectar_fvg(df_principal)
     fvg_en_zona = [f for f in fvgs if f['gap_sup'] >= zona_inf and f['gap_inf'] <= zona_sup]
     senal['fvgs'] = fvg_en_zona
     if fvg_en_zona:
@@ -1592,7 +1631,7 @@ def evaluar_senal_bitlobo_v4(
         detalles.append(f'R6:FVG_{len(fvg_en_zona)}')
 
     # --- R7: Order Block ---
-    obs = detectar_order_blocks(df_h4)
+    obs = detectar_order_blocks(df_principal)
     ob_en_zona = [o for o in obs if o['low'] <= zona_sup and o['high'] >= zona_inf]
     senal['obs'] = ob_en_zona
     if ob_en_zona:
@@ -1600,7 +1639,7 @@ def evaluar_senal_bitlobo_v4(
         detalles.append(f'R7:OB_{len(ob_en_zona)}')
 
     # --- R8: Liquidity Sweep ---
-    sweeps = detectar_sweep(df_h4)
+    sweeps = detectar_sweep(df_principal)
     senal['sweeps'] = sweeps
     if sweeps:
         sweep_ok = any(
@@ -1613,55 +1652,55 @@ def evaluar_senal_bitlobo_v4(
             detalles.append('R8:Sweep')
 
     # --- R9: Mecha/Absorción ---
-    mecha_ok, mecha_det = validar_mecha_absorcion_en_zona(df_h4, zona_inf, zona_sup, es_long, atr_val)
+    mecha_ok, mecha_det = validar_mecha_absorcion_en_zona(df_principal, zona_inf, zona_sup, es_long, atr_val)
     if not mecha_ok:
         return None
     score += 1
     detalles.append(f'R9:Mecha_{mecha_det}')
 
     # --- F5: RSI ---
-    rsi_ok, rsi_val = filtro_rsi(df_h4, es_long)
+    rsi_ok, rsi_val = filtro_rsi(df_principal, es_long)
     if rsi_ok:
         score += 1
         detalles.append(f'F5:RSI_{rsi_val:.0f}')
 
     # --- F5: Volumen ---
-    vol_ok, vol_ratio = validar_volumen(df_h4, es_long)
+    vol_ok, vol_ratio = validar_volumen(df_principal, es_long)
     if vol_ok:
         score += 1
         detalles.append(f'F5:Vol_{vol_ratio:.1f}x')
 
     # --- F6: Pullback ---
     nivel_ref = zona_sup if es_long else zona_inf
-    pullback_ok = detectar_pullback_confirmado(df_h4, nivel_ref, es_long)
+    pullback_ok = detectar_pullback_confirmado(df_principal, nivel_ref, es_long)
     if pullback_ok:
         score += 1
         detalles.append('F6:Pullback_ok')
 
     # --- F11: Elliott ---
-    elliott = detectar_estructura_elliott_v3(df_h4)
+    elliott = detectar_estructura_elliott_v3(df_principal)
     senal['elliott'] = elliott
     if elliott['fase'] == 'estructura_5_ondas':
         score += 1
         detalles.append('F11:Elliott_5ondas')
 
     # --- D3: CHOCH ---
-    choch = detectar_choch(df_h4, es_long)
+    choch = detectar_choch(df_principal, es_long)
     senal['choch'] = choch
     if choch.get('choch', False):
         score += 1
         detalles.append(f'D3:{choch["tipo"]}')
 
     # --- D2: Expanded Flat / Double Kill (+2 pts) ---
-    exp_flat = detectar_expanded_flat(df_h4, es_long)
+    exp_flat = detectar_expanded_flat(df_principal, es_long)
     senal['expanded_flat'] = exp_flat
     if exp_flat.get('encontrado', False):
         score += 2
         detalles.append(f'D2:DoubleKill_{exp_flat["tipo"]}')
 
-    # --- D4: Microfractalidad ---
-    if df_1h is not None and len(df_1h) > 0:
-        micro = verificar_microfractalidad(df_1h)
+    # --- D4: Microfractalidad (ondas 5m) ---
+    if df_micro is not None and len(df_micro) > 0:
+        micro = verificar_microfractalidad(df_micro)
         senal['microfractal'] = micro
         if micro.get('completo', False):
             if (es_long and micro.get('tipo') == 'impulsivo_alcista') or \
@@ -1670,21 +1709,23 @@ def evaluar_senal_bitlobo_v4(
                 detalles.append(f'D4:micro_{micro["tipo"]}')
 
     # --- D5: Flat Continuación ---
-    flat_cont = detectar_flat_continuacion(df_h4, es_long)
+    flat_cont = detectar_flat_continuacion(df_principal, es_long)
     if flat_cont:
         score += 1
         detalles.append('D5:flat_continuacion')
 
     # --- F10: Validación D1 ---
-    if validar_estructura_d1(df_d1, precio_actual, 'long' if es_long else 'short'):
+    if validar_estructura_d1(df_confirmacion, precio_actual, 'long' if es_long else 'short'):
         score += 1
         detalles.append('F10:D1_ok')
     else:
         return None
 
-    # --- F3: Apalancamiento dinámico ---
+    # --- F3: Apalancamiento dinámico (anti-cacería de stops) ---
+    # Calcula lev para que liq_price quede alineada con la mecha de protección,
+    # evitando que manipulaciones bruscas saquen por SL sin liquidar.
     apalancamiento, liq_price = calcular_apalancamiento_optimo(
-        precio_actual, df_h4, zona_inf, zona_sup, es_long, sweeps, symbol,
+        precio_actual, df_principal, zona_inf, zona_sup, es_long, sweeps, symbol,
     )
 
     # --- SL ---
@@ -1892,10 +1933,10 @@ def guardar_signal_log(symbol, side, price, score, max_score, detalles,
 # =====================================================================
 async def _fetch_symbol_async(exch, symbol):
     try:
-        ohlcv_1h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_PRINCIPAL,  limit=200)  # Principal (15m)
+        ohlcv_15m = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_PRINCIPAL,  limit=200)  # Principal (15m)
         ohlcv_4h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_CONFIRMACION,  limit=100)  # Confirmación (4h)
-        ohlcv_15m = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MICRO, limit=200)  # Micro (5m)
-        return symbol, ohlcv_1h, ohlcv_4h, ohlcv_15m
+        ohlcv_5m  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MICRO, limit=200)  # Micro (5m)
+        return symbol, ohlcv_15m, ohlcv_4h, ohlcv_5m
     except Exception:
         return symbol, None, None, None
 
@@ -2877,38 +2918,38 @@ def main():
                     del COOLDOWNS[symbol]
 
                 try:
-                    ohlcv_1h, ohlcv_4h, ohlcv_15m = ohlcv_data.get(symbol, (None, None, None))
-                    if not ohlcv_1h or not ohlcv_4h:
+                    ohlcv_15m, ohlcv_4h, ohlcv_5m = ohlcv_data.get(symbol, (None, None, None))
+                    if not ohlcv_15m or not ohlcv_4h:
                         continue
-                    if len(ohlcv_1h) < 50 or len(ohlcv_4h) < 10:
+                    if len(ohlcv_15m) < 50 or len(ohlcv_4h) < 10:
                         continue
 
-                    df_1h  = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df_4h  = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']) if ohlcv_15m else None
+                    df_5m  = pd.DataFrame(ohlcv_5m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']) if ohlcv_5m else None
 
                     # F7: Solo evaluar al cierre de vela principal (15m)
-                    if not es_nueva_vela_principal(df_1h):
+                    if not es_nueva_vela_principal(df_15m):
                         continue
 
-                    precio_actual = float(df_1h['close'].iloc[-1])
-                    atr_val = float(_atr(df_1h, LOBO_ATR_PERIOD).iloc[-1])
+                    precio_actual = float(df_15m['close'].iloc[-1])
+                    atr_val = float(_atr(df_15m, LOBO_ATR_PERIOD).iloc[-1])
                     if atr_val == 0 or pd.isna(atr_val):
                         continue
 
-                    # v4: Evaluar señal BITLOBO v5
-                    # Mapeo: df_1h→df_h4 (principal), df_4h→df_d1 (confirmación), df_15m→df_1h (micro)
+                    # v4.1: Evaluar señal BITLOBO — names ahora coinciden con timeframes reales
+                    # df_15m → df_principal (15m), df_4h → df_confirmacion (4h), df_5m → df_micro (5m)
                     senal_long = evaluar_senal_bitlobo_v4(
-                        symbol, df_1h, df_4h, precio_actual, atr_val, balance_total,
-                        es_long=True, df_1h=df_15m, ventana_altcoins=ventana_altcoins,
+                        symbol, df_15m, df_4h, precio_actual, atr_val, balance_total,
+                        es_long=True, df_micro=df_5m, ventana_altcoins=ventana_altcoins,
                     )
 
-                    sweeps = detectar_sweep(df_1h)
+                    sweeps = detectar_sweep(df_15m)
                     hay_sweep_short = any(s['tipo'] == 'sweep_alcista_short' for s in sweeps)
 
-                    fvgs = detectar_fvg(df_1h)
+                    fvgs = detectar_fvg(df_15m)
                     hay_fvg_bajista = any(f['tipo'] == 'bajista' for f in fvgs)
-                    rsi_series = _rsi(df_1h['close'], LOBO_RSI_PERIOD)
+                    rsi_series = _rsi(df_15m['close'], LOBO_RSI_PERIOD)
                     try:
                         rsi_val_actual = float(rsi_series.iloc[-1])
                     except (IndexError, ValueError):
@@ -2920,8 +2961,8 @@ def main():
                     senal_short = None
                     if condicion_short:
                         senal_short = evaluar_senal_bitlobo_v4(
-                            symbol, df_1h, df_4h, precio_actual, atr_val, balance_total,
-                            es_long=False, df_1h=df_15m, ventana_altcoins=ventana_altcoins,
+                            symbol, df_15m, df_4h, precio_actual, atr_val, balance_total,
+                            es_long=False, df_micro=df_5m, ventana_altcoins=ventana_altcoins,
                         )
 
                     senal = senal_long or senal_short
