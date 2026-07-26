@@ -12,7 +12,7 @@ Correcciones respecto a v2:
   F6 - Confirmación Pullback ("Rompe y Apoya")
   F7 - Timing de entrada al cierre de vela H4
   F8 - Riesgo base 1.5-2% sobre el 80% de la cuenta de futuros
-  F9 - Break Even al alcanzar TP1 (no al 1.5%)
+  F9 - Break Even al alcanzar TP2 (no al 1.5%)
   F10- Invalidación D1 estructural (swing points)
   F11- Ondas Elliott con relaciones Fibonacci entre ondas
   F12- TPs en zonas reales (FVG/OB/estructurales)
@@ -204,13 +204,12 @@ MAX_SL_PCT         = float(os.environ.get('LOBO_MAX_SL_PCT', '0.030'))  # 3% max
 SL_LOOKBACK        = int(os.environ.get('LOBO_SL_LOOKBACK', '20'))  # velas para SL
 
 # --- TARGETS DE PNL FIJOS (sobre margin, sin importar leverage) ---
-TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.25'))  # 25% PnL en TP1
-TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.50'))  # 50% PnL en TP2
-TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '1.00'))  # 100% PnL safety net
-RR_RATIO           = float(os.environ.get('LOBO_RR_RATIO', '2.5'))  # Solo para evaluación R:R mínimo
+TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.15'))  # 15% PnL en TP1
+TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.30'))  # 30% PnL en TP2
+TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50% PnL safety net
 
-# F9: BE trigger ahora es "alcanzar TP1" (en vez de % fijo)
-# Se usa TP1 como trigger, no un porcentaje independiente
+# F9: BE trigger ahora es "alcanzar TP2" (en vez de TP1)
+# Se usa TP2 como trigger, no un porcentaje independiente
 
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
@@ -1097,9 +1096,9 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
     F12 PnL-BASED: Calcula TP1/TP2/TP3 basado en targets fijos de PnL sobre margin.
 
     Fórmula: TP_price = entry ± (entry × target_pnl / leverage)
-    - TP1: 25% PnL → cierra 40% de la qty
-    - TP2: 50% PnL → cierra 30% de la qty
-    - TP3: 100% PnL → safety net, cierra el 30% restante
+    - TP1: 15% PnL → cierra 40% de la qty
+    - TP2: 30% PnL → cierra 30% de la qty
+    - TP3: 50% PnL → safety net, cierra el 30% restante
 
     Retorna (tp1_price, tp2_price, tp3_price, rr_ratio, dist_sl).
     """
@@ -1754,8 +1753,8 @@ def evaluar_senal_bitlobo_v4(
     senal['rr'] = rr
     senal['dist_sl'] = dist_sl
 
-    # v4: R:R mínimo 1.5:1 (subido desde 1.0)
-    if rr < 1.5:
+    # R:R mínimo 0.8:1 (compatible con TPs conservadores 15/30/50%)
+    if rr < 0.8:
         return None
     if rr >= 1.5:
         score += 1
@@ -2158,6 +2157,27 @@ def _update_sl_to_be(sym: str, entry: dict, new_sl_price: float, reason: str = '
     if remaining_qty <= 0:
         return False
 
+    # --- Validar precio mark antes de colocar SL ---
+    # Bitget: SL para LONG debe ser < mark_price; para SHORT debe ser > mark_price
+    try:
+        ticker = exchange.fetch_ticker(sym)
+        mark_price = float(ticker['last'])
+    except Exception:
+        mark_price = 0
+
+    if mark_price > 0:
+        if side == 'long' and new_sl_price >= mark_price:
+            # SL por encima del mark → inválido. Ajustar a mark - 0.3%
+            adjusted = mark_price * 0.997
+            log.warning("[SL-ADJ] %s BE/Trail SL %.4f >= mark %.4f — ajustando a %.4f",
+                        sym, new_sl_price, mark_price, adjusted)
+            new_sl_price = adjusted
+        elif side == 'short' and new_sl_price <= mark_price:
+            adjusted = mark_price * 1.003
+            log.warning("[SL-ADJ] %s BE/Trail SL %.4f <= mark %.4f — ajustando a %.4f",
+                        sym, new_sl_price, mark_price, adjusted)
+            new_sl_price = adjusted
+
     # 1) Cancelar SL viejo PRIMERO (Bitget solo permite 1 loss_plan por símbolo)
     _cancel_sl_plans(sym)
     
@@ -2238,7 +2258,7 @@ def restaurar_tp_exchange():
                     if _place_tp_plan(sym, tp_full, full_qty, side):
                         log.info("%s Full TP plan restaurado: %s @ %s", sym, full_qty, tp_full)
 
-            # F9: Restaurar SL plan (si no se ejecutó TP1 aún → SL original, si TP1 ya ejecutó → BE)
+            # F9: Restaurar SL plan (si no se ejecutó TP2 aún → SL original, si TP2 ya ejecutó → BE)
             current_sl = float(ed.get('sl_price', 0))
             if current_sl > 0 and cur_qty >= step:
                 sl_placed = _place_sl_plan(sym, current_sl, cur_qty, side)
@@ -2396,7 +2416,7 @@ def _manage_paper_positions_v3(balance_total: float):
                 _full_cleanup(symbol)
                 continue
 
-            # ── TP1: parcial 40% + BE (nivel 0→1) ──
+            # ── TP1: parcial 40% (nivel 0→1) ──
             if partial_lvl == 0 and step_p > 0 and remaining_qty >= step_p:
                 tp1_price = float(entry.get('tp1_price', 0))
                 if tp1_price != entry_price:
@@ -2409,16 +2429,14 @@ def _manage_paper_positions_v3(balance_total: float):
                             entry['remaining_qty'] = remaining_qty - tp1_qty
                             PARTIAL_LEVEL[symbol] = 1
                             ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
-                            # F9: Mover SL a Break Even (paper: solo in-memory)
-                            _update_sl_to_be(symbol, entry, entry_price, reason='BE')
-                            log.info("[PAPER] %s TP1 (40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                            log.info("[PAPER] %s TP1 (40%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                                      symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
                             guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
-                            send_telegram(f"[PAPER] *{symbol} TP1 (40%)+BE*\nPnL: {pnl:.2f} USDT | SL→Entry")
+                            send_telegram(f"[PAPER] *{symbol} TP1 (40%)*\nPnL: {pnl:.2f} USDT")
                             _save_trade_entries()
                             _save_partial_level()
 
-            # ── TP2: parcial 30% (nivel 1→2) ──
+            # ── TP2: parcial 30% + BE (nivel 1→2) ──
             elif partial_lvl == 1 and step_p > 0 and remaining_qty >= step_p:
                 tp2_price = float(entry.get('tp2_price', 0))
                 if tp2_price != entry_price:
@@ -2432,10 +2450,12 @@ def _manage_paper_positions_v3(balance_total: float):
                             entry['remaining_qty'] = remaining_qty - tp2_qty
                             PARTIAL_LEVEL[symbol] = 2
                             ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
-                            log.info("[PAPER] %s TP2 (30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                            # F9: Mover SL a Break Even (paper: solo in-memory)
+                            _update_sl_to_be(symbol, entry, entry_price, reason='BE')
+                            log.info("[PAPER] %s TP2 (30%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                                      symbol, entry_price, tp2_price, tp2_qty, pnl, entry['remaining_qty'])
                             guardar_trade_csv(entry, tp2_price, pnl, 0, pnl, 'TP2_PARTIAL', 'tp2')
-                            send_telegram(f"[PAPER] *{symbol} TP2 (30%)*\nPnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
+                            send_telegram(f"[PAPER] *{symbol} TP2 (30%)+BE*\nPnL: {pnl:.2f} USDT | SL→Entry | Restan: {entry['remaining_qty']:.4f}")
                             _save_trade_entries()
                             _save_partial_level()
 
@@ -2642,9 +2662,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                     remaining_qty = exchange_qty
                     PARTIAL_LEVEL[symbol] = 1
                     ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
-                    # F9: Mover SL a Break Even en el exchange
-                    _update_sl_to_be(symbol, entry, entry_price, reason='BE')
-                    log.info("[REAL] %s TP1 EXCHANGE fill → BE. Remaining=%.4f PnL≈%.2f",
+                    log.info("[REAL] %s TP1 EXCHANGE fill. Remaining=%.4f PnL≈%.2f",
                              symbol, exchange_qty, tp1_pnl)
                     guardar_trade_csv(entry, tp1_p, tp1_pnl, 0, tp1_pnl, 'TP1_EXCHANGE', 'tp1_exchange')
                     _save_trade_entries()
@@ -2658,13 +2676,15 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                     remaining_qty = exchange_qty
                     PARTIAL_LEVEL[symbol] = 2
                     ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
-                    log.info("[REAL] %s TP2 EXCHANGE fill. Remaining=%.4f PnL≈%.2f",
+                    # F9: Mover SL a Break Even en el exchange (ahora en TP2)
+                    _update_sl_to_be(symbol, entry, entry_price, reason='BE')
+                    log.info("[REAL] %s TP2 EXCHANGE fill → BE. Remaining=%.4f PnL≈%.2f",
                              symbol, exchange_qty, tp2_pnl)
                     guardar_trade_csv(entry, tp2_p, tp2_pnl, 0, tp2_pnl, 'TP2_EXCHANGE', 'tp2_exchange')
                     _save_trade_entries()
                     _save_partial_level()
 
-            # Re-leer sl_price después de posible BE update por TP1 exchange fill
+            # Re-leer sl_price después de posible BE update por TP2 exchange fill
             sl_price = float(entry.get('sl_price', 0))
 
             sl_hit = (long_side and mark <= sl_price) or (short_side and mark >= sl_price)
@@ -2697,7 +2717,7 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 _full_cleanup(symbol)
                 continue
 
-            # ── TP1: parcial 40% + BE (nivel 0→1) — local fallback si exchange no ejecutó ──
+            # ── TP1: parcial 40% (nivel 0→1) — local fallback si exchange no ejecutó ──
             if partial_lvl == 0 and step_p > 0 and remaining_qty >= step_p:
                 tp1_price = float(entry.get('tp1_price', 0))
                 if tp1_price != entry_price:
@@ -2712,18 +2732,16 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                                 entry['remaining_qty'] = remaining_qty - tp1_qty
                                 PARTIAL_LEVEL[symbol] = 1
                                 ALERTS_HISTORY[f"{symbol}_tp1_sold"] = True
-                                # F9: Mover SL a Break Even en el exchange
-                                _update_sl_to_be(symbol, entry, entry_price, reason='BE')
-                                log.info("[REAL] %s TP1 LOCAL(40%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                                log.info("[REAL] %s TP1 LOCAL(40%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                                          symbol, entry_price, tp1_price, tp1_qty, pnl, entry['remaining_qty'])
                                 guardar_trade_csv(entry, tp1_price, pnl, 0, pnl, 'TP1_PARTIAL', 'tp1')
-                                send_telegram(f"[REAL] *{symbol} TP1 (40%)+BE*\nPnL: {pnl:.2f} USDT | SL→Entry")
+                                send_telegram(f"[REAL] *{symbol} TP1 (40%)*\nPnL: {pnl:.2f} USDT")
                                 _save_trade_entries()
                                 _save_partial_level()
                             else:
                                 log.warning("[REAL] %s TP1 parcial falló (reintentará)", symbol)
 
-            # ── TP2: parcial 30% (nivel 1→2) ──
+            # ── TP2: parcial 30% + BE (nivel 1→2) ──
             elif partial_lvl == 1 and step_p > 0 and remaining_qty >= step_p:
                 tp2_price = float(entry.get('tp2_price', 0))
                 if tp2_price != entry_price:
@@ -2739,10 +2757,12 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                                 entry['remaining_qty'] = remaining_qty - tp2_qty
                                 PARTIAL_LEVEL[symbol] = 2
                                 ALERTS_HISTORY[f"{symbol}_tp2_sold"] = True
-                                log.info("[REAL] %s TP2 LOCAL(30%%) | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
+                                # F9: Mover SL a Break Even en el exchange (ahora en TP2)
+                                _update_sl_to_be(symbol, entry, entry_price, reason='BE')
+                                log.info("[REAL] %s TP2 LOCAL(30%%)+BE | Entry=%.4f Exit=%.4f Qty=%.4f PnL=%.2f | Restan=%.4f",
                                          symbol, entry_price, tp2_price, tp2_qty, pnl, entry['remaining_qty'])
                                 guardar_trade_csv(entry, tp2_price, pnl, 0, pnl, 'TP2_PARTIAL', 'tp2')
-                                send_telegram(f"[REAL] *{symbol} TP2 (30%)*\nPnL: {pnl:.2f} USDT | Restan: {entry['remaining_qty']:.4f}")
+                                send_telegram(f"[REAL] *{symbol} TP2 (30%)+BE*\nPnL: {pnl:.2f} USDT | SL→Entry | Restan: {entry['remaining_qty']:.4f}")
                                 _save_trade_entries()
                                 _save_partial_level()
                             else:
