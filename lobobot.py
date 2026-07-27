@@ -214,7 +214,7 @@ TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50%
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
-LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '14'))  # v5: subido de 12→14 (solo setups fuertes)
+LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '11'))  # v5: subido de 12→14 (solo setups fuertes)
 MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 
@@ -250,8 +250,8 @@ LOBO_D1_CHECK_START      = int(os.environ.get('LOBO_D1_CHECK_START', '0'))
 
 # === F5: RSI y Volumen ===
 LOBO_RSI_PERIOD           = int(os.environ.get('LOBO_RSI_PERIOD', '14'))
-LOBO_RSI_OVERSOLD         = float(os.environ.get('LOBO_RSI_OVERSOLD', '35'))
-LOBO_RSI_OVERBOUGHT       = float(os.environ.get('LOBO_RSI_OVERBOUGHT', '65'))
+LOBO_RSI_OVERSOLD         = float(os.environ.get('LOBO_RSI_OVERSOLD', '45'))
+LOBO_RSI_OVERBOUGHT       = float(os.environ.get('LOBO_RSI_OVERBOUGHT', '55'))
 LOBO_VOL_RATIO_MIN        = float(os.environ.get('LOBO_VOL_RATIO_MIN', '1.5'))
 LOBO_VOL_PERIOD           = int(os.environ.get('LOBO_VOL_PERIOD', '20'))
 
