@@ -1010,8 +1010,50 @@ def detectar_estructura_elliott_v3(df_h4: pd.DataFrame) -> dict:
 # F1: Gestión de Capital en 3 Vectores
 # ================================================================
 def capital_disponible_futuros(balance_total: float) -> float:
-    """Retorna el capital disponible para futuros = 20% del balance total."""
+    """Retorna el capital de futuros = 80% del balance total (bruto, sin descontar posiciones)."""
     return balance_total * LOBO_FUTUROS_PCT
+
+def calcular_margen_real_disponible(balance_total: float, positions_list: Optional[list] = None) -> float:
+    """
+    Calcula el margen REAL disponible para nuevas posiciones.
+    Descuenta el margen ya comprometido en posiciones abiertas.
+    Retorna max(0, capital_futuros - margen_lockeado).
+
+    Args:
+        balance_total: Balance total USDT
+        positions_list: Lista pre-fetched de posiciones (evita doble API call).
+                        Si es None, hace fetch internamente.
+    """
+    capital_fut = capital_disponible_futuros(balance_total)
+    margen_lockeado = 0.0
+    try:
+        if exchange is None or PAPER_TRADE:
+            # Paper mode: estimar desde TRADE_ENTRIES
+            for sym, entry in TRADE_ENTRIES.items():
+                size = float(entry.get('size_usdt', 0))
+                margen_lockeado += size
+            return max(0.0, capital_fut - margen_lockeado)
+        if positions_list is None:
+            positions_list = exchange.fetch_positions()
+        for pos in positions_list:
+            contracts = float(pos.get('contracts', 0))
+            if contracts <= 0:
+                continue
+            # Margin = notional / leverage
+            notional = float(pos.get('notional', 0))
+            lev = float(pos.get('leverage', 1))
+            if notional > 0 and lev > 0:
+                margen_lockeado += abs(notional) / lev
+            else:
+                # Fallback: usar initialMargin si está disponible
+                initial_margin = float(pos.get('initialMargin', 0))
+                margen_lockeado += initial_margin
+    except Exception as e:
+        log.debug("Error calculando margen lockeado: %s", e)
+    disponible = max(0.0, capital_fut - margen_lockeado)
+    log.info("Margen real: FutBruto=%.2f Lockeado=%.2f Disponible=%.2f",
+             capital_fut, margen_lockeado, disponible)
+    return disponible
 
 def capital_liquidez(balance_total: float) -> float:
     """Retorna la reserva de liquidez = 50% del balance total (intocable)."""
@@ -1560,6 +1602,7 @@ def evaluar_senal_bitlobo_v4(
     precio_actual: float, atr_val: float, balance_total: float,
     es_long: bool, df_micro: Optional[pd.DataFrame] = None,
     ventana_altcoins: Optional[dict] = None,
+    margen_real_disponible: Optional[float] = None,
 ) -> Optional[dict]:
     """
     v4: Evalúa TODAS las reglas BITLOBO con mejoras D2-D9.
@@ -1608,6 +1651,8 @@ def evaluar_senal_bitlobo_v4(
       - BTC.D usa Elliott para ventana altcoins
     """
     capital_fut = capital_disponible_futuros(balance_total)
+    # FIX 40762: Usar margen real si se proporciona (descuenta posiciones abiertas)
+    capital_effectivo = margen_real_disponible if margen_real_disponible is not None else capital_fut
     senal = {'symbol': symbol, 'precio_actual': precio_actual, 'atr_val': atr_val, 'es_long': es_long}
     detalles = []
     score = 0
@@ -1822,18 +1867,24 @@ def evaluar_senal_bitlobo_v4(
         detalles.append(f'R13:R:R_{rr:.2f}')
 
     # --- Position Sizing ---
-    riesgo_capital = capital_fut * LOBO_RISK_PCT
+    riesgo_capital = capital_effectivo * LOBO_RISK_PCT
     distancia_sl = abs(precio_actual - sl_price) / precio_actual
     if distancia_sl <= 0:
         return None
     pos_value = riesgo_capital / distancia_sl
 
-    # FIX 40762: Cap position value — margin (pos_value/leverage) must not exceed available capital
-    MAX_MARGIN_USE_PCT = 0.90  # Nunca usar más del 90% del capital de futuros
-    max_margin = capital_fut * MAX_MARGIN_USE_PCT
+    # FIX 40762: Cap sobre margen REAL disponible (no bruto)
+    MAX_MARGIN_USE_PCT = 0.90  # Nunca usar más del 90% del margen disponible
+    max_margin = capital_effectivo * MAX_MARGIN_USE_PCT
     if apalancamiento > 0:
         max_pos_value = max_margin * apalancamiento
         pos_value = min(pos_value, max_pos_value)
+
+    # FIX 40762: Si no hay margen suficiente, rechazar señal
+    margin_minimo = MIN_ORDER_USDT / apalancamiento if apalancamiento > 0 else MIN_ORDER_USDT
+    if capital_effectivo < margin_minimo:
+        log.debug("%s: capital efectivo %.2f < mínimo %.2f — saltando", symbol, capital_effectivo, margin_minimo)
+        return None
 
     if pos_value < MIN_ORDER_USDT:
         pos_value = MIN_ORDER_USDT
@@ -1845,7 +1896,7 @@ def evaluar_senal_bitlobo_v4(
     senal['liq_price'] = liq_price
     senal['size_usdt'] = margin_real
     senal['leverage_calculado'] = apalancamiento
-    senal['riesgo_real_pct'] = round((pos_value * distancia_sl) / capital_fut * 100, 2)
+    senal['riesgo_real_pct'] = round((pos_value * distancia_sl) / max(capital_effectivo, 0.01) * 100, 2)
     score += 1
     detalles.append(f'F3:lev{apalancamiento:.0f}x_mrg{margin_real:.2f}')
 
@@ -2663,25 +2714,43 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
             if LOBO_HEDGE_ENABLED and symbol not in HEDGE_ENTRIES:
                 hedge_params = evaluar_cobertura_v4(entry, mark)
                 if hedge_params:
-                    log.info("[REAL v4] %s: Activando cobertura %s lev=%.0fx",
-                             symbol, hedge_params['side'], hedge_params['leverage'])
-                    HEDGE_ENTRIES[symbol] = hedge_params
-                    # Abrir cobertura real
-                    try:
-                        exchange.set_leverage(int(hedge_params['leverage']), symbol)
-                    except Exception:
-                        pass
-                    try:
-                        hedge_qty = hedge_params['size_usdt'] / mark
-                        hs = hedge_params['side']
-                        exchange.create_order(symbol, 'market', 'buy' if hs == 'long' else 'sell',
-                                              hedge_qty, params={
-                            'marginCoin': 'USDT', 'marginMode': 'isolated', 'tradeSide': 'open',
-                            'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, hedge_params['tp_price'])),
-                        })
-                    except Exception as e:
-                        log.error("Error abriendo cobertura %s: %s", symbol, e)
-                    send_telegram(f"[REAL v4] *{symbol}* Cobertura {hedge_params['side']} activada")
+                    # FIX 45110: Verificar notional mínimo (Bitget: 5 USDT)
+                    hedge_notional = float(hedge_params.get('size_usdt', 0))
+                    if hedge_notional < MIN_ORDER_USDT:
+                        log.warning("[REAL v4] %s: Cobertura notional %.2f < mínimo %.2f — saltando",
+                                    symbol, hedge_notional, MIN_ORDER_USDT)
+                    else:
+                        log.info("[REAL v4] %s: Activando cobertura %s lev=%.0fx notional=%.2f",
+                                 symbol, hedge_params['side'], hedge_params['leverage'], hedge_notional)
+                        HEDGE_ENTRIES[symbol] = hedge_params
+                        # Abrir cobertura real
+                        try:
+                            exchange.set_leverage(int(hedge_params['leverage']), symbol)
+                        except Exception:
+                            pass
+                        try:
+                            # FIX: usar step del mercado en vez de hardcodear 1
+                            try:
+                                hedge_market = exchange.market(symbol)
+                                hedge_step = hedge_market['limits']['amount']['min'] or hedge_market['precision']['amount'] or 1
+                            except Exception:
+                                hedge_step = 1
+                            hedge_raw_qty = hedge_notional / mark
+                            hedge_qty = math.ceil(hedge_raw_qty / hedge_step) * hedge_step
+                            hs = hedge_params['side']
+                            hedge_tp_str = str(exchange.price_to_precision(symbol, hedge_params['tp_price']))
+                            hedge_sl_str = str(exchange.price_to_precision(symbol, hedge_params['sl_price']))
+                            exchange.create_order(symbol, 'market', 'buy' if hs == 'long' else 'sell',
+                                                  hedge_qty, params={
+                                'marginCoin': 'USDT', 'marginMode': 'isolated', 'tradeSide': 'open',
+                                'presetStopSurplusPrice': hedge_tp_str,
+                                'presetStopLossPrice': hedge_sl_str,
+                            })
+                            log.info("[REAL v4] %s: Cobertura TP=%s SL=%s colocados en Bitget",
+                                     symbol, hedge_tp_str, hedge_sl_str)
+                        except Exception as e:
+                            log.error("Error abriendo cobertura %s: %s", symbol, e)
+                        send_telegram(f"[REAL v4] *{symbol}* Cobertura {hedge_params['side']} activada")
 
             # --- Gestionar cobertura activa ---
             hedge = HEDGE_ENTRIES.get(symbol)
@@ -2938,7 +3007,7 @@ def main():
                     balance_total = 0.0
 
             capital_fut = capital_disponible_futuros(balance_total)
-            log.info("Balance total=%.2f | Futuros(80%%)=%.2f | Liquidez(50%%)=%.2f",
+            log.info("Balance total=%.2f | Futuros(80%%)=%.2f | Liquidez(20%%)=%.2f",
                      balance_total, capital_fut,
                      capital_liquidez(balance_total))
 
@@ -2948,17 +3017,20 @@ def main():
             # ── Gestión de posiciones activas ──
             manage_escudo_pro_v3(balance_total)
 
-            # ── Posiciones activas ──
+            # ── Posiciones activas + margen real disponible ──
             try:
                 positions = exchange.fetch_positions()
                 busy_symbols = {p['symbol'] for p in positions if float(p['contracts']) > 0}
             except Exception:
+                positions = []
                 busy_symbols = set()
             if PAPER_TRADE:
                 busy_symbols.update(TRADE_ENTRIES.keys())
 
-            log.info("Ciclo [%s] Fut=%.2f Ocupados=%d",
-                     now.strftime('%H:%M'), capital_fut, len(busy_symbols))
+            # FIX 40762: Calcular margen REAL descontando posiciones abiertas (reusa la lista ya fetched)
+            margen_real = calcular_margen_real_disponible(balance_total, positions_list=positions)
+            log.info("Ciclo [%s] Fut=%.2f MargenReal=%.2f Ocupados=%d",
+                     now.strftime('%H:%M'), capital_fut, margen_real, len(busy_symbols))
 
             if len(busy_symbols) >= LOBO_MAX_POSITIONS:
                 time.sleep(60)
@@ -3026,6 +3098,7 @@ def main():
                     senal_long = evaluar_senal_bitlobo_v4(
                         symbol, df_15m, df_4h, precio_actual, atr_val, balance_total,
                         es_long=True, df_micro=df_5m, ventana_altcoins=ventana_altcoins,
+                        margen_real_disponible=margen_real,
                     )
 
                     sweeps = detectar_sweep(df_15m)
@@ -3047,6 +3120,7 @@ def main():
                         senal_short = evaluar_senal_bitlobo_v4(
                             symbol, df_15m, df_4h, precio_actual, atr_val, balance_total,
                             es_long=False, df_micro=df_5m, ventana_altcoins=ventana_altcoins,
+                            margen_real_disponible=margen_real,
                         )
 
                     senal = senal_long or senal_short
@@ -3071,18 +3145,25 @@ def main():
                     step = market['limits']['amount']['min'] or market['precision']['amount']
                     min_qty = math.ceil(MIN_ORDER_USDT / precio_actual / step) * step
                     if raw_qty < min_qty:
-                        riesgo_ajustado = (min_qty * precio_actual * abs(precio_actual - sl_price) / precio_actual) / capital_fut * 100
+                        # FIX: usar margen_real para calcular riesgo real sobre capital disponible
+                        riesgo_ajustado = (min_qty * precio_actual * abs(precio_actual - sl_price) / precio_actual) / max(margen_real, 0.01) * 100
                         if riesgo_ajustado > 10.0:
-                            log.info("%s: riesgo %.1f%% > 10%%, saltando", symbol, riesgo_ajustado)
+                            log.info("%s: riesgo %.1f%% > 10%% (margen_real=%.2f), saltando",
+                                     symbol, riesgo_ajustado, margen_real)
                             continue
                         raw_qty = min_qty
                     qty = math.ceil(raw_qty / step) * step
                     actual_margin = (qty * precio_actual) / lev_calc
 
-                    # FIX 40762: Verificar que el margen no exceda el capital disponible
-                    max_margin_real = capital_fut * 0.90
+                    # FIX 40762: Verificar que el margen NO exceda el margen REAL disponible
+                    # margen_real = capital_futuros - margen_lockeado en posiciones abiertas
+                    max_margin_real = margen_real * 0.90  # Nunca usar >90% del disponible
+                    if max_margin_real < MIN_ORDER_USDT / lev_calc:
+                        log.info("%s: margen real %.2f USDT < minimo — sin capital para abrir", symbol, max_margin_real)
+                        continue
                     if actual_margin > max_margin_real:
-                        log.info("%s: margin %.2f > max %.2f, ajustando qty", symbol, actual_margin, max_margin_real)
+                        log.info("%s: margin %.2f > max %.2f (real disp.), ajustando qty",
+                                 symbol, actual_margin, max_margin_real)
                         qty = math.floor((max_margin_real * lev_calc / precio_actual) / step) * step
                         actual_margin = (qty * precio_actual) / lev_calc
 
@@ -3117,7 +3198,7 @@ def main():
                         'capital_futuros': capital_fut,
                         'atr_val': senal.get('atr_val', 0),
                         'size_usdt': round(actual_margin, 2),
-                        'risk_pct': round(actual_margin / max(capital_fut, 1) * 100, 2),
+                        'risk_pct': round(actual_margin / max(margen_real, 0.01) * 100, 2),
                         'score': score,
                         'rr': rr,
                     }
@@ -3163,6 +3244,7 @@ def main():
                         exchange.create_order(symbol, 'market', 'buy' if es_long else 'sell', qty, params=params)
                     except Exception as e:
                         log.error("Error orden %s %s: %s", side_name, symbol, e)
+                        COOLDOWNS[symbol] = time.time() + 14400  # 4h cooldown tras error
                         continue
 
                     # Colocar TP1, TP2 y SL como plan orders en exchange
