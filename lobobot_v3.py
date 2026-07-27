@@ -3257,14 +3257,24 @@ def main():
                     sl_ok = False
                     # BUG #3 FIX: sleep(1) → sleep(3) para que el position se refleje en Bitget
                     time.sleep(3)
-                    if tp1_qty_plan >= step and tp1_qty_plan * tp1_price >= 5:
+                    if tp1_qty_plan >= step and tp1_qty_plan * tp1_price >= MIN_ORDER_USDT:
                         tp1_ok = _place_tp_plan(symbol, tp1_price, tp1_qty_plan, trade_side)
                         if tp1_ok:
                             log.info("[REAL] %s TP1 plan: %s @ %s (40%%)", symbol, tp1_qty_plan, tp1_price)
-                    if tp2_qty_plan >= step and tp2_qty_plan * tp2_price >= 5:
+                    if tp2_qty_plan >= step and tp2_qty_plan * tp2_price >= MIN_ORDER_USDT:
                         tp2_ok = _place_tp_plan(symbol, tp2_price, tp2_qty_plan, trade_side)
                         if tp2_ok:
                             log.info("[REAL] %s TP2 plan: %s @ %s (30%%)", symbol, tp2_qty_plan, tp2_price)
+
+                    # FALLBACK: Posiciones pequeñas — si TP1/TP2 no caben en $5,
+                    # colocar un solo TP con la qty completa a precio TP1
+                    if not tp1_ok and not tp2_ok:
+                        fallback_qty = math.floor(qty / step) * step
+                        if fallback_qty >= step and fallback_qty * tp1_price >= MIN_ORDER_USDT:
+                            tp1_ok = _place_tp_plan(symbol, tp1_price, fallback_qty, trade_side)
+                            if tp1_ok:
+                                log.info("[REAL] %s TP1 FALLBACK full qty=%s @ %s",
+                                         symbol, fallback_qty, tp1_price)
 
                     # BUG #5 FIX: Leer qty REAL del position tras la orden market
                     real_qty = qty
