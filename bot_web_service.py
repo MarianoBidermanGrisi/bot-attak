@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-bot_web_service.py — Punto de entrada para Render Web Service (LOBOBOT v2)
+bot_web_service.py — Punto de entrada para Render Web Service (LOBOBOT v4)
 ==========================================================================
-Importa lobobot v2 (BITLOBO formalizado) y ejecuta:
+Importa lobobot_v3 (BITLOBO v4 con F1-F12 + D2-D9) y ejecuta:
   1. Servidor Flask (health checks, uptime, config)
-  2. Bot de trading BITLOBO v2 en segundo plano (thread + asyncio)
+  2. Bot de trading BITLOBO v4 en segundo plano (thread + asyncio)
 
 Uso en Render (Procfile):
     web: gunicorn bot_web_service:app --timeout 120 --workers 1 --threads 2
@@ -13,10 +13,10 @@ Uso local:
     python bot_web_service.py
 
 Endpoints:
-    GET /         → "LOBOBOT v2 - online"
-    GET /health   → JSON status + config BITLOBO v2
+    GET /         → "LOBOBOT v4 - online"
+    GET /health   → JSON status + config BITLOBO v4
     GET /status   → JSON bot status + uptime
-    GET /config   → JSON config completa de las 18 reglas
+    GET /config   → JSON config completa de las 22 reglas
 """
 import os
 import sys
@@ -29,9 +29,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("web")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
-# ── Importar el monolito v2 ────────────────────────────────────
+# ── Importar lobobot_v3 (v4) ──────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lobobot
+import lobobot_v3 as lobobot
 
 # ── Flask App ──────────────────────────────────────────────────
 try:
@@ -49,15 +49,15 @@ BOT_STARTED_AT = None
 # ── Endpoints ──────────────────────────────────────────────────
 @app.route("/")
 def index():
-    return "LOBOBOT v2 (BITLOBO FORMALIZADO) - online", 200
+    return "LOBOBOT v4 (BITLOBO F1-F12 + D2-D9) - online", 200
 
 @app.route("/health")
 def health():
     uptime = round(time.time() - BOT_STARTED_AT, 1) if BOT_STARTED_AT else 0
     return jsonify({
         "status": "running",
-        "bot": "lobobot_v2",
-        "strategy": "BITLOBO_18_REGLAS",
+        "bot": "lobobot_v4",
+        "strategy": "BITLOBO_22_REGLAS",
         "active": BOT_ACTIVE,
         "uptime_seconds": uptime,
         "paper_mode": lobobot.PAPER_TRADE,
@@ -76,6 +76,8 @@ def status_handler():
         "active_symbols": list(lobobot.TRADE_ENTRIES.keys()),
         "active_count": len(lobobot.TRADE_ENTRIES),
         "cooldown_count": len(lobobot.COOLDOWNS),
+        "hedge_active": list(lobobot.HEDGE_ENTRIES.keys()),
+        "partial_levels": dict(lobobot.PARTIAL_LEVEL),
     })
 
 @app.route("/config")
@@ -84,10 +86,16 @@ def config_handler():
         # Escaneo
         "top_n": lobobot.TOP_N,
         "timeframes": {
-            "h4": lobobot.TIMEFRAME_4H,
-            "d1": lobobot.TIMEFRAME_D1,
+            "principal_15m": lobobot.TIMEFRAME_PRINCIPAL,
+            "confirmacion_4h": lobobot.TIMEFRAME_CONFIRMACION,
+            "micro_5m": lobobot.TIMEFRAME_MICRO,
         },
-        # Reglas BITLOBO
+        # Capital split (F1)
+        "capital_split": {
+            "liquidez_pct": round(lobobot.LOBO_LIQUIDEZ_PCT * 100, 1),
+            "futuros_pct": round(lobobot.LOBO_FUTUROS_PCT * 100, 1),
+        },
+        # Reglas BITLOBO v4 (22 puntos)
         "rules": {
             "R1_impulso": {
                 "min_velas": lobobot.LOBO_IMPULSO_MIN_VELAS,
@@ -99,6 +107,11 @@ def config_handler():
                 "periodo": lobobot.LOBO_ADX_PERIOD,
                 "rango": [lobobot.LOBO_ADX_MIN, lobobot.LOBO_ADX_MAX],
                 "descendente_velas": lobobot.LOBO_ADX_DESC_VELAS,
+            },
+            "R5_rsi": {
+                "periodo": lobobot.LOBO_RSI_PERIOD,
+                "oversold": lobobot.LOBO_RSI_OVERSOLD,
+                "overbought": lobobot.LOBO_RSI_OVERBOUGHT,
             },
             "R6_fvg": {
                 "min_gap_atr": lobobot.LOBO_FVG_MIN_GAP_ATR,
@@ -116,27 +129,37 @@ def config_handler():
                 "mecha_min_atr": lobobot.LOBO_MECHA_MIN_ATR,
                 "cuerpo_mecha_ratio": lobobot.LOBO_MECHA_CUERPO_RATIO,
             },
+            "D2_expanded_flat": "+2 pts si encontrado",
+            "D3_choch": "+1 pts Change of Character",
+            "D4_microfractalidad": "+1 pts 5+ ondas en 5m",
+            "D5_flat_continuacion": "+1 pts lateral post-ruptura",
         },
-        # Riesgo
+        # Riesgo (F8)
         "risk": {
             "risk_pct": round(lobobot.LOBO_RISK_PCT * 100, 2),
+            "risk_pct_exceptional": round(lobobot.LOBO_RISK_PCT_EXCEP * 100, 2),
             "max_positions": lobobot.LOBO_MAX_POSITIONS,
-            "leverage": lobobot.LEVERAGE,
             "paper_trade": lobobot.PAPER_TRADE,
         },
-        # TP/SL
+        # TP/SL (F12 PnL-based)
         "tp_sl": {
-            "tp1_size_pct": lobobot.LOBO_TP1_SIZE * 100,
-            "tp2_size_pct": lobobot.LOBO_TP2_SIZE * 100,
-            "tp3_size_pct": lobobot.LOBO_TP3_SIZE * 100,
-            "tp2_atr_mult": lobobot.LOBO_TP2_ATR_MULT,
-            "tp3_atr_mult": lobobot.LOBO_TP3_ATR_MULT,
+            "tp1_pnl_target": round(lobobot.TP1_PNL_TARGET * 100, 1),
+            "tp2_pnl_target": round(lobobot.TP2_PNL_TARGET * 100, 1),
+            "tp3_pnl_target": round(lobobot.TP3_PNL_TARGET * 100, 1),
+            "tp1_close_pct": round(lobobot.TP1_CLOSE_PCT * 100, 1),
+            "tp2_close_pct": round(lobobot.TP2_CLOSE_PCT * 100, 1),
+            "sl_atr": lobobot.LOBO_SL_ATR,
         },
-        # BE + Trailing
-        "be_trailing": {
-            "be_trigger_pct": round(lobobot.LOBO_BE_TRIGGER_PCT * 100, 2),
-            "be_offset_pct": round(lobobot.LOBO_BE_OFFSET_PCT * 100, 2),
-            "trail_atr_mult": lobobot.LOBO_TRAIL_ATR_MULT,
+        # F3: Apalancamiento dinámico + F4: Cobertura
+        "leverage_hedge": {
+            "hedge_enabled": lobobot.LOBO_HEDGE_ENABLED,
+            "hedge_margin_pct": round(lobobot.LOBO_HEDGE_MARGIN_PCT * 100, 1),
+            "hedge_trigger_pct": round(lobobot.LOBO_HEDGE_TRIGGER_PCT * 100, 1),
+        },
+        # Scoring
+        "scoring": {
+            "max_score": 22,
+            "min_score": lobobot.LOBO_SCORE_MIN,
         },
     })
 
@@ -145,20 +168,20 @@ def _start_bot():
     global BOT_ACTIVE, BOT_STARTED_AT
     BOT_STARTED_AT = time.time()
     BOT_ACTIVE = True
-    log.info("LOBOBOT v2 worker started in background thread")
+    log.info("LOBOBOT v4 worker started in background thread")
     try:
         if lobobot.exchange is None:
             lobobot.init_exchange()
         lobobot.main()
     except Exception as e:
-        log.error("LOBOBOT v2 worker error: %s", e, exc_info=True)
+        log.error("LOBOBOT v4 worker error: %s", e, exc_info=True)
     finally:
         BOT_ACTIVE = False
-        log.info("LOBOBOT v2 worker stopped")
+        log.info("LOBOBOT v4 worker stopped")
 
-bot_thread = threading.Thread(target=_start_bot, daemon=True, name="LOBOBOT_v2")
+bot_thread = threading.Thread(target=_start_bot, daemon=True, name="LOBOBOT_v4")
 bot_thread.start()
-log.info("LOBOBOT v2 thread launched from bot_web_service")
+log.info("LOBOBOT v4 thread launched from bot_web_service")
 
 # ── Entry point directo ────────────────────────────────────────
 if __name__ == "__main__":
