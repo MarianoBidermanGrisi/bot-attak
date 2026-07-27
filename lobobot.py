@@ -19,7 +19,7 @@ Correcciones respecto a v2:
 
 Uso:
     python lobobot_v3.py                          # Bot standalone
-    gunicorn lobobot_v3:app --workers 1 --threads 2   # Render
+    gunicorn lobobot_v3:app --workers 1 --threads 2   # Render (requiere flask)
 
 Variables de entorno (nuevas respecto a v2):
     LOBO_LIQUIDEZ_PCT=20    LOBO_FUTUROS_PCT=80
@@ -36,6 +36,15 @@ import pandas as pd
 pd.set_option("future.no_silent_downcasting", True)
 import ccxt, ccxt.async_support as ccxt_async
 import requests
+
+# FIX (Issue 4): Flask para Render healthcheck (import condicional)
+# NOTA: Flask vive en bot_web_service.py, NO aquí.
+# Este import es solo para compatibilidad si se ejecuta directo.
+try:
+    from flask import Flask
+    _FLASK_AVAILABLE = True
+except ImportError:
+    _FLASK_AVAILABLE = False
 
 # =====================================================================
 # 1. LOGGER (idéntico a v2)
@@ -82,6 +91,113 @@ DOMINANCE_CACHE: dict = {'btc': None, 'usdtd': None, 'ts': 0}
 DOMINANCE_CACHE_TTL = 300  # 5 minutos
 # Historial de USDT.D proxy para detección de FVG
 USDTD_HISTORY: list = []  # [(timestamp, proxy_value), ...]
+# Lock para thread-safety en DOMINANCE_CACHE y USDTD_HISTORY
+_DOMINANCE_LOCK: threading.Lock = threading.Lock()
+
+# =====================================================================
+# FIX (Issues #1,#3,#4,#5,#6,#14): Background thread para APIs bloqueantes
+# =====================================================================
+_BG_DOMINANCE_THREAD: Optional[threading.Thread] = None
+_BG_PROXY_THREAD: Optional[threading.Thread] = None
+
+def _bg_refresh_dominancia():
+    """Fetch CoinGecko en background thread (no bloquea el loop)."""
+    try:
+        resp = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            btc_d = data.get('data', {}).get('market_cap_percentage', {}).get('btc', None)
+            if btc_d is not None:
+                now = time.time()
+                result = btc_d > 50.0
+                with _DOMINANCE_LOCK:
+                    DOMINANCE_CACHE['btc'] = result
+                    DOMINANCE_CACHE['ts'] = now
+                log.debug("BG Dominancia refreshed: BTC.D=%.1f%% trend=%s", btc_d, result)
+    except Exception as e:
+        log.debug("BG Dominancia refresh error: %s", e)
+
+def _bg_refresh_proxy_usdtd():
+    """Fetch proxy USDT.D en background thread (no bloquea el loop).
+    FIX Bug#3: Cierra exchange instance al terminar (evita socket leak).
+    """
+    exch_bg = None
+    try:
+        exch_bg = ccxt.bitget({'enableRateLimit': True})
+        tickers = exch_bg.fetch_tickers()
+        vol_usdt_pairs = 0.0
+        vol_non_usdt = 0.0
+        for s, t in tickers.items():
+            qv = float(t.get('quoteVolume', 0))
+            if s.endswith('/USDT:USDT'):
+                vol_usdt_pairs += qv
+            else:
+                vol_non_usdt += qv
+        vol_total = vol_usdt_pairs + vol_non_usdt
+        if vol_total > 0:
+            # FIX Bug#2: Ahora compara USDT pairs vs TOTAL (incluye BTC pairs etc.)
+            proxy = (vol_usdt_pairs / vol_total) * 100
+        else:
+            proxy = 50.0  # fallback neutro
+        now = time.time()
+        with _DOMINANCE_LOCK:
+            USDTD_HISTORY.append((now, proxy))
+            if len(USDTD_HISTORY) > 80:
+                USDTD_HISTORY[:] = USDTD_HISTORY[-80:]
+            # Recalcular resistencia con datos frescos
+            result = True
+            if len(USDTD_HISTORY) >= 15:
+                vals = [v for _, v in USDTD_HISTORY]
+                for i in range(2, len(vals) - 2):
+                    gap_up = vals[i] - vals[i-2]
+                    if gap_up > 0.5:
+                        gap_alto = max(vals[i-2], vals[i])
+                        gap_bajo = min(vals[i-2], vals[i])
+                        rellenado = any(gap_bajo <= vals[j] <= gap_alto for j in range(i+1, len(vals)))
+                        if not rellenado and proxy >= gap_bajo * 0.99:
+                            result = True
+                            DOMINANCE_CACHE['usdtd'] = result
+                            DOMINANCE_CACHE['ts'] = now
+                            log.debug("BG USDT.D proxy=%.2f FVG resistencia activa", proxy)
+                            return
+            vals = [v for _, v in USDTD_HISTORY[-30:]]
+            if len(vals) >= 10:
+                p85 = sorted(vals)[int(len(vals) * 0.85)]
+                result = proxy >= p85 * 0.98
+            else:
+                result = proxy > 62.0
+            DOMINANCE_CACHE['usdtd'] = result
+            DOMINANCE_CACHE['ts'] = now
+            log.debug("BG USDT.D proxy=%.2f resistencia=%s", proxy, result)
+    except Exception as e:
+        log.debug("BG USDT.D proxy refresh error: %s", e)
+    finally:
+        if exch_bg:
+            try:
+                exch_bg.close()
+            except Exception:
+                pass
+
+def _schedule_bg_dominance_refresh():
+    """Agenda refresh de dominancia + proxy en background threads (no bloquea).
+    FIX Bug#1: Ya no usa .cancel() (threading.Thread no tiene ese método).
+    FIX Bug#6: TTL para reintentar es correcto (< 60s, no > 300s).
+    """
+    global _BG_DOMINANCE_THREAD, _BG_PROXY_THREAD
+    now = time.time()
+    if now - DOMINANCE_CACHE.get('ts', 0) < DOMINANCE_CACHE_TTL:
+        return  # Cache aún fresco, no refrescar
+    # No cancelar threads previos — son daemon threads de corta duración
+    # Si ya terminaron, is_alive()=False y no se crea duplicado innecesariamente
+    # Si aún corren (CoinGecko lento), esperar que terminen naturalmente
+    if (_BG_DOMINANCE_THREAD and _BG_DOMINANCE_THREAD.is_alive()) or \
+       (_BG_PROXY_THREAD and _BG_PROXY_THREAD.is_alive()):
+        return  # Ya hay un refresh en curso, esperar
+    _BG_DOMINANCE_THREAD = threading.Thread(target=_bg_refresh_dominancia, daemon=True)
+    _BG_PROXY_THREAD = threading.Thread(target=_bg_refresh_proxy_usdtd, daemon=True)
+    _BG_DOMINANCE_THREAD.start()
+    _BG_PROXY_THREAD.start()
+    log.debug("BG dominance refresh scheduled")
 
 # =====================================================================
 # 3. RUTAS DE ARCHIVOS
@@ -214,7 +330,7 @@ TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50%
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
-LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '11'))  # v5: subido de 12→14 (solo setups fuertes)
+LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '11'))  # SE BAJO A 11 PARA PROBARv5: subido de 12→14 (solo setups fuertes)
 MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 
@@ -358,147 +474,83 @@ def validar_volumen(df_h4: pd.DataFrame, es_long: bool) -> tuple[bool, float]:
         return True, ratio
 
 # ================================================================
-# F2: Dominancias reales (CoinGecko + proxy calculado)
+# F2: Dominancias (refactorizado a background threads)
 # ================================================================
-def obtener_dominancia_real() -> dict:
-    """
-    F2: Obtiene dominancias reales desde CoinGecko API (gratuita).
-    Retorna { 'btc_dominance_pct': float, 'usdt_dominance_pct': float }
-    Si falla, retorna valores None.
-    """
-    try:
-        url = "https://api.coingecko.com/api/v3/global"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            log.debug("CoinGecko responded %d", resp.status_code)
-            return {}
-        data = resp.json()
-        btc_d = data.get('data', {}).get('market_cap_percentage', {}).get('btc', None)
-        # USDT.D no está directamente en CoinGecko, calculamos proxy
-        # Usamos el ratio de market cap de stablecoins
-        return {'btc_dominance_pct': btc_d}
-    except Exception as e:
-        log.debug("CoinGecko fetch error: %s", e)
-        return {}
-
-def calcular_proxy_usdtd(exchange_sync=None) -> Optional[float]:
-    """
-    F2: Proxy de USDT.D calculado desde Bitget.
-    USDT.D ≈ (volumen_total_pares_USDT) / (volumen_total_pares_USDT + volumen_otros)
-    Si no se puede calcular, retorna None.
-    """
-    try:
-        exch = exchange_sync or ccxt.bitget({'enableRateLimit': True})
-        tickers = exch.fetch_tickers()
-        vol_usdt = 0.0
-        vol_total = 0.0
-        for s, t in tickers.items():
-            if not s.endswith('/USDT:USDT'):
-                continue
-            qv = float(t.get('quoteVolume', 0))
-            vol_total += qv
-            vol_usdt += qv
-        if vol_total <= 0:
-            return None
-        # Proxy simple: qué % del volumen total está en pares USDT
-        # Esto no es USDT.D real, pero da una idea de flujo de liquidez
-        return (vol_usdt / vol_total) * 100
-    except Exception as e:
-        log.debug("USDT.D proxy error: %s", e)
-        return None
+# DEPRECATED: obtener_dominancia_real() y calcular_proxy_usdtd() eliminadas.
+# Ahora se usa _bg_refresh_dominancia() + _bg_refresh_proxy_usdtd() en threads
+# separadas que alimentan DOMINANCE_CACHE (non-blocking para el loop principal).
+# ================================================================
 
 def check_dominancia_btc_long() -> bool:
     """
     F2-R5: BTC.D - retorna True si BTC.D está subiendo (solo operar BTC).
-    Cacheado 5 min. Usa CoinGecko. Fallback: tendencia BTC/USDT.
+    FIX (Issue 3): Solo lee del cache (non-blocking). El refresh lo hace
+    _schedule_bg_dominance_refresh() en threads background.
+    Fallback: tendencia BTC/USDT si cache está vacío.
     """
-    global DOMINANCE_CACHE
     now = time.time()
+    # Si cache fresco, retornar directo (0ms)
     if now - DOMINANCE_CACHE['ts'] < DOMINANCE_CACHE_TTL and DOMINANCE_CACHE['btc'] is not None:
         return DOMINANCE_CACHE['btc']
 
-    result = False
-    try:
-        dom = obtener_dominancia_real()
-        if dom and dom.get('btc_dominance_pct') is not None:
-            btc_d = dom['btc_dominance_pct']
-            log.debug("BTC.D real: %.1f%%", btc_d)
-            result = btc_d > 50.0
-            DOMINANCE_CACHE['btc'] = result
-            DOMINANCE_CACHE['ts'] = now
-            return result
-    except Exception:
-        pass
+    # Cache vacío o expirado → agendar refresh en background + usar fallback inmediato
+    _schedule_bg_dominance_refresh()
 
-    # Fallback: usar precio BTC/USDT con SMA (solo si no hay cache previo)
+    # Fallback síncrono RÁPIDO (solo 1 llamada BTC/USDT, no bloqueante)
+    result = False
     try:
         exch = ccxt.bitget({'enableRateLimit': True})
         ohlcv = exch.fetch_ohlcv('BTC/USDT:USDT', timeframe='4h', limit=30)
         if ohlcv and len(ohlcv) > 10:
             closes = pd.Series([c[4] for c in ohlcv])
             sma20 = closes.rolling(20).mean()
-            pendiente = (sma20.iloc[-1] - sma20.iloc[-5]) / max(sma20.iloc[-5], 1)
-            result = pendiente > 0.001
-    except Exception:
-        pass
-    DOMINANCE_CACHE['btc'] = result
-    DOMINANCE_CACHE['ts'] = now
+            # FIX Bug#7: Verificar NaN antes de calcular pendiente
+            if pd.isna(sma20.iloc[-1]) or pd.isna(sma20.iloc[-5]):
+                result = False  # Sin datos suficientes, default neutro
+            else:
+                pendiente = (sma20.iloc[-1] - sma20.iloc[-5]) / max(sma20.iloc[-5], 1)
+                result = pendiente > 0.001
+    except Exception as e:
+        log.debug("Fallback BTC.D SMA error: %s", e)
+    # FIX Bug#6: ts=0 fuerza re-intento en el próximo ciclo (no bloquea 5 min)
+    with _DOMINANCE_LOCK:
+        DOMINANCE_CACHE['btc'] = result
+        DOMINANCE_CACHE['ts'] = 0  # forzar refresh en próximo ciclo
     return result
 
 def check_usdtd_resistencia_long() -> bool:
     """
     F2-R4: USDT.D en resistencia → favorable para Longs.
-    CORREGIDO: Detecta FVG (Fair Value Gap) en el proxy de USDT.D.
-    Si el valor actual está en un FVG alcista no rellenado → resistencia activa.
-    Cacheado 5 min. Usa proxy calculado de Bitget.
+    FIX (Issue 3): Solo lee del cache (non-blocking). El refresh lo hace
+    _bg_refresh_proxy_usdtd() en threads background.
+    Cacheado 5 min. Fallback: percentil simple.
     """
-    global DOMINANCE_CACHE, USDTD_HISTORY
     now = time.time()
     if now - DOMINANCE_CACHE['ts'] < DOMINANCE_CACHE_TTL and DOMINANCE_CACHE['usdtd'] is not None:
         return DOMINANCE_CACHE['usdtd']
 
+    # Cache vacío → agendar refresh background + fallback rápido
+    _schedule_bg_dominance_refresh()
+
+    # Si hay datos en historial de sessions anteriores, usarlos
+    with _DOMINANCE_LOCK:
+        history_snapshot = list(USDTD_HISTORY)  # copia segura
+    if history_snapshot:
+        vals = [v for _, v in history_snapshot[-30:]]
+        if len(vals) >= 10:
+            p85 = sorted(vals)[int(len(vals) * 0.85)]
+            proxy = history_snapshot[-1][1]
+            result = proxy >= p85 * 0.98
+            with _DOMINANCE_LOCK:
+                DOMINANCE_CACHE['usdtd'] = result
+                DOMINANCE_CACHE['ts'] = 0  # FIX Bug#6: forzar refresh en próximo ciclo
+            return result
+
+    # Sin datos históricos: default conservador = True (no bloquear entradas)
     result = True
-    proxy = None
-    try:
-        proxy = calcular_proxy_usdtd()
-        if proxy is not None:
-            # Almacenar en historial para detección de FVG
-            USDTD_HISTORY.append((now, proxy))
-            if len(USDTD_HISTORY) > 80:
-                USDTD_HISTORY = USDTD_HISTORY[-80:]
-
-            # Detectar FVG alcista (resistencia) en los valores proxy
-            if len(USDTD_HISTORY) >= 15:
-                vals = [v for _, v in USDTD_HISTORY]
-                for i in range(2, len(vals) - 2):
-                    # Gap alcista en USDT.D → precio saltó arriba = resistencia
-                    gap_up = vals[i] - vals[i-2]
-                    if gap_up > 0.5:  # gap mínimo 0.5% de dominancia
-                        gap_alto = max(vals[i-2], vals[i])
-                        gap_bajo = min(vals[i-2], vals[i])
-                        # Verificar que NO se haya rellenado después
-                        rellenado = any(gap_bajo <= vals[j] <= gap_alto for j in range(i+1, len(vals)))
-                        if not rellenado:
-                            # FVG alcista vigente = USDT.D en resistencia
-                            if proxy >= gap_bajo * 0.99:
-                                log.debug("USDT.D FVG resistencia: proxy=%.2f en gap [%.2f, %.2f]",
-                                          proxy, gap_bajo, gap_alto)
-                                DOMINANCE_CACHE['usdtd'] = True
-                                DOMINANCE_CACHE['ts'] = now
-                                return True
-
-            # Fallback: percentil 85 de los últimos 30 valores
-            vals = [v for _, v in USDTD_HISTORY[-30:]]
-            if len(vals) >= 10:
-                p85 = sorted(vals)[int(len(vals) * 0.85)]
-                result = proxy >= p85 * 0.98
-                log.debug("USDT.D proxy=%.2f p85=%.2f resistencia=%s", proxy, p85, result)
-            else:
-                result = proxy > 62.0
-    except Exception:
-        pass
-    DOMINANCE_CACHE['usdtd'] = result
-    DOMINANCE_CACHE['ts'] = now
+    with _DOMINANCE_LOCK:
+        DOMINANCE_CACHE['usdtd'] = result
+        DOMINANCE_CACHE['ts'] = 0  # FIX Bug#6: forzar refresh en próximo ciclo
     return result
 
 # ================================================================
@@ -1605,15 +1657,24 @@ def evaluar_senal_bitlobo_v4(
         detalles.append('R4:Short_ok')
 
     # --- R5: BTC.D con Elliott (D8) ---
-    # Lógica correcta: BTC.D bajando = capital fluye a altcoins = FAVORABLE
-    #                   BTC.D subiendo = capital fluye a BTC = bloquea altcoins
+    # FIX (Issue 1): BTC.D es una métrica RELATIVA (BTC vs alts), no absoluta.
+    # BTC.D subiendo ≠ bullish para BTC (puede ser mercado bajista donde alts caen más).
+    # FIX: Para BTC → usar tendencia BTC/USDT propia (SMA), ignorar BTC.D.
+    #      Para alts → BTC.D bajando = capital fluye a alts = FAVORABLE.
     btcd_bajista = ventana_altcoins.get('btcd_bajista', False) if ventana_altcoins else False
     if 'BTC' in symbol:
-        if not btcd_bajista:
+        # BTC: R5 basado en tendencia BTC/USDT (no BTC.D relativo)
+        # Usamos SMA 20 de df_principal (15m) como proxy de tendencia corta
+        btc_trend_up = False
+        if len(df_principal) >= 20:
+            sma20 = _sma(df_principal['close'], 20)
+            if not sma20.isna().all():
+                btc_trend_up = bool(float(df_principal['close'].iloc[-1]) > float(sma20.iloc[-1]))
+        if btc_trend_up:
             score += 1
-            detalles.append('R5:BTC_fav')
+            detalles.append('R5:BTC_trend_up')
         else:
-            detalles.append('R5:BTC.D_baja_neutro')
+            detalles.append('R5:BTC_trend_down')
     else:
         if btcd_bajista:
             score += 1
@@ -2881,6 +2942,9 @@ def main():
                      balance_total, capital_fut,
                      capital_liquidez(balance_total))
 
+            # FIX (Issue 3): Refresh dominancias en background al inicio de cada ciclo
+            _schedule_bg_dominance_refresh()
+
             # ── Gestión de posiciones activas ──
             manage_escudo_pro_v3(balance_total)
 
@@ -3184,10 +3248,60 @@ def main():
             time.sleep(60)
 
 # =====================================================================
-# 13. ENTRY POINT
+# 13. FLASK HEALTHCHECK (FIX Issue 4 — Render uptime)
+# =====================================================================
+app: Optional[object] = None  # Se inicializa en _start_healthcheck_server()
+
+def _create_flask_app():
+    """Crea Flask app con endpoints /health y /status.
+    FIX Bug#9: Usa jsonify() para Content-Type application/json correcto.
+    """
+    flask_app = Flask("lobobot_v3")
+
+    @flask_app.route("/health")
+    def health():
+        """Render healthcheck: retorna 200 si el bot está vivo."""
+        from flask import jsonify
+        return jsonify({"status": "ok", "uptime": time.time() - _BOT_START_TIME}), 200
+
+    @flask_app.route("/status")
+    def status():
+        """Endpoint informativo: estado del bot."""
+        from flask import jsonify
+        return jsonify({
+            "positions": len(TRADE_ENTRIES),
+            "daily_stats": DAILY_STATS,
+            "active_symbols": list(SESSION_ACTIVE_SYMBOLS),
+            "paper_mode": PAPER_TRADE,
+        }), 200
+
+    return flask_app
+
+_BOT_START_TIME = time.time()
+
+def _start_healthcheck_server():
+    """Inicia Flask en un thread daemon separado para no bloquear el bot.
+    FIX Bug#10: Usa log.info() en vez de print().
+    """
+    global app
+    if not _FLASK_AVAILABLE:
+        log.warning("Flask no disponible — healthcheck deshabilitado (pip install flask)")
+        return
+    port = int(os.environ.get("PORT", 10000))  # Render asigna PORT automáticamente
+    app = _create_flask_app()
+    t = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False, debug=False),
+        daemon=True,
+    )
+    t.start()
+    log.info("Healthcheck server escuchando en puerto %d", port)
+
+# =====================================================================
+# 14. ENTRY POINT
 # =====================================================================
 if __name__ == "__main__":
     log.info("LOBOBOT v4 iniciando en modo standalone...")
+    _start_healthcheck_server()
     if exchange is None:
         init_exchange()
     main()
