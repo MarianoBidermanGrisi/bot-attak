@@ -279,22 +279,22 @@ LOBO_SPOT_MARTINGALA_NIVELES = [
 ]
 
 # === Parámetros BITLOBO (heredados de v2) ===
-LOBO_IMPULSO_MIN_VELAS   = int(os.environ.get('LOBO_IMPULSO_MIN_VELAS', '8'))
+LOBO_IMPULSO_MIN_VELAS   = int(os.environ.get('LOBO_IMPULSO_MIN_VELAS', '5'))
 LOBO_IMPULSO_MAX_VELAS   = int(os.environ.get('LOBO_IMPULSO_MAX_VELAS', '40'))
-LOBO_IMPULSO_PEND_MIN    = float(os.environ.get('LOBO_IMPULSO_PEND_MIN', '0.02'))
-LOBO_SMA100_TOL_ATR      = float(os.environ.get('LOBO_SMA100_TOL_ATR', '1.0'))
+LOBO_IMPULSO_PEND_MIN    = float(os.environ.get('LOBO_IMPULSO_PEND_MIN', '0.01'))
+LOBO_SMA100_TOL_ATR      = float(os.environ.get('LOBO_SMA100_TOL_ATR', '2.0'))
 LOBO_ADX_PERIOD          = int(os.environ.get('LOBO_ADX_PERIOD', '14'))
-LOBO_ADX_MIN             = float(os.environ.get('LOBO_ADX_MIN', '15'))
+LOBO_ADX_MIN             = float(os.environ.get('LOBO_ADX_MIN', '10'))
 LOBO_ADX_MAX             = float(os.environ.get('LOBO_ADX_MAX', '50'))
 LOBO_ADX_DESC_VELAS      = int(os.environ.get('LOBO_ADX_DESC_VELAS', '6'))
-LOBO_FVG_MIN_GAP_ATR     = float(os.environ.get('LOBO_FVG_MIN_GAP_ATR', '0.3'))
+LOBO_FVG_MIN_GAP_ATR     = float(os.environ.get('LOBO_FVG_MIN_GAP_ATR', '0.15'))
 LOBO_FVG_MAX_VELAS       = int(os.environ.get('LOBO_FVG_MAX_VELAS', '48'))
-LOBO_OB_MIN_MOV_ATR      = float(os.environ.get('LOBO_OB_MIN_MOV_ATR', '2.0'))
+LOBO_OB_MIN_MOV_ATR      = float(os.environ.get('LOBO_OB_MIN_MOV_ATR', '1.0'))
 LOBO_OB_LOOKBACK         = int(os.environ.get('LOBO_OB_LOOKBACK', '10'))
 LOBO_SWEEP_LOOKBACK      = int(os.environ.get('LOBO_SWEEP_LOOKBACK', '10'))
 LOBO_SWEEP_MAX_PEN_ATR   = float(os.environ.get('LOBO_SWEEP_MAX_PEN_ATR', '1.0'))
-LOBO_MECHA_MIN_ATR       = float(os.environ.get('LOBO_MECHA_MIN_ATR', '0.5'))
-LOBO_MECHA_CUERPO_RATIO  = float(os.environ.get('LOBO_MECHA_CUERPO_RATIO', '0.3'))
+LOBO_MECHA_MIN_ATR       = float(os.environ.get('LOBO_MECHA_MIN_ATR', '0.2'))
+LOBO_MECHA_CUERPO_RATIO  = float(os.environ.get('LOBO_MECHA_CUERPO_RATIO', '0.15'))
 LOBO_ELLIOTT_LOOKBACK    = int(os.environ.get('LOBO_ELLIOTT_LOOKBACK', '60'))
 LOBO_ATR_PERIOD          = int(os.environ.get('LOBO_ATR_PERIOD', '14'))
 
@@ -330,7 +330,7 @@ TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50%
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
-LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '13'))  # SE BAJO A 11 PARA PROBARv5: subido de 12→14 (solo setups fuertes)
+LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '18'))  # SE BAJO A 11 PARA PROBARv5: subido de 12→14 (solo setups fuertes)
 MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 
