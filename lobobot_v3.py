@@ -330,7 +330,7 @@ TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50%
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
-LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '16'))  # SE BAJO A 11 PARA PROBARv5: subido de 12→14 (solo setups fuertes)
+LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '14'))  # SE BAJO A 11 PARA PROBARv5: subido de 12→14 (solo setups fuertes)
 MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 
