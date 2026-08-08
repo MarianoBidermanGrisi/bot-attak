@@ -29,7 +29,7 @@ Variables de entorno (nuevas respecto a v2):
 
 from __future__ import annotations
 import os, sys, time, json, math, logging, asyncio, threading, csv, warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 import numpy as np
 import pandas as pd
@@ -279,28 +279,29 @@ LOBO_SPOT_MARTINGALA_NIVELES = [
 ]
 
 # === Parámetros BITLOBO (heredados de v2) ===
-LOBO_IMPULSO_MIN_VELAS   = int(os.environ.get('LOBO_IMPULSO_MIN_VELAS', '5'))
+LOBO_IMPULSO_MIN_VELAS   = int(os.environ.get('LOBO_IMPULSO_MIN_VELAS', '8'))
 LOBO_IMPULSO_MAX_VELAS   = int(os.environ.get('LOBO_IMPULSO_MAX_VELAS', '40'))
-LOBO_IMPULSO_PEND_MIN    = float(os.environ.get('LOBO_IMPULSO_PEND_MIN', '0.01'))
-LOBO_SMA100_TOL_ATR      = float(os.environ.get('LOBO_SMA100_TOL_ATR', '2.0'))
+LOBO_IMPULSO_PEND_MIN    = float(os.environ.get('LOBO_IMPULSO_PEND_MIN', '0.02'))
+LOBO_SMA100_TOL_ATR      = float(os.environ.get('LOBO_SMA100_TOL_ATR', '1.0'))
 LOBO_ADX_PERIOD          = int(os.environ.get('LOBO_ADX_PERIOD', '14'))
-LOBO_ADX_MIN             = float(os.environ.get('LOBO_ADX_MIN', '10'))
+LOBO_ADX_MIN             = float(os.environ.get('LOBO_ADX_MIN', '15'))
 LOBO_ADX_MAX             = float(os.environ.get('LOBO_ADX_MAX', '50'))
 LOBO_ADX_DESC_VELAS      = int(os.environ.get('LOBO_ADX_DESC_VELAS', '6'))
-LOBO_FVG_MIN_GAP_ATR     = float(os.environ.get('LOBO_FVG_MIN_GAP_ATR', '0.15'))
+LOBO_FVG_MIN_GAP_ATR     = float(os.environ.get('LOBO_FVG_MIN_GAP_ATR', '0.3'))
 LOBO_FVG_MAX_VELAS       = int(os.environ.get('LOBO_FVG_MAX_VELAS', '48'))
-LOBO_OB_MIN_MOV_ATR      = float(os.environ.get('LOBO_OB_MIN_MOV_ATR', '1.0'))
+LOBO_OB_MIN_MOV_ATR      = float(os.environ.get('LOBO_OB_MIN_MOV_ATR', '2.0'))
 LOBO_OB_LOOKBACK         = int(os.environ.get('LOBO_OB_LOOKBACK', '10'))
 LOBO_SWEEP_LOOKBACK      = int(os.environ.get('LOBO_SWEEP_LOOKBACK', '10'))
 LOBO_SWEEP_MAX_PEN_ATR   = float(os.environ.get('LOBO_SWEEP_MAX_PEN_ATR', '1.0'))
-LOBO_MECHA_MIN_ATR       = float(os.environ.get('LOBO_MECHA_MIN_ATR', '0.2'))
-LOBO_MECHA_CUERPO_RATIO  = float(os.environ.get('LOBO_MECHA_CUERPO_RATIO', '0.15'))
+LOBO_MECHA_MIN_ATR       = float(os.environ.get('LOBO_MECHA_MIN_ATR', '0.5'))
+LOBO_MECHA_CUERPO_RATIO  = float(os.environ.get('LOBO_MECHA_CUERPO_RATIO', '0.3'))
 LOBO_ELLIOTT_LOOKBACK    = int(os.environ.get('LOBO_ELLIOTT_LOOKBACK', '60'))
 LOBO_ATR_PERIOD          = int(os.environ.get('LOBO_ATR_PERIOD', '14'))
 
-# === F8: Riesgo base 1.5-2% (sobre el 20% de futuros) ===
-LOBO_RISK_PCT            = float(os.environ.get('LOBO_RISK_PCT', '5')) / 100  # 5%
-LOBO_RISK_PCT_EXCEP      = float(os.environ.get('LOBO_RISK_PCT_EXCEP', '10')) / 100
+# === F8: Riesgo base 1.5-2% (sobre el 80% de futuros) ===
+# FIX-AUDIT-8: 5% → 2% (alineado con F8 documentado: 1.5-2% por trade)
+LOBO_RISK_PCT            = float(os.environ.get('LOBO_RISK_PCT', '2')) / 100
+LOBO_RISK_PCT_EXCEP      = float(os.environ.get('LOBO_RISK_PCT_EXCEP', '4')) / 100
 LOBO_MAX_POSITIONS       = int(os.environ.get('LOBO_MAX_POSITIONS', '5'))
 
 # TP/SL (F12: TPs basados en zonas reales)
@@ -320,9 +321,13 @@ MAX_SL_PCT         = float(os.environ.get('LOBO_MAX_SL_PCT', '0.030'))  # 3% max
 SL_LOOKBACK        = int(os.environ.get('LOBO_SL_LOOKBACK', '20'))  # velas para SL
 
 # --- TARGETS DE PNL FIJOS (sobre margin, sin importar leverage) ---
-TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.15'))  # 15% PnL en TP1
-TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.30'))  # 30% PnL en TP2
-TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50% PnL safety net
+# FIX-AUDIT-3: restaurados a la estrategia DOCUMENTADA (25/50/100% PnL sobre margen).
+# Con 15/30/50% y lev 10-20x, TP3 = solo 2.5-5% de precio vs SL 1.5ATR (~2-3%)
+# → RR efectiva < 1 → EV negativo. 25/50/100% restaura expectativa positiva:
+#   win medio = 0.4×25 + 0.3×50 + 0.3×100 = 55% margen vs pérdida ~30-100% margen.
+TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.25'))  # 25% PnL en TP1
+TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.50'))  # 50% PnL en TP2
+TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '1.00'))  # 100% PnL safety net
 
 # F9: BE trigger ahora es "alcanzar TP2" (en vez de TP1)
 # Se usa TP2 como trigger, no un porcentaje independiente
@@ -330,13 +335,35 @@ TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50%
 # General
 LOBO_TIMEOUT_HORAS       = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE                 = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
-LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '14'))  # SE BAJO A 11 PARA PROBARv5: subido de 12→14 (solo setups fuertes)
+# FIX-AUDIT-4: umbral por evidencia de grid 2026-08-08 (score_sl_grid.py, cache v6,
+# 43 simbolos, RSI[30,70], risk 2%): score=8/SL=1.5 -> net +30,968 PF 1.37 Sharpe 7.39
+# (config v3 original). score=14 -> 3-5 trades/30d, PF ~0 (sin poder, perdedor).
+# Render: si LOBO_SCORE_MIN se setea por env, actualizar a 8 ahi tambien.
+LOBO_SCORE_MIN           = int(os.environ.get('LOBO_SCORE_MIN', '8'))
 MIN_ORDER_USDT           = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE              = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
+
+# === FIX-AUDIT-6: Fees realistas en paper/simulación (taker Bitget futures) ===
+FEE_TAKER                = float(os.environ.get('LOBO_FEE_TAKER', '0.0006'))
+
+# === FIX-AUDIT-7: Kill-Switch (parada de emergencia) ===
+LOBO_KILL_MAX_CONSEC_LOSSES = int(os.environ.get('LOBO_KILL_MAX_CONSEC_LOSSES', '4'))
+LOBO_KILL_COOLDOWN_H        = float(os.environ.get('LOBO_KILL_COOLDOWN_H', '24'))
+KILL_UNTIL: float = 0.0   # epoch ts; mientras time.time() < KILL_UNTIL → no abrir posiciones
+CONSECUTIVE_LOSSES: int = 0
 
 # SL simple 1.5 ATR (original)
 LOBO_SL_ATR              = float(os.environ.get('LOBO_SL_ATR', '1.5'))
 LOBO_SL_ATR_SMALL_VOL   = float(os.environ.get('LOBO_SL_ATR_SMALL_VOL', '5000000'))  # volumen diario para clasificar
+# FILTRO DE REGIMEN (A): hipótesis trend-following FALSADA por backtest 2026-08-06
+# (PF 1.22→0.87, +84%→-30%: eliminó los TP3 reversales). DEFAULT OFF.
+# Código mantenido por si se quiere re-probar en otro régimen de mercado.
+LOBO_REGIME_FILTER      = os.environ.get('LOBO_REGIME_FILTER', '0').lower() == '1'
+# WHITELIST (D): operar SOLO criptos reales (lista de bases separadas por coma).
+# El backtest 2026-08-06 demostró que el edge aparente vive en ETFs-sintéticos
+# (SOXL/MU/SNDK/SKHY/BLESS...) que el bot no debe tocar. Vacío = sin filtro.
+LOBO_WHITELIST          = {b.strip().upper() for b in os.environ.get('LOBO_WHITELIST', '').split(',') if b.strip()}
+LOBO_REGIME_EMA_PERIOD  = int(os.environ.get('LOBO_REGIME_EMA_PERIOD', '50'))
 
 # (No TP fixed ATR — se usa F12 zone-based)
 
@@ -366,8 +393,11 @@ LOBO_D1_CHECK_START      = int(os.environ.get('LOBO_D1_CHECK_START', '0'))
 
 # === F5: RSI y Volumen ===
 LOBO_RSI_PERIOD           = int(os.environ.get('LOBO_RSI_PERIOD', '14'))
-LOBO_RSI_OVERSOLD         = float(os.environ.get('LOBO_RSI_OVERSOLD', '45'))
-LOBO_RSI_OVERBOUGHT       = float(os.environ.get('LOBO_RSI_OVERBOUGHT', '55'))
+# AUDIT 2026-08-08 (brute-force 62 símbolos × 30d, score 8 y 14): RSI[45,55] era
+# el PEOR config (PF 1.29, Sharpe 6.14, MaxDD 42.9%). RSI[30,70] (manual) es el
+# #1 (PF 1.37, Sharpe 7.46, MaxDD 36.4%). Umbrales laxos = menos trades marginales.
+LOBO_RSI_OVERSOLD         = float(os.environ.get('LOBO_RSI_OVERSOLD', '30'))
+LOBO_RSI_OVERBOUGHT       = float(os.environ.get('LOBO_RSI_OVERBOUGHT', '70'))
 LOBO_VOL_RATIO_MIN        = float(os.environ.get('LOBO_VOL_RATIO_MIN', '1.5'))
 LOBO_VOL_PERIOD           = int(os.environ.get('LOBO_VOL_PERIOD', '20'))
 
@@ -481,6 +511,31 @@ def validar_volumen(df_h4: pd.DataFrame, es_long: bool) -> tuple[bool, float]:
 # separadas que alimentan DOMINANCE_CACHE (non-blocking para el loop principal).
 # ================================================================
 
+def check_usdtd_resistencia_short() -> bool:
+    """
+    FIX-AUDIT-5: Simétrico de R4 para SHORT.
+    Favorable para shorts si USDT.D está DÉBIL (por debajo del percentil 50 del
+    historial proxy): capital fluyendo hacia cripto/riesgo → shorts en contra
+    de la marea. Antes los shorts recibían +1 incondicional (loophole).
+    """
+    now = time.time()
+    if now - DOMINANCE_CACHE['ts'] < DOMINANCE_CACHE_TTL and DOMINANCE_CACHE.get('usdtd_short') is not None:
+        return bool(DOMINANCE_CACHE['usdtd_short'])
+    _schedule_bg_dominance_refresh()
+    with _DOMINANCE_LOCK:
+        history_snapshot = list(USDTD_HISTORY)
+    if len(history_snapshot) >= 10:
+        vals = [v for _, v in history_snapshot[-30:]]
+        mediana = sorted(vals)[len(vals) // 2]
+        proxy = history_snapshot[-1][1]
+        result = proxy <= mediana * 1.01
+        with _DOMINANCE_LOCK:
+            DOMINANCE_CACHE['usdtd_short'] = result
+            DOMINANCE_CACHE['ts'] = 0
+        return result
+    # Sin historial: neutro (no regalar puntos)
+    return False
+
 def check_dominancia_btc_long() -> bool:
     """
     F2-R5: BTC.D - retorna True si BTC.D está subiendo (solo operar BTC).
@@ -512,10 +567,15 @@ def check_dominancia_btc_long() -> bool:
                 result = pendiente > 0.001
     except Exception as e:
         log.debug("Fallback BTC.D SMA error: %s", e)
-    # FIX Bug#6: ts=0 fuerza re-intento en el próximo ciclo (no bloquea 5 min)
+    # AUDIT-FIX 2026-08-08: ts=now (antes 0). Con ts=0 el cache NUNCA estaba
+    # fresco → el fallback síncrono se repetía cada ciclo (bloqueaba ~1-2s) y
+    # _schedule_bg_dominance_refresh() re-creaba los threads cada ciclo (2 llamadas
+    # API extra por ciclo a CoinGecko+Bitget, derroche en Render free tier).
+    # Con ts=now el valor del fallback es válido 5 min y el refresh background
+    # lo sobreescribe cuando termina. Si CoinGecko falla, el fallback persiste.
     with _DOMINANCE_LOCK:
         DOMINANCE_CACHE['btc'] = result
-        DOMINANCE_CACHE['ts'] = 0  # forzar refresh en próximo ciclo
+        DOMINANCE_CACHE['ts'] = time.time()  # cache fresco 5 min
     return result
 
 def check_usdtd_resistencia_long() -> bool:
@@ -1071,7 +1131,8 @@ def calcular_precio_liquidacion(entry_price: float, leverage: float, side: str) 
     Calcula el precio de liquidación estimado para aislado en Bitget.
     Fórmula simplificada (ignora maintenance margin).
     """
-    if leverage <= 0:
+    # AUDIT-FIX (QA fuzzing): precios no positivos o lev inválido → 0 (defensivo)
+    if leverage <= 0 or entry_price <= 0:
         return 0
     if side == 'long':
         return entry_price * (1.0 - 1.0 / leverage)
@@ -1236,17 +1297,38 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
     return tp1, tp2, tp3, rr, dist_sl
 
 # ================================================================
-# F7: Timing de entrada (cierre de vela H1)
+# F7: Timing de entrada (cierre de vela 15m) — FIX-AUDIT-1
 # ================================================================
-def es_nueva_vela_principal(df: pd.DataFrame) -> bool:
-    """F7: True si la última vela principal (15m) acaba de cerrar (< 5 minutos desde cierre)."""
-    if df.empty:
+# FIX-AUDIT-1 (CRÍTICO): El código original retornaba True con la vela ABIERTA
+# (última fila del df = vela en formación, diff_ms siempre < 20 min) → el bot
+# entraba a mitad de vela con indicadores que aún repinteaban (lookahead) y
+# al precio de una vela incompleta. Evidencia: max_favorable_pct=0.00 en todos
+# los SL (entrada contra el movimiento).
+#
+# Ahora: (a) el main loop descarta la vela abierta (iloc[:-1]) antes de analizar,
+# (b) aquí solo se evalúan velas CERRADAS recientes (< 20 min desde su cierre),
+# (c) dedupe por timestamp: cada vela se evalúa UNA sola vez.
+_ULTIMA_VELA_EVALUADA: dict = {}
+
+def es_nueva_vela_principal(df: pd.DataFrame, symbol: str = '') -> bool:
+    """
+    F7 CORREGIDO: True solo si la última vela CERRADA del df acaba de cerrar
+    (hace < 20 min) y aún no ha sido evaluada en esta sesión.
+    El df debe venir SIN la vela actual abierta (ver main loop).
+    """
+    if df is None or df.empty or len(df) < 2:
         return False
-    ultimo_ts = df['timestamp'].iloc[-1]
+    ultimo_ts = int(df['timestamp'].iloc[-1])
     ahora = int(time.time() * 1000)
     diff_ms = ahora - ultimo_ts
-    # 15m = 900,000 ms + 5min buffer = 1,200,000 ms
-    return diff_ms < 1_200_000
+    # Vela de 15m = 900,000 ms. Recién cerrada si diff ∈ (0, 20 min]
+    if not (0 < diff_ms <= 1_200_000):
+        return False
+    if symbol:
+        if _ULTIMA_VELA_EVALUADA.get(symbol) == ultimo_ts:
+            return False  # Ya evaluada esta vela → no re-evaluar (evita re-entradas)
+        _ULTIMA_VELA_EVALUADA[symbol] = ultimo_ts
+    return True
 
 # =====================================================================
 # F3: Apalancamiento dinámico (liq price calza con la mecha)
@@ -1589,9 +1671,56 @@ def check_btcd_elliott_ventana_altcoins(df_btcd_4h: Optional[pd.DataFrame] = Non
 # =====================================================================
 def debe_validar_h4() -> bool:
     """D9: Solo valida estructura H4 en los 5 min posteriores al cierre de vela H4."""
-    now_utc = datetime.utcnow()
+    # AUDIT-FIX: datetime.utcnow() deprecado en 3.12+; usar timezone-aware UTC
+    now_utc = datetime.now(timezone.utc)
     # H4 cierra cada 4h: 00, 04, 08, 12, 16, 20 UTC
     return now_utc.hour % 4 == 0 and now_utc.minute <= 5
+
+
+# =====================================================================
+# A — FILTRO DE REGIMEN (tendencia 4h + D1 opcional)
+# =====================================================================
+def check_regime_tendencia(df_confirmacion: pd.DataFrame, es_long: bool,
+                           df_d1: Optional[pd.DataFrame] = None) -> tuple[bool, str]:
+    """
+    FILTRO DE REGIMEN (A): solo LONG en tendencia alcista, SHORT en bajista.
+
+    Gauge principal: EMA(LOBO_REGIME_EMA_PERIOD) sobre 4h (df_confirmacion).
+    Refuerzo: EMA sobre D1 si se provee (en backtest no se pasa D1 → solo 4h).
+    Es un hard gate (no suma score): si la tendencia contradice la dirección
+    o 4h/D1 se desalinean, la señal se rechaza.
+
+    Datos insuficientes o error => permisivo (True) para no matar el bot en
+    arranque por falta de histórico.
+    """
+    if not LOBO_REGIME_FILTER:
+        return True, 'REGIME:off'
+    try:
+        if df_confirmacion is None or 'close' not in df_confirmacion.columns:
+            return True, 'REGIME:sin_datos'
+        c4 = df_confirmacion['close'].dropna()
+        min_rows = max(LOBO_REGIME_EMA_PERIOD // 2, 10)
+        if len(c4) < min_rows:
+            return True, 'REGIME:sin_datos'
+        ema4 = _ema(c4, LOBO_REGIME_EMA_PERIOD)
+        if not pd.isna(ema4.iloc[-1]):
+            up4 = bool(float(c4.iloc[-1]) > float(ema4.iloc[-1]))
+        else:
+            up4 = bool(float(c4.iloc[-1]) > float(c4.mean()))
+        aligned = True
+        if df_d1 is not None and 'close' in df_d1.columns and len(df_d1) >= min_rows:
+            c1 = df_d1['close'].dropna()
+            ema1 = _ema(c1, LOBO_REGIME_EMA_PERIOD)
+            if not pd.isna(ema1.iloc[-1]):
+                up1 = bool(float(c1.iloc[-1]) > float(ema1.iloc[-1]))
+            else:
+                up1 = bool(float(c1.iloc[-1]) > float(c1.mean()))
+            aligned = (up4 == up1)
+        allow = (up4 if es_long else (not up4)) and aligned
+        tag = ('LONG_ok' if es_long else 'SHORT_ok') if allow else 'BLOQUEADO'
+        return allow, f'REGIME:{tag}:4h{"UP" if up4 else "DN"}'
+    except Exception:
+        return True, 'REGIME:error_permisivo'
 
 
 # =====================================================================
@@ -1603,6 +1732,7 @@ def evaluar_senal_bitlobo_v4(
     es_long: bool, df_micro: Optional[pd.DataFrame] = None,
     ventana_altcoins: Optional[dict] = None,
     margen_real_disponible: Optional[float] = None,
+    df_d1: Optional[pd.DataFrame] = None,
 ) -> Optional[dict]:
     """
     v4: Evalúa TODAS las reglas BITLOBO con mejoras D2-D9.
@@ -1658,6 +1788,13 @@ def evaluar_senal_bitlobo_v4(
     score = 0
     max_score = 22
 
+    # --- FILTRO DE REGIMEN (A): tendencia 4h (+D1) alineada con la dirección ---
+    allow_regime, det_regime = check_regime_tendencia(df_confirmacion, es_long, df_d1)
+    if not allow_regime:
+        log.debug("%s: %s bloquea %s", symbol, det_regime, 'long' if es_long else 'short')
+        return None
+    detalles.append(det_regime)
+
     # --- R1: Impulso direccional + Fibonacci ---
     impulso = detectar_impulso(df_principal)
     if not impulso:
@@ -1693,13 +1830,15 @@ def evaluar_senal_bitlobo_v4(
         detalles.append('R3:ADX_ok')
 
     # --- R4: USDT.D ---
+    # FIX-AUDIT-5: eliminado el +1 incondicional para shorts (loophole).
     if es_long:
         if check_usdtd_resistencia_long():
             score += 1
             detalles.append('R4:USDT.D_resistencia')
     else:
-        score += 1
-        detalles.append('R4:Short_ok')
+        if check_usdtd_resistencia_short():
+            score += 1
+            detalles.append('R4:USDT.D_debil')
 
     # --- R5: BTC.D con Elliott (D8) ---
     # FIX (Issue 1): BTC.D es una métrica RELATIVA (BTC vs alts), no absoluta.
@@ -1820,7 +1959,10 @@ def evaluar_senal_bitlobo_v4(
         detalles.append('D5:flat_continuacion')
 
     # --- F10: Validación D1 ---
-    if validar_estructura_d1(df_confirmacion, precio_actual, 'long' if es_long else 'short'):
+    # FIX-AUDIT-7: usar velas D1 REALES si se proveen (antes usaba 4h → semántica
+    # incorrecta: los swing points se calculaban sobre velas de 4h, no diarias).
+    df_estructura = df_d1 if (df_d1 is not None and len(df_d1) >= 10) else df_confirmacion
+    if validar_estructura_d1(df_estructura, precio_actual, 'long' if es_long else 'short'):
         score += 1
         detalles.append('F10:D1_ok')
     else:
@@ -1859,10 +2001,10 @@ def evaluar_senal_bitlobo_v4(
     senal['rr'] = rr
     senal['dist_sl'] = dist_sl
 
-    # R:R mínimo 0.8:1 (compatible con TPs conservadores 15/30/50%)
-    if rr < 0.8:
+    # R:R mínimo 1.0 (TP1) — FIX-AUDIT-4: antes 0.8 (entradas con RR pobre).
+    if rr < 1.0:
         return None
-    if rr >= 1.5:
+    if rr >= 1.2:
         score += 1
         detalles.append(f'R13:R:R_{rr:.2f}')
 
@@ -1945,6 +2087,27 @@ TRADE_CSV_HEADERS_V3 = [
 def guardar_trade_csv(entry, exit_price, raw_pnl, fees, net, status, close_reason):
     if not entry:
         return
+    # FIX-AUDIT-6: fees realistas en paper/simulación (taker 0.06% sobre notional).
+    # Antes fees=0 siempre → backtests/paper optimistas (~4 fills/trade × 0.06%).
+    if fees == 0 and FEE_TAKER > 0:
+        qty_fee = float(entry.get('quantity', 0) or entry.get('remaining_qty', 0) or 0)
+        fees = abs(exit_price * qty_fee) * FEE_TAKER
+        net = raw_pnl - fees
+    # FIX-AUDIT-7: racha de pérdidas consecutivas → kill-switch (solo cierres completos)
+    global CONSECUTIVE_LOSSES
+    if status in ('TP3', 'EXCHANGE_CLOSE') and close_reason != 'tp1_exchange' and close_reason != 'tp2_exchange':
+        CONSECUTIVE_LOSSES = 0
+    elif status in ('SL', 'LIQ', 'Timeout', 'D1_INVALID'):
+        # AUDIT-FIX: solo alimenta el kill-switch un cierre efectivamente NEGATIVO.
+        # Un cierre por Timeout/D1_INVALID con pnl >= 0 (p.ej. BE alcanzado antes)
+        # no es una pérdida y no debe acumular racha (evita falsos positivos).
+        if net < 0:
+            CONSECUTIVE_LOSSES += 1
+            if CONSECUTIVE_LOSSES >= LOBO_KILL_MAX_CONSEC_LOSSES:
+                log.warning("Racha de %d pérdidas — kill-switch se armará en el próximo ciclo",
+                            CONSECUTIVE_LOSSES)
+        else:
+            CONSECUTIVE_LOSSES = 0
     now = datetime.now()
     duration = (now - entry['entry_time']).total_seconds() / 3600
     balance_after = entry.get('balance_before', 0) + net
@@ -2042,25 +2205,67 @@ def guardar_signal_log(symbol, side, price, score, max_score, detalles,
 # =====================================================================
 # 9. FETCH ASÍNCRONO (idéntico a v2)
 # =====================================================================
+# =====================================================================
+# AUDIT-FIX (Modo A): fetch OHLCV — semáforo de concurrencia + retry 429
+# TOP_N=100 × 4 timeframes = 400 llamadas en un solo asyncio.gather() sin
+# límite → RateLimitExceeded (HTTP 429) masivo y timeouts en Bitget.
+# Ahora: máx LOBO_FETCH_CONCURRENCY concurrentes + retry exponencial en
+# rate-limit/indisponibilidad + timeout por llamada.
+# =====================================================================
+FETCH_CONCURRENCY = int(os.environ.get('LOBO_FETCH_CONCURRENCY', '10'))
+FETCH_TIMEOUT_S   = float(os.environ.get('LOBO_FETCH_TIMEOUT_S', '15'))
+
 async def _fetch_symbol_async(exch, symbol):
-    try:
-        ohlcv_15m = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_PRINCIPAL,  limit=200)  # Principal (15m)
-        ohlcv_4h  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_CONFIRMACION,  limit=100)  # Confirmación (4h)
-        ohlcv_5m  = await exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MICRO, limit=200)  # Micro (5m)
-        return symbol, ohlcv_15m, ohlcv_4h, ohlcv_5m
-    except Exception:
-        return symbol, None, None, None
+    last_err = None
+    for attempt in range(3):
+        try:
+            ohlcv_15m = await asyncio.wait_for(
+                exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_PRINCIPAL,  limit=200), FETCH_TIMEOUT_S)
+            ohlcv_4h  = await asyncio.wait_for(
+                exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_CONFIRMACION,  limit=100), FETCH_TIMEOUT_S)
+            ohlcv_5m  = await asyncio.wait_for(
+                exch.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MICRO, limit=200), FETCH_TIMEOUT_S)
+            ohlcv_1d  = await asyncio.wait_for(
+                exch.fetch_ohlcv(symbol, timeframe='1d', limit=60), FETCH_TIMEOUT_S)  # D1 real
+            return symbol, ohlcv_15m, ohlcv_4h, ohlcv_5m, ohlcv_1d
+        except (ccxt_async.RateLimitExceeded, ccxt_async.ExchangeNotAvailable) as e:
+            # Retry con backoff SOLO en rate-limit/indisponibilidad (el wait ayuda)
+            last_err = str(e)
+            wait = 2 ** attempt
+            log.warning("RL/NA %s (att %d/3): retry en %ds", symbol, attempt + 1, wait)
+            await asyncio.sleep(wait)
+        except asyncio.TimeoutError:
+            # AUDIT-FIX: en timeout no hay beneficio en backoff largo; 1 retry corto
+            # y se abandona (evita ~4.4s/símbolo en caída de red masiva).
+            last_err = 'timeout'
+            if attempt == 0:
+                log.warning("Timeout %s (att %d/2)", symbol, attempt + 1)
+                await asyncio.sleep(0.5)
+            else:
+                break
+        except Exception:
+            # Error no recuperable (símbolo inválido, etc.) → devolver vacío
+            return symbol, None, None, None, None
+    if last_err:
+        log.warning("Fetch falló %s: %s", symbol, last_err)
+    return symbol, None, None, None, None
 
 async def fetch_all_ohlcv(symbols):
     exch = ccxt_async.bitget({
         'apiKey': API_KEY, 'secret': SECRET_KEY, 'password': PASSPHRASE,
         'enableRateLimit': True, 'options': {'defaultType': 'swap'},
     })
+    sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+
+    async def _wrapped(s):
+        async with sem:
+            return await _fetch_symbol_async(exch, s)
+
     try:
-        results = await asyncio.gather(*[_fetch_symbol_async(exch, s) for s in symbols])
+        results = await asyncio.gather(*[_wrapped(s) for s in symbols])
     finally:
         await exch.close()
-    return {r[0]: (r[1], r[2], r[3]) for r in results}
+    return {r[0]: (r[1], r[2], r[3], r[4]) for r in results}
 
 # =====================================================================
 # 10. EXCHANGE — CONEXIÓN Y ÓRDENES
@@ -2653,8 +2858,10 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
 
     # v5 HYBRID: Fetch posiciones reales una vez por ciclo (detecta TP1/TP3 del exchange)
     pos_by_symbol = {}
+    positions_ok = False  # AUDIT-FIX: distingue "sin posiciones" de "fetch falló"
     try:
         all_positions = exchange.fetch_positions()
+        positions_ok = True
         for p in all_positions:
             if float(p.get('contracts', 0)) > 0:
                 pos_by_symbol[p['symbol']] = p
@@ -2683,6 +2890,21 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
             # Detectar posición en exchange
             pos_data = pos_by_symbol.get(symbol)
             remaining_qty = float(entry.get('remaining_qty', entry.get('quantity', 0)))
+
+            # AUDIT-FIX (P0): Si el exchange NO tiene la posición (fetch OK), el
+            # estado local está desincronizado — p.ej. tras reinicio con JSON
+            # persistido (incidente 2026-08-06 21:40:20: ETH 22002 → NetworkError
+            # → insufficient balance, 3 intentos de cierre en el mismo segundo).
+            # Limpiar local INMEDIATAMENTE sin lanzar órdenes de cierre.
+            # Solo aplica si el fetch de posiciones fue exitoso (evita borrar
+            # posiciones vivas cuando el fetch falla por red).
+            if positions_ok and pos_data is None:
+                if remaining_qty > 0:
+                    pnl = (mark - entry_price) * remaining_qty if side == 'long' else (entry_price - mark) * remaining_qty
+                    log.info("[REAL] %s Posición no existe en exchange — limpiando local. PnL≈%.2f", symbol, pnl)
+                    guardar_trade_csv(entry, mark, pnl, 0, pnl, 'EXCHANGE_CLOSE', 'exchange')
+                _full_cleanup(symbol)
+                continue
 
             # Si la posición ya no existe en exchange pero la tenemos local → cerrada por exchange
             if pos_data is None and remaining_qty > 0:
@@ -2982,10 +3204,16 @@ def main():
                                 today_trades.append(row)
                 except Exception:
                     pass
-                total = len(today_trades)
-                tps = [r for r in today_trades if r['status'] == 'TP']
-                sls = [r for r in today_trades if r['status'] in ('SL', 'LIQ')]
-                pnl_total = sum(float(r['net_pnl']) for r in today_trades)
+                # FIX-AUDIT-8: reporte usaba status=='TP' que NUNCA ocurre (status reales:
+                # TP1_PARTIAL/TP2_PARTIAL/TP3/SL/LIQ/Timeout/D1_INVALID/EXCHANGE_CLOSE).
+                # Ahora: WR y PnL se calculan SOLO sobre cierres completos (sin doble conteo
+                # de parciales TP1/TP2 que ya sumaron su PnL en la fila del cierre final).
+                closed = [r for r in today_trades if r['status'] in
+                          ('TP3', 'SL', 'LIQ', 'Timeout', 'D1_INVALID', 'EXCHANGE_CLOSE')]
+                total = len(closed)
+                tps = [r for r in closed if r['status'] == 'TP3']
+                sls = [r for r in closed if r['status'] != 'TP3']
+                pnl_total = sum(float(r['net_pnl']) for r in closed)
                 wr = len(tps) / max(total, 1) * 100
                 msg = (
                     f"*REPORTE DIARIO v4* ({now.strftime('%d/%m')})\n"
@@ -3017,6 +3245,30 @@ def main():
             # ── Gestión de posiciones activas ──
             manage_escudo_pro_v3(balance_total)
 
+            # ── FIX-AUDIT-7: KILL-SWITCH (pausa entradas tras racha de pérdidas) ──
+            global KILL_UNTIL, CONSECUTIVE_LOSSES
+            if time.time() < KILL_UNTIL:
+                horas_rest = (KILL_UNTIL - time.time()) / 3600
+                log.warning("KILL-SWITCH activo: %.1fh restantes (racha=%d pérdidas consecutivas)",
+                            horas_rest, CONSECUTIVE_LOSSES)
+                time.sleep(60)
+                continue
+            # AUDIT-FIX: loguear la racha que DISPARÓ el kill-switch (antes se
+            # mostraba racha=0 porque se reseteaba justo después de armarse).
+            if CONSECUTIVE_LOSSES >= LOBO_KILL_MAX_CONSEC_LOSSES:
+                KILL_STREAK_AT_TRIGGER = CONSECUTIVE_LOSSES
+                KILL_UNTIL = time.time() + LOBO_KILL_COOLDOWN_H * 3600
+                CONSECUTIVE_LOSSES = 0
+                log.warning("KILL-SWITCH ARMADO por racha de %d pérdidas — entradas pausadas %.0fh",
+                            KILL_STREAK_AT_TRIGGER, LOBO_KILL_COOLDOWN_H)
+                send_telegram(
+                    f"🛑 *KILL-SWITCH ACTIVADO*\n"
+                    f"{LOBO_KILL_MAX_CONSEC_LOSSES} pérdidas consecutivas\n"
+                    f"Entradas pausadas {LOBO_KILL_COOLDOWN_H:.0f}h"
+                )
+                time.sleep(60)
+                continue
+
             # ── Posiciones activas + margen real disponible ──
             try:
                 positions = exchange.fetch_positions()
@@ -3046,6 +3298,8 @@ def main():
                         key=lambda x: x[1], reverse=True,
                     )[:TOP_N]
                 ]
+                if LOBO_WHITELIST:  # D: restringir a criptos reales
+                    top_symbols = [s for s in top_symbols if s.split('/')[0] in LOBO_WHITELIST]
             except Exception as e:
                 log.error("Error fetching tickers: %s", e)
                 time.sleep(60)
@@ -3074,18 +3328,22 @@ def main():
                     del COOLDOWNS[symbol]
 
                 try:
-                    ohlcv_15m, ohlcv_4h, ohlcv_5m = ohlcv_data.get(symbol, (None, None, None))
+                    ohlcv_15m, ohlcv_4h, ohlcv_5m, ohlcv_1d = ohlcv_data.get(symbol, (None, None, None, None))
                     if not ohlcv_15m or not ohlcv_4h:
                         continue
                     if len(ohlcv_15m) < 50 or len(ohlcv_4h) < 10:
                         continue
 
-                    df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_4h  = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_5m  = pd.DataFrame(ohlcv_5m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']) if ohlcv_5m else None
+                    # FIX-AUDIT-1 (CRÍTICO): la última vela de CCXT es la ABIERTA (en formación).
+                    # Recortarla evita repaint/lookahead: indicadores y precio calculados solo
+                    # con velas CERRADAS. El precio de entrada = close de la última cerrada.
+                    df_15m = pd.DataFrame(ohlcv_15m[:-1], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_4h  = pd.DataFrame(ohlcv_4h[:-1],  columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_5m  = pd.DataFrame(ohlcv_5m[:-1],  columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']) if ohlcv_5m and len(ohlcv_5m) > 1 else None
+                    df_1d  = pd.DataFrame(ohlcv_1d[:-1],  columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']) if ohlcv_1d and len(ohlcv_1d) > 1 else None
 
-                    # F7: Solo evaluar al cierre de vela principal (15m)
-                    if not es_nueva_vela_principal(df_15m):
+                    # F7: Solo evaluar al cierre de vela principal (15m), una vez por vela
+                    if not es_nueva_vela_principal(df_15m, symbol):
                         continue
 
                     precio_actual = float(df_15m['close'].iloc[-1])
@@ -3098,7 +3356,7 @@ def main():
                     senal_long = evaluar_senal_bitlobo_v4(
                         symbol, df_15m, df_4h, precio_actual, atr_val, balance_total,
                         es_long=True, df_micro=df_5m, ventana_altcoins=ventana_altcoins,
-                        margen_real_disponible=margen_real,
+                        margen_real_disponible=margen_real, df_d1=df_1d,
                     )
 
                     sweeps = detectar_sweep(df_15m)
@@ -3120,7 +3378,7 @@ def main():
                         senal_short = evaluar_senal_bitlobo_v4(
                             symbol, df_15m, df_4h, precio_actual, atr_val, balance_total,
                             es_long=False, df_micro=df_5m, ventana_altcoins=ventana_altcoins,
-                            margen_real_disponible=margen_real,
+                            margen_real_disponible=margen_real, df_d1=df_1d,
                         )
 
                     senal = senal_long or senal_short
