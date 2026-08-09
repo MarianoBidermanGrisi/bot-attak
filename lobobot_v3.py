@@ -49,6 +49,13 @@ except ImportError:
 # =====================================================================
 # 1. LOGGER (idéntico a v2)
 # =====================================================================
+# QA-FIX (2026-08-09): stdout cp1252 en Windows rompe logs con '→'/'≈'.
+# Reconversión a UTF-8 con reemplazo (portable: Render/Linux ignora).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass  # stdout no reconfigurable (p.ej. redirección a pipe binario)
+
 LOG_TO_FILE = os.environ.get('BOT_LOG_TO_FILE', '1') == '1'
 LOG_LEVEL   = os.environ.get('BOT_LOG_LEVEL', 'INFO')
 
@@ -2486,13 +2493,26 @@ def _update_sl_to_be(sym: str, entry: dict, new_sl_price: float, reason: str = '
         if side == 'long' and new_sl_price >= mark_price:
             # SL por encima del mark → inválido. Ajustar a mark - 0.3%
             adjusted = mark_price * 0.997
-            log.warning("[SL-ADJ] %s BE/Trail SL %.4f >= mark %.4f — ajustando a %.4f",
-                        sym, new_sl_price, mark_price, adjusted)
+            # AUDIT-FIX 2026-08-09 (BUG-C): un TRAIL ajustado por precio
+            # inválido NUNCA debe degradar el SL actual (p.ej. el BE recién
+            # cargado tras TP2). Fuzz: 797/3000 combos degradaban el BE.
+            # Para 'BE' el ajuste es necesario (única forma de tener SL);
+            # para 'TRAIL' se mantiene el SL actual (ya válido en exchange).
+            if reason == 'TRAIL' and adjusted < float(entry.get('sl_price', 0)):
+                log.warning("[SL-ADJ] %s TRAIL %.4f inválido (mark=%.4f) y ajuste "
+                            "%.4f PEOR que SL actual %.4f → se mantiene SL actual",
+                            sym, new_sl_price, mark_price, adjusted,
+                            entry.get('sl_price', 0))
+                return False
             new_sl_price = adjusted
         elif side == 'short' and new_sl_price <= mark_price:
             adjusted = mark_price * 1.003
-            log.warning("[SL-ADJ] %s BE/Trail SL %.4f <= mark %.4f — ajustando a %.4f",
-                        sym, new_sl_price, mark_price, adjusted)
+            if reason == 'TRAIL' and adjusted > float(entry.get('sl_price', 999999)):
+                log.warning("[SL-ADJ] %s TRAIL %.4f inválido (mark=%.4f) y ajuste "
+                            "%.4f PEOR que SL actual %.4f → se mantiene SL actual",
+                            sym, new_sl_price, mark_price, adjusted,
+                            entry.get('sl_price', 999999))
+                return False
             new_sl_price = adjusted
 
     # 1) Cancelar SL viejo PRIMERO (Bitget solo permite 1 loss_plan por símbolo)
@@ -2522,6 +2542,191 @@ def _update_sl_to_be(sym: str, entry: dict, new_sl_price: float, reason: str = '
     
     log.info("[REAL] %s SL→%.4f (%s) api_ok=%s remaining=%.4f", sym, new_sl_price, reason, placed, remaining_qty)
     return placed
+
+def _fetch_plans_exchange(sym):
+    """Consulta los plan orders TPSL ACTIVOS de un símbolo en Bitget.
+
+    Replica EXACTA del patrón que el bot ya usa en _cancel_tp_plans/_cancel_sl_plans
+    (2 llamadas a privateMixGetV2MixOrderOrdersPending, una por planType).
+
+    Returns:
+        (profit_plans, loss_plans): listas de dicts {'triggerPrice': float, 'size': float}
+    """
+    profit, loss = [], []
+    if not exchange or PAPER_TRADE:
+        return profit, loss
+    try:
+        market_info = exchange.market(sym)
+        params = {'productType': 'usdt-futures', 'symbol': market_info['id'].lower()}
+        for ptype, bucket in (('profit_plan', profit), ('loss_plan', loss)):
+            p = dict(params, planType=ptype)
+            pending = exchange.privateMixGetV2MixOrderOrdersPending(p)
+            for plan in (pending.get('data', {}).get('entrustedList', []) or []):
+                if plan.get('planType') != ptype:
+                    continue
+                try:
+                    bucket.append({'triggerPrice': float(plan.get('triggerPrice', 0)),
+                                   'size': float(plan.get('size', 0))})
+                except (TypeError, ValueError):
+                    continue
+    except Exception as e:
+        log.warning("[ADOP] Error consultando planes %s: %s", sym, e)
+    return profit, loss
+
+
+def _atr_est_15m(sym, entry_price):
+    """ATR 15m estimado (para el trailing de posiciones adoptadas).
+
+    Fuente: OHLCV real de Bitget (100 velas 15m). Si falla → default entry*1%
+    (conservador, documentado como estimación).
+    """
+    default = entry_price * 0.01
+    if not exchange or PAPER_TRADE:
+        return default
+    try:
+        ohlcv = exchange.fetch_ohlcv(sym, timeframe='15m', limit=100)
+        if not ohlcv or len(ohlcv) < 20:
+            return default
+        df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+        atr_series = _atr(df, period=14)
+        val = float(atr_series.dropna().iloc[-1])
+        return val if val > 0 else default
+    except Exception as e:
+        log.warning("[ADOP] ATR 15m falló %s: %s", sym, e)
+        return default
+
+
+def adoptar_posiciones_exchange():
+    """(AUDIT-FIX 2026-08-09) Adopta posiciones de Bitget NO registradas en
+    TRADE_ENTRIES (huérfanas tras reinicio/deploy sin JSON persistido).
+
+    Infiere el estado EXCLUSIVAMENTE desde datos reales del exchange:
+      - fetch_positions(): entryPrice, contracts, leverage, liquidationPrice, side
+      - Plan orders activos: triggerPrice/size de profit_plan y loss_plan
+        (privateMixGetV2MixOrderOrdersPending — el mismo endpoint que ya usa el bot)
+
+    Inferencia CONSERVADORA (Regla de Oro — nunca inventar):
+      - partial_lvl por nº de profit_plans activos: 3→0, 2→1, 1→2
+      - original_qty desde contracts/(1-TP1) o contracts/(1-TP1-TP2)
+      - VALIDACIÓN CRUZADA: sum(size de profit_plans) ≈ contracts (tolerancia 5%)
+        y sum(size de loss_plans) ≈ contracts → si NO cuadra → NO se adopta
+      - Sin loss_plan / sin profit_plans / entryPrice inválido → NO se adopta
+
+    Devuelve el nº de posiciones adoptadas.
+    """
+    if not exchange or PAPER_TRADE:
+        return 0
+    try:
+        positions = exchange.fetch_positions()
+    except Exception as e:
+        log.error("[ADOP] Error fetch_positions: %s", e)
+        return 0
+
+    adoptadas = 0
+    for pos in positions:
+        sym = pos.get('symbol')
+        if not sym or sym in TRADE_ENTRIES:
+            continue
+        try:
+            contracts = float(pos.get('contracts', 0) or 0)
+            if contracts <= 0:
+                continue
+            side = pos.get('side')
+            if side not in ('long', 'short'):
+                log.warning("[ADOP] %s side=%r — NO adoptada", sym, side)
+                continue
+            entry_price = float(pos.get('entryPrice', 0) or 0)
+            if entry_price <= 0:
+                log.warning("[ADOP] %s entryPrice=%r — NO adoptada", sym, pos.get('entryPrice'))
+                continue
+            lev = float(pos.get('leverage') or LEVERAGE)
+            if lev <= 0:
+                lev = LEVERAGE
+            liq = float(pos.get('liquidationPrice') or 0)
+            if liq <= 0:
+                liq = entry_price * (1 - 1 / lev) if side == 'long' else entry_price * (1 + 1 / lev)
+            ts = pos.get('timestamp')
+            entry_time = datetime.fromtimestamp(ts / 1000) if ts else datetime.now()
+
+            profit, loss = _fetch_plans_exchange(sym)
+            if not loss:
+                log.warning("[ADOP] %s sin loss_plan activo — NO adoptada (SL desconocido)", sym)
+                continue
+            loss_size = sum(p['size'] for p in loss)
+            if abs(loss_size - contracts) > contracts * 0.05:
+                log.warning("[ADOP] %s loss_size %.4f != contracts %.4f — NO adoptada",
+                            sym, loss_size, contracts)
+                continue
+            if not profit:
+                log.warning("[ADOP] %s sin profit_plans activos — NO adoptada (TPs no reconstruibles)", sym)
+                continue
+
+            # SL real del exchange (el loss_plan vigente)
+            sl_price = min(loss, key=lambda p: p['triggerPrice'])['triggerPrice'] if side == 'long' \
+                else max(loss, key=lambda p: p['triggerPrice'])['triggerPrice']
+
+            # Nivel por nº de profit_plans + original_qty inferida
+            n_profit = len(profit)
+            if n_profit == 3:
+                partial_lvl, original_qty = 0, contracts
+            elif n_profit == 2:
+                partial_lvl, original_qty = 1, contracts / (1 - TP1_CLOSE_PCT)
+            elif n_profit == 1:
+                partial_lvl, original_qty = 2, contracts / (1 - TP1_CLOSE_PCT - TP2_CLOSE_PCT)
+            else:
+                log.warning("[ADOP] %s %d profit_plans inesperados — NO adoptada", sym, n_profit)
+                continue
+            profit_size = sum(p['size'] for p in profit)
+            if abs(profit_size - contracts) > contracts * 0.05:
+                log.warning("[ADOP] %s profit_size %.4f != contracts %.4f (lvl=%d) — NO adoptada",
+                            sym, profit_size, contracts, partial_lvl)
+                continue
+
+            # TPs: precios REALES de los planes; tp1 (ya ejecutado) estimado por fórmula
+            sign = 1 if side == 'long' else -1
+            profit.sort(key=lambda p: p['triggerPrice'], reverse=(side == 'short'))
+            if n_profit == 3:
+                tp1_price, tp2_price, tp3_price = (p['triggerPrice'] for p in profit)
+            elif n_profit == 2:
+                tp2_price, tp3_price = profit[0]['triggerPrice'], profit[1]['triggerPrice']
+                tp1_price = entry_price * (1 + sign * TP1_PNL_TARGET / lev)
+            else:
+                tp3_price = profit[0]['triggerPrice']
+                tp2_price = entry_price * (1 + sign * TP2_PNL_TARGET / lev)
+                tp1_price = entry_price * (1 + sign * TP1_PNL_TARGET / lev)
+
+            step = 0.01
+            try:
+                market_info = exchange.market(sym)
+                step = market_info['limits']['amount']['min'] or market_info['precision']['amount']
+            except Exception:
+                pass
+
+            atr_val = _atr_est_15m(sym, entry_price)
+            remaining_qty = round(contracts, 8)
+            entry_record = {
+                'entry_time': entry_time, 'symbol': sym, 'side': side,
+                'entry_price': entry_price, 'sl_price': sl_price, 'liq_price': liq,
+                'leverage': lev, 'tp1_price': tp1_price, 'tp2_price': tp2_price,
+                'tp3_price': tp3_price, 'quantity': round(original_qty, 8),
+                'original_qty': round(original_qty, 8), 'remaining_qty': remaining_qty,
+                'step': step, 'balance_before': 0.0, 'capital_futuros': 0.0,
+                'atr_val': atr_val, 'size_usdt': round(contracts * entry_price / lev, 2),
+                'risk_pct': 0.0, 'score': 0, 'rr': 0.0, 'adoptada': True,
+            }
+            TRADE_ENTRIES[sym] = entry_record
+            PARTIAL_LEVEL[sym] = partial_lvl
+            _save_trade_entries()
+            _save_partial_level()
+            log.info("[ADOP] %s adoptada lvl=%d entry=%.4f sl=%.4f orig=%.4f rem=%.4f "
+                     "tp1≈%.4f tp2=%.4f tp3=%.4f lev=%.0f atr=%.4f",
+                     sym, partial_lvl, entry_price, sl_price, original_qty, remaining_qty,
+                     tp1_price, tp2_price, tp3_price, lev, atr_val)
+            adoptadas += 1
+        except Exception as e:
+            log.error("[ADOP] Error adoptando %s: %s", sym, e)
+    return adoptadas
+
 
 def restaurar_tp_exchange():
     """Coloca TP1/TP2/Full y SL en exchange (plan orders) para posiciones abiertas post-reinicio."""
@@ -2811,7 +3016,11 @@ def _manage_paper_positions_v3(balance_total: float):
                 dist = LOBO_TRAIL_ATR_MULT * entry.get('atr_val', 0) * 1.5
                 if dist > 0:
                     nuevo_sl = (PEAK_PRICES[symbol] - dist) if side == 'long' else (PEAK_PRICES[symbol] + dist)
-                    ultimo_sl = ALERTS_HISTORY.get(f"{symbol}_trail", 0 if side == 'long' else 999999)
+                    # AUDIT-FIX 2026-08-09 (BUG-B): comparar la mejora contra el SL
+                    # ACTUAL (entry['sl_price'], que tras BE = entry) en vez del default
+                    # _trail=0. Antes, el primer trailing post-BE podía emitir un SL PEOR
+                    # que el BE recién cargado (p.ej. 99.5 cuando BE=100 en lev alto).
+                    ultimo_sl = entry.get('sl_price', 0 if side == 'long' else 999999)
                     mejora = (nuevo_sl - ultimo_sl) if side == 'long' else (ultimo_sl - nuevo_sl)
                     if mejora > (entry_price * 0.002):
                         _update_sl_to_be(symbol, entry, nuevo_sl, reason='TRAIL')
@@ -3035,6 +3244,12 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                     guardar_trade_csv(entry, tp2_p, tp2_pnl, 0, tp2_pnl, 'TP2_EXCHANGE', 'tp2_exchange')
                     _save_trade_entries()
                     _save_partial_level()
+                    # AUDIT-FIX 2026-08-09 (BUG-A doble-fire): tras detectar el fill del
+                    # exchange, refrescar partial_lvl y remaining_qty locales. Sin esto,
+                    # el bloque TP2-local (elif partial_lvl==1) re-ejecutaba el parcial
+                    # en el mismo ciclo: 2ª orden BE redundante + cierre de más qty.
+                    partial_lvl = PARTIAL_LEVEL.get(symbol, 0)
+                    remaining_qty = float(entry.get('remaining_qty', entry.get('quantity', 0)))
 
             # Re-leer sl_price después de posible BE update por TP2 exchange fill
             sl_price = float(entry.get('sl_price', 0))
@@ -3156,13 +3371,19 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                 dist = LOBO_TRAIL_ATR_MULT * entry.get('atr_val', 0) * 1.5
                 if dist > 0:
                     nuevo_sl = (PEAK_PRICES[symbol] - dist) if side == 'long' else (PEAK_PRICES[symbol] + dist)
-                    ultimo_sl = ALERTS_HISTORY.get(f"{symbol}_trail", 0 if side == 'long' else 999999)
+                    # AUDIT-FIX 2026-08-09 (BUG-B): comparar la mejora contra el SL
+                    # ACTUAL (entry['sl_price'], que tras BE = entry) en vez del default
+                    # _trail=0. Antes, el primer trailing post-BE podía emitir un SL PEOR
+                    # que el BE recién cargado (p.ej. 99.5 cuando BE=100 en lev alto).
+                    ultimo_sl = entry.get('sl_price', 0 if side == 'long' else 999999)
                     mejora = (nuevo_sl - ultimo_sl) if side == 'long' else (ultimo_sl - nuevo_sl)
                     if mejora > (entry_price * 0.002):
                         # Actualizar SL en exchange (cancela anterior, coloca nuevo)
-                        _update_sl_to_be(symbol, entry, nuevo_sl, reason='TRAIL')
-                        TRAIL_COUNTS[symbol] = TRAIL_COUNTS.get(symbol, 0) + 1
-                        log.info("[REAL] %s Trail→%.4f", symbol, nuevo_sl)
+                        # AUDIT-FIX BUG-C: solo contar/loguear si SÍ se actualizó
+                        # (un TRAIL bloqueado por SL inválido no es un trailing)
+                        if _update_sl_to_be(symbol, entry, nuevo_sl, reason='TRAIL'):
+                            TRAIL_COUNTS[symbol] = TRAIL_COUNTS.get(symbol, 0) + 1
+                            log.info("[REAL] %s Trail→%.4f", symbol, nuevo_sl)
 
         except Exception as e:
             log.error("[REAL] Error gestionando %s: %s", symbol, e)
@@ -3186,6 +3407,15 @@ def main():
 
     _load_trade_entries()
     _load_partial_level()
+    # AUDIT-FIX 2026-08-09: adoptar posiciones huérfanas de Bitget (sin JSON
+    # persistido) ANTES de restaurar planes — así entran en la gestión normal
+    # (TP2→BE, trailing) con los fixes A/B/C activos.
+    try:
+        n_adopt = adoptar_posiciones_exchange()
+        if n_adopt > 0:
+            log.info("Posiciones adoptadas del exchange: %d", n_adopt)
+    except Exception as e:
+        log.error("Error en adoptar_posiciones_exchange: %s", e)
     restaurar_tp_exchange()
     last_report_day = datetime.now().day - 1
 
