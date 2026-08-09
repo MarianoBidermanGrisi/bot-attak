@@ -330,11 +330,11 @@ SL_LOOKBACK        = int(os.environ.get('LOBO_SL_LOOKBACK', '20'))  # velas para
 # --- TARGETS DE PNL FIJOS (sobre margin, sin importar leverage) ---
 # FIX-AUDIT-3: restaurados a la estrategia DOCUMENTADA (25/50/100% PnL sobre margen).
 # Con 15/30/50% y lev 10-20x, TP3 = solo 2.5-5% de precio vs SL 1.5ATR (~2-3%)
-# → RR efectiva < 1 → EV negativo. 25/50/100% restaura expectativa positiva:
-#   win medio = 0.4×25 + 0.3×50 + 0.3×100 = 55% margen vs pérdida ~30-100% margen.
-TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.25'))  # 25% PnL en TP1
-TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.50'))  # 50% PnL en TP2
-TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '1.00'))  # 100% PnL safety net
+# → RR efectiva < 1 → EV negativo. 15/30/50% restaura expectativa positiva:
+#   win medio = 0.4×15 + 0.3×30 + 0.3×50 = 30% margen vs pérdida ~30-100% margen.
+TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.15'))  # 15% PnL en TP1
+TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.30'))  # 30% PnL en TP2
+TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50% PnL safety net
 
 # F9: BE trigger ahora es "alcanzar TP2" (en vez de TP1)
 # Se usa TP2 como trigger, no un porcentaje independiente
@@ -2596,6 +2596,28 @@ def _atr_est_15m(sym, entry_price):
         return default
 
 
+def _sl_desde_posicion(pos, side, entry_price):
+    """(AUDIT-FIX 2026-08-09) SL position-level de Bitget (stopLossPrice).
+
+    Cuando el SL se ajusta en la UI de Bitget (arrastrar en el gráfico /
+    set-position-tpsl), NO aparece como loss_plan en orders-pending: viaja en la
+    propia posición (fetch_positions → stopLossPrice). Este fallback lo lee.
+    Válido SOLO si está del lado correcto (long: < entry, short: > entry) y > 0;
+    de lo contrario devuelve None (SL desconocido → no se adopta).
+    """
+    try:
+        sl = float(pos.get('stopLossPrice') or 0)
+    except (TypeError, ValueError):
+        return None
+    if sl <= 0:
+        return None
+    if side == 'long' and sl >= entry_price:
+        return None
+    if side == 'short' and sl <= entry_price:
+        return None
+    return sl
+
+
 def adoptar_posiciones_exchange():
     """(AUDIT-FIX 2026-08-09) Adopta posiciones de Bitget NO registradas en
     TRADE_ENTRIES (huérfanas tras reinicio/deploy sin JSON persistido).
@@ -2649,10 +2671,26 @@ def adoptar_posiciones_exchange():
             entry_time = datetime.fromtimestamp(ts / 1000) if ts else datetime.now()
 
             profit, loss = _fetch_plans_exchange(sym)
+            # Diagnóstico: si orders-pending no trae loss_plan, ¿la posición
+            # trae el SL como campo propio (position-level)? (para confirmar)
+            if not loss and pos.get('stopLossPrice') is not None:
+                log.info("[ADOP] %s sin loss_plan en orders-pending; posición trae "
+                         "stopLossPrice=%r takeProfitPrice=%r",
+                         sym, pos.get('stopLossPrice'), pos.get('takeProfitPrice'))
             if not loss:
-                log.warning("[ADOP] %s sin loss_plan activo — NO adoptada (SL desconocido)", sym)
-                continue
-            loss_size = sum(p['size'] for p in loss)
+                sl_pos = _sl_desde_posicion(pos, side, entry_price)
+                if sl_pos is not None:
+                    # SL de posición cubre la posición completa actual
+                    loss_size = contracts
+                    sl_es_position_level = True
+                    log.info("[ADOP] %s SL position-level (stopLossPrice=%.4f) "
+                             "— aceptado como SL real", sym, sl_pos)
+                else:
+                    log.warning("[ADOP] %s sin loss_plan activo — NO adoptada (SL desconocido)", sym)
+                    continue
+            else:
+                loss_size = sum(p['size'] for p in loss)
+                sl_es_position_level = False
             if abs(loss_size - contracts) > contracts * 0.05:
                 log.warning("[ADOP] %s loss_size %.4f != contracts %.4f — NO adoptada",
                             sym, loss_size, contracts)
@@ -2661,9 +2699,13 @@ def adoptar_posiciones_exchange():
                 log.warning("[ADOP] %s sin profit_plans activos — NO adoptada (TPs no reconstruibles)", sym)
                 continue
 
-            # SL real del exchange (el loss_plan vigente)
-            sl_price = min(loss, key=lambda p: p['triggerPrice'])['triggerPrice'] if side == 'long' \
-                else max(loss, key=lambda p: p['triggerPrice'])['triggerPrice']
+            # SL real del exchange (loss_plan vigente o position-level)
+            if sl_es_position_level:
+                sl_price = sl_pos
+            elif side == 'long':
+                sl_price = min(loss, key=lambda p: p['triggerPrice'])['triggerPrice']
+            else:
+                sl_price = max(loss, key=lambda p: p['triggerPrice'])['triggerPrice']
 
             # Nivel por nº de profit_plans + original_qty inferida
             n_profit = len(profit)
