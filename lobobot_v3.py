@@ -2308,32 +2308,122 @@ def init_exchange() -> bool:
 # =====================================================================
 # 10b. TAKE PROFIT PLAN ORDERS (extraído de bot_v6)
 # =====================================================================
-def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str) -> bool:
-    """Coloca una take-profit plan order vía API directa (hedge mode)."""
+def _plan_tp_qty(qty: float, step: float, tp1_price: float, tp2_price: float,
+                 tp1_pct: float = TP1_CLOSE_PCT, tp2_pct: float = TP2_CLOSE_PCT,
+                 min_notional: float = MIN_ORDER_USDT) -> dict:
+    """QA-FIX (2026-08-10): Planifica qty de TP1/TP2/TP3 como profit_plans.
+
+    BUG AUDITADO (reporte usuario): al abrir posición, Bitget solo mostraba
+    TP1 y TP3 (adjunto). Causa: TP2 = 30% del notional se saltaba cuando
+    0.30*N < min_notional ($5) mientras TP1 (40%*N) sí pasaba el umbral.
+    Rango afectado: N ∈ [12.50, 16.67) USDT de posición.
+
+    Política MERGE: si TP2 no alcanza el notional mínimo, se fusiona TP2+TP3
+    (60% de la qty) en UNA profit_plan a precio TP2 → la posición queda 100%
+    cubierta en exchange. Si TP1 tampoco alcanza → fallback a un solo TP a
+    precio TP1 (si la qty completa cumple el mínimo), si no → 'none'.
+
+    Retorna dict: {tp1_qty, tp2_qty, tp3_qty, tp1_pct, tp2_pct, mode}
+    mode ∈ {'normal', 'merge', 'fallback', 'none', 'invalid'}
+    """
+    def _ok(pq: float, px: float) -> bool:
+        return pq >= step and (pq * px) >= min_notional
+
+    try:
+        if not all(math.isfinite(v) for v in (qty, step, tp1_price, tp2_price)):
+            return {'tp1_qty': 0.0, 'tp2_qty': 0.0, 'tp3_qty': 0.0,
+                    'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': 'invalid'}
+    except TypeError:
+        return {'tp1_qty': 0.0, 'tp2_qty': 0.0, 'tp3_qty': 0.0,
+                'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': 'invalid'}
+
+    if (step is None or step <= 0 or qty is None or qty <= 0
+            or tp1_price <= 0 or tp2_price <= 0
+            or tp1_pct <= 0 or tp1_pct >= 1 or tp2_pct <= 0):
+        return {'tp1_qty': 0.0, 'tp2_qty': 0.0, 'tp3_qty': 0.0,
+                'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': 'invalid'}
+
+    # QA-FIX: TP1 con redondeo half-up al step (evita TP1=0 con steps gruesos:
+    # ej. qty=2, step=1 → 0.8 contratos no es múltiplo → redondea a 1).
+    tp1_qty = math.floor(qty * tp1_pct / step + 0.5) * step
+    rem = qty - tp1_qty
+    tp2_qty = math.floor(rem * (tp2_pct / (1 - tp1_pct)) / step) * step
+    tp3_qty = max(qty - tp1_qty - tp2_qty, 0.0)
+
+    mode = 'normal'
+    merged = False
+    if _ok(tp1_qty, tp1_price) and not _ok(tp2_qty, tp2_price):
+        # MERGE: TP2+TP3 → una sola profit_plan a precio TP2 (60% de la qty)
+        merged_qty = math.floor((tp2_qty + tp3_qty) / step) * step
+        if merged_qty >= step and (merged_qty * tp2_price) >= min_notional:
+            tp2_qty = merged_qty
+            tp3_qty = 0.0
+            mode = 'merge'
+            merged = True
+    if not merged and not _ok(tp1_qty, tp1_price):
+        # Fallback: todo a TP1 (solo si alcanza el mínimo; si no, nada en exchange)
+        if _ok(qty, tp1_price):
+            tp1_qty = math.floor(qty / step) * step
+            tp2_qty = 0.0
+            tp3_qty = 0.0
+            mode = 'fallback'
+        else:
+            tp1_qty = 0.0
+            tp2_qty = 0.0
+            tp3_qty = 0.0
+            mode = 'none'
+    elif not merged and tp2_qty < step:
+        # QA-FIX: granularidad del contrato impide el split (qty < 2×step):
+        # TP1 único cubre lo posible, el resto lo gestiona el bot localmente.
+        tp2_qty = 0.0
+        tp3_qty = 0.0
+        mode = 'fallback' if tp1_qty >= step else 'none'
+    return {'tp1_qty': tp1_qty, 'tp2_qty': tp2_qty, 'tp3_qty': tp3_qty,
+            'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': mode}
+
+
+def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str,
+                   max_retries: int = 3) -> bool:
+    """Coloca una take-profit plan order vía API directa (hedge mode).
+
+    QA-FIX (2026-08-10): retry con backoff exponencial (2s, 4s) — mismo
+    patrón que _place_sl_plan (BUG #4). Error 43030 (plan ya existe) se
+    trata como ÉXITO (idempotencia): antes retornaba False y hacía que TP2
+    se marcara como no colocado aunque el exchange ya tuviera el plan.
+    """
     if not exchange or PAPER_TRADE:
         return False
-    try:
-        market_info = exchange.market(sym)
-        hold_side = side  # 'long' o 'short' (hedge mode)
-        params = {
-            'marginCoin': market_info['settleId'],
-            'productType': 'usdt-futures',
-            'symbol': market_info['id'].lower(),
-            'planType': 'profit_plan',
-            'triggerPrice': exchange.price_to_precision(sym, tp_price),
-            'triggerType': 'mark_price',
-            'holdSide': hold_side,
-            'size': exchange.amount_to_precision(sym, tp_qty),
-        }
-        exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
-        return True
-    except Exception as e:
-        err = str(e)
-        if '43030' in err:
-            log.info("TP plan ya existe %s @ %s: %s", sym, tp_price, e)
-        else:
-            log.error("Error colocando plan order %s @ %s: %s", sym, tp_price, e)
-        return False
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            market_info = exchange.market(sym)
+            hold_side = side  # 'long' o 'short' (hedge mode)
+            params = {
+                'marginCoin': market_info['settleId'],
+                'productType': 'usdt-futures',
+                'symbol': market_info['id'].lower(),
+                'planType': 'profit_plan',
+                'triggerPrice': exchange.price_to_precision(sym, tp_price),
+                'triggerType': 'mark_price',
+                'holdSide': hold_side,
+                'size': exchange.amount_to_precision(sym, tp_qty),
+            }
+            exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
+            return True
+        except Exception as e:
+            last_err = str(e)
+            if '43030' in last_err:
+                log.info("TP plan ya existe %s @ %s (attempt %d) — ok", sym, tp_price, attempt)
+                return True
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                log.warning("TP plan attempt %d/%d falló %s @ %s: %s — retry en %ds",
+                            attempt, max_retries, sym, tp_price, e, wait)
+                time.sleep(wait)
+            else:
+                log.error("TP plan FAILED tras %d intentos %s @ %s: %s",
+                          max_retries, sym, tp_price, e)
+    return False
 
 def _cancel_tp_plans(sym: str):
     """Cancela todos los profit_plan activos de un símbolo."""
@@ -2797,30 +2887,31 @@ def restaurar_tp_exchange():
             _cancel_tp_plans(sym)
             _cancel_sl_plans(sym)
 
+            # QA-FIX (2026-08-10): misma planificación con MERGE que la apertura.
+            # Garantiza TP1+TP2 (o TP1+TP2-MERGE) tras reinicio, sin perder TP2.
+            tp_plan = _plan_tp_qty(original_qty, step, tp1_p, tp2_p)
+            tp1_qty = tp_plan['tp1_qty']
+            tp2_qty = tp_plan['tp2_qty']
+            tp3_qty = tp_plan['tp3_qty']
+
             # TP1 si aún no se ejecutó
-            tp1_qty = ((original_qty * TP1_CLOSE_PCT) // step) * step
             if cur_qty >= original_qty * 0.85 and tp1_qty >= step:
-                notional = tp1_qty * tp1_p
-                if notional >= 5:
-                    if _place_tp_plan(sym, tp1_p, tp1_qty, side):
-                        log.info("%s TP1 plan restaurado: %s @ %s", sym, tp1_qty, tp1_p)
+                tp1_qty = min(tp1_qty, math.floor(cur_qty / step) * step)
+                if _place_tp_plan(sym, tp1_p, tp1_qty, side):
+                    log.info("%s TP1 plan restaurado: %s @ %s", sym, tp1_qty, tp1_p)
 
-            # TP2 si aún no se ejecutó
-            remaining_after_tp1 = original_qty - tp1_qty
-            tp2_qty = ((remaining_after_tp1 * TP2_CLOSE_PCT / (1 - TP1_CLOSE_PCT)) // step) * step
+            # TP2 (con MERGE+TP3 si aplica) si aún no se ejecutó
             if cur_qty >= original_qty * 0.45 and tp2_qty >= step:
-                notional = tp2_qty * tp2_p
-                if notional >= 5:
-                    if _place_tp_plan(sym, tp2_p, tp2_qty, side):
-                        log.info("%s TP2 plan restaurado: %s @ %s", sym, tp2_qty, tp2_p)
+                tp2_qty = min(tp2_qty, math.floor(cur_qty / step) * step)
+                if _place_tp_plan(sym, tp2_p, tp2_qty, side):
+                    log.info("%s TP2 plan restaurado: %s @ %s [%s]", sym, tp2_qty, tp2_p,
+                             'MERGE+TP3' if tp_plan['mode'] == 'merge' else 'normal')
 
-            # Full TP (restante)
-            full_qty = original_qty - tp1_qty - tp2_qty
-            if cur_qty >= original_qty * 0.15 and full_qty >= step:
-                notional = full_qty * tp_full
-                if notional >= 5:
-                    if _place_tp_plan(sym, tp_full, full_qty, side):
-                        log.info("%s Full TP plan restaurado: %s @ %s", sym, full_qty, tp_full)
+            # Full TP (restante) — solo en modo normal (en merge ya se cubrió)
+            if tp_plan['mode'] == 'normal' and cur_qty >= original_qty * 0.15 and tp3_qty >= step:
+                tp3_qty = min(tp3_qty, math.floor(cur_qty / step) * step)
+                if _place_tp_plan(sym, tp_full, tp3_qty, side):
+                    log.info("%s Full TP plan restaurado: %s @ %s", sym, tp3_qty, tp_full)
 
             # F9: Restaurar SL plan (si no se ejecutó TP2 aún → SL original, si TP2 ya ejecutó → BE)
             current_sl = float(ed.get('sl_price', 0))
@@ -3778,27 +3869,32 @@ def main():
                         continue
 
                     # Colocar TP1, TP2 y SL como plan orders en exchange
+                    # QA-FIX (2026-08-10): planificación con MERGE + diagnóstico.
+                    # BUG: TP2 (30% notional) no se colocaba cuando 0.30*N < $5
+                    # mientras TP1 (40%*N ≥ $5) sí → Bitget mostraba solo TP1+TP3.
                     trade_side = 'long' if es_long else 'short'
-                    tp1_qty_plan = ((qty * TP1_CLOSE_PCT) // step) * step
-                    tp2_remaining = qty - tp1_qty_plan
-                    tp2_qty_plan = ((tp2_remaining * TP2_CLOSE_PCT / (1 - TP1_CLOSE_PCT)) // step) * step
+                    tp_plan = _plan_tp_qty(qty, step, tp1_price, tp2_price)
+                    tp1_qty_plan = tp_plan['tp1_qty']
+                    tp2_qty_plan = tp_plan['tp2_qty']
                     tp1_ok = False
                     tp2_ok = False
                     sl_ok = False
                     # BUG #3 FIX: sleep(1) → sleep(3) para que el position se refleje en Bitget
                     time.sleep(3)
-                    if tp1_qty_plan >= step and tp1_qty_plan * tp1_price >= MIN_ORDER_USDT:
+                    if tp1_qty_plan >= step:
                         tp1_ok = _place_tp_plan(symbol, tp1_price, tp1_qty_plan, trade_side)
                         if tp1_ok:
-                            log.info("[REAL] %s TP1 plan: %s @ %s (40%%)", symbol, tp1_qty_plan, tp1_price)
-                    if tp2_qty_plan >= step and tp2_qty_plan * tp2_price >= MIN_ORDER_USDT:
+                            log.info("[REAL] %s TP1 plan: %s @ %s (%.0f%%)",
+                                     symbol, tp1_qty_plan, tp1_price, tp_plan['tp1_pct'] * 100)
+                    if tp2_qty_plan >= step:
                         tp2_ok = _place_tp_plan(symbol, tp2_price, tp2_qty_plan, trade_side)
                         if tp2_ok:
-                            log.info("[REAL] %s TP2 plan: %s @ %s (30%%)", symbol, tp2_qty_plan, tp2_price)
+                            log.info("[REAL] %s TP2 plan: %s @ %s (%.0f%%) [%s]",
+                                     symbol, tp2_qty_plan, tp2_price, tp_plan['tp2_pct'] * 100,
+                                     'MERGE+TP3' if tp_plan['mode'] == 'merge' else 'normal')
 
-                    # FALLBACK: Posiciones pequeñas — si TP1/TP2 no caben en $5,
-                    # colocar un solo TP con la qty completa a precio TP1
-                    if not tp1_ok and not tp2_ok:
+                    # FALLBACK (solo si TP1 no cabe): colocar TP completo a precio TP1
+                    if not tp1_ok:
                         fallback_qty = math.floor(qty / step) * step
                         if fallback_qty >= step and fallback_qty * tp1_price >= MIN_ORDER_USDT:
                             tp1_ok = _place_tp_plan(symbol, tp1_price, fallback_qty, trade_side)
