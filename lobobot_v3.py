@@ -445,6 +445,8 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 # ================================================================
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """RSI clásico (Wilder)."""
+    if period < 1:
+        period = 14  # QA-FIX: periodo inválido/misconfig env → default (anti ZeroDivisionError)
     delta = series.diff()
     gain = delta.where(delta > 0, 0).ewm(alpha=1/period, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
@@ -884,7 +886,7 @@ def evaluar_absorcion_long(df_h4: pd.DataFrame) -> tuple[bool, dict]:
             'cuerpo_mecha_ratio': round(body / max(mecha_inf, 0.0001), 2),
             'absorcion': cond1 and cond2 and cond3,
         }
-        return (cond1 and cond2 and cond3), detalles
+        return bool(cond1 and cond2 and cond3), detalles
     return False, {'tipo': 'vela_alcista_no_aplica'}
 
 # ================================================================
@@ -1097,24 +1099,32 @@ def calcular_margen_real_disponible(balance_total: float, positions_list: Option
         if exchange is None or PAPER_TRADE:
             # Paper mode: estimar desde TRADE_ENTRIES
             for sym, entry in TRADE_ENTRIES.items():
-                size = float(entry.get('size_usdt', 0))
-                margen_lockeado += size
+                try:
+                    size = float(entry.get('size_usdt', 0))
+                    if math.isfinite(size) and size > 0:
+                        margen_lockeado += size
+                except (TypeError, ValueError):
+                    continue  # QA-FIX: entrada corrupta no aborta el cálculo
             return max(0.0, capital_fut - margen_lockeado)
         if positions_list is None:
             positions_list = exchange.fetch_positions()
         for pos in positions_list:
-            contracts = float(pos.get('contracts', 0))
-            if contracts <= 0:
-                continue
-            # Margin = notional / leverage
-            notional = float(pos.get('notional', 0))
-            lev = float(pos.get('leverage', 1))
-            if notional > 0 and lev > 0:
-                margen_lockeado += abs(notional) / lev
-            else:
-                # Fallback: usar initialMargin si está disponible
-                initial_margin = float(pos.get('initialMargin', 0))
-                margen_lockeado += initial_margin
+            try:
+                contracts = float(pos.get('contracts', 0))
+                if not (math.isfinite(contracts) and contracts > 0):
+                    continue  # posiciones cerradas (0) o corruptas (negativo/NaN) se omiten
+                # Margin = notional / leverage
+                notional = float(pos.get('notional', 0))
+                lev = float(pos.get('leverage', 1))
+                if math.isfinite(notional) and notional > 0 and math.isfinite(lev) and lev > 0:
+                    margen_lockeado += abs(notional) / lev
+                else:
+                    # Fallback: usar initialMargin si está disponible
+                    initial_margin = float(pos.get('initialMargin', 0))
+                    if math.isfinite(initial_margin) and initial_margin > 0:
+                        margen_lockeado += initial_margin
+            except (TypeError, ValueError):
+                continue  # QA-FIX: posición corrupta no aborta el cálculo del resto
     except Exception as e:
         log.debug("Error calculando margen lockeado: %s", e)
     disponible = max(0.0, capital_fut - margen_lockeado)
@@ -1138,8 +1148,10 @@ def calcular_precio_liquidacion(entry_price: float, leverage: float, side: str) 
     Calcula el precio de liquidación estimado para aislado en Bitget.
     Fórmula simplificada (ignora maintenance margin).
     """
-    # AUDIT-FIX (QA fuzzing): precios no positivos o lev inválido → 0 (defensivo)
-    if leverage <= 0 or entry_price <= 0:
+    # AUDIT-FIX (QA fuzzing): NaN/inf o precios no positivos o lev inválido → 0 (defensivo)
+    # Nota: NaN <= 0 es False, por eso se exige isfinite explícito.
+    if not (math.isfinite(entry_price) and entry_price > 0) or \
+       not (math.isfinite(leverage) and leverage > 0):
         return 0
     if side == 'long':
         return entry_price * (1.0 - 1.0 / leverage)
@@ -1199,14 +1211,23 @@ def evaluar_cobertura_v4(pos_entry: dict, precio_actual: float) -> Optional[dict
     - SL del hedge = precio de entrada del principal
     """
     symbol = pos_entry.get('symbol', '')
-    if HEDGE_ENTRIES.get(symbol):
+    # QA-FIX: membership (no truthiness): hedge registrado como dict vacío/placeholder
+    # aún bloquea re-cobertura. Consistente con el guard del main loop (line 3024).
+    if symbol in HEDGE_ENTRIES:
         return None
     side = pos_entry.get('side', 'long')
-    entry_price = float(pos_entry['entry_price'])
-    sl_price = float(pos_entry.get('sl_price', 0))
-    liq_price = float(pos_entry.get('liq_price', 0))
-    main_margin = float(pos_entry.get('size_usdt', 0))
-    if sl_price <= 0 or liq_price <= 0 or main_margin <= 0:
+    # QA-FIX: diccionarios corruptos/incompletos → None (anti KeyError/TypeError)
+    try:
+        entry_price = float(pos_entry.get('entry_price', 0))
+        sl_price = float(pos_entry.get('sl_price', 0))
+        liq_price = float(pos_entry.get('liq_price', 0))
+        main_margin = float(pos_entry.get('size_usdt', 0))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(entry_price) and entry_price > 0 and
+            math.isfinite(sl_price) and sl_price > 0 and
+            math.isfinite(liq_price) and liq_price > 0 and
+            math.isfinite(main_margin) and main_margin > 0):
         return None
     # Distancia al SL
     if side == 'long':
@@ -1664,7 +1685,14 @@ def check_btcd_elliott_ventana_altcoins(df_btcd_4h: Optional[pd.DataFrame] = Non
         return result
     result['btcd_bajista'] = True
     if df_btcd_4h is not None and len(df_btcd_4h) >= LOBO_BTCD_ELLOTT_LOOKBACK:
-        elliott = detectar_estructura_elliott_v3(df_btcd_4h)
+        # QA-FIX: normalizar naming CCXT (ts/o/h/l/c/v) → full (mismo patrón
+        # que validar_estructura_d1). Anti KeyError 'high' en datos CCXT crudos.
+        df_ell = df_btcd_4h
+        if 'high' not in df_ell.columns and 'h' in df_ell.columns:
+            df_ell = df_ell.rename(columns={'ts': 'timestamp', 'o': 'open',
+                                            'h': 'high', 'l': 'low',
+                                            'c': 'close', 'v': 'volume'})
+        elliott = detectar_estructura_elliott_v3(df_ell)
         # BUG-M1 FIX: detectar_estructura_elliott_v3 retorna 'ultimo_pivot', no 'direccion'
         # ultimo_pivot='maximo' = BTC.D hizo techo = bajista = ventana altcoins
         if elliott.get('fase') == 'estructura_5_ondas' and elliott.get('ultimo_pivot') == 'maximo':
@@ -2383,13 +2411,20 @@ def _plan_tp_qty(qty: float, step: float, tp1_price: float, tp2_price: float,
 
 
 def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str,
-                   max_retries: int = 3) -> bool:
+                   max_retries: int = 3, refresh_on_price_error: bool = True) -> bool:
     """Coloca una take-profit plan order vía API directa (hedge mode).
 
     QA-FIX (2026-08-10): retry con backoff exponencial (2s, 4s) — mismo
     patrón que _place_sl_plan (BUG #4). Error 43030 (plan ya existe) se
     trata como ÉXITO (idempotencia): antes retornaba False y hacía que TP2
     se marcara como no colocado aunque el exchange ya tuviera el plan.
+
+    QA-FIX (2026-08-13, AUDIT TP1/TP2/TP3): errores 45060/45061/45064/45065
+    ("TP price vs current/order price") significan que el MARK ya superó el
+    trigger (ventana de sleep(3s)+latencia tras la entrada en alts volátiles).
+    Antes: 3 reintentos con el MISMO precio → fallo permanente → TP ausente.
+    Ahora: si refresh_on_price_error, se relee el mark y se re-deriva el
+    trigger (mark ± buffer de 0.15%) antes del siguiente intento.
     """
     if not exchange or PAPER_TRADE:
         return False
@@ -2415,6 +2450,22 @@ def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str,
             if '43030' in last_err:
                 log.info("TP plan ya existe %s @ %s (attempt %d) — ok", sym, tp_price, attempt)
                 return True
+            # 45060/45064: LONG con trigger <= mark/order. 45061/45065: SHORT.
+            # El mark ya superó el trigger → re-derivar con precio fresco.
+            if refresh_on_price_error and any(c in last_err for c in ('45060', '45061', '45064', '45065')):
+                try:
+                    ticker = exchange.fetch_ticker(sym)
+                    mark = float(ticker.get('last', 0))
+                except Exception:
+                    mark = 0.0
+                if mark > 0:
+                    if side == 'long':
+                        tp_price = max(tp_price, mark * 1.0015)
+                    else:
+                        tp_price = min(tp_price, mark * 0.9985)
+                    tp_price = float(exchange.price_to_precision(sym, tp_price))
+                    log.warning("TP plan %s @ %s: %s — refresh trigger a %s (mark=%.4f)",
+                                sym, tp_price, e, tp_price, mark)
             if attempt < max_retries:
                 wait = 2 ** attempt
                 log.warning("TP plan attempt %d/%d falló %s @ %s: %s — retry en %ds",
@@ -3854,12 +3905,15 @@ def main():
                     except Exception as e:
                         log.warning("Error set_leverage %s %.0f: %s", symbol, lev_calc, e)
 
-                    # Entrada + TP3 safety como presetStopSurplusPrice
+                    # Entrada SIN presetStopSurplusPrice (QA-FIX 2026-08-13).
+                    # ANTES: preset creaba pos_profit (TP de posición COMPLETA, no 30%)
+                    # → doble cobertura (100% pos_profit + 70% profit_plans = 170%)
+                    # y TP3 no aparecía como plan order en Bitget ("no cargan los 3").
+                    # AHORA: los 3 TPs se cargan como profit_plan con sus qtys 40/30/30.
                     params = {
                         'marginCoin': 'USDT',
                         'marginMode': 'isolated',
                         'tradeSide': 'open',
-                        'presetStopSurplusPrice': str(exchange.price_to_precision(symbol, tp3_price)),
                     }
                     try:
                         exchange.create_order(symbol, 'market', 'buy' if es_long else 'sell', qty, params=params)
@@ -3868,25 +3922,43 @@ def main():
                         COOLDOWNS[symbol] = time.time() + 14400  # 4h cooldown tras error
                         continue
 
-                    # Colocar TP1, TP2 y SL como plan orders en exchange
+                    # Colocar TP1, TP2 y TP3 como plan orders en exchange
                     # QA-FIX (2026-08-10): planificación con MERGE + diagnóstico.
-                    # BUG: TP2 (30% notional) no se colocaba cuando 0.30*N < $5
-                    # mientras TP1 (40%*N ≥ $5) sí → Bitget mostraba solo TP1+TP3.
+                    # QA-FIX (2026-08-13): TP3 ahora se coloca como profit_plan real.
                     trade_side = 'long' if es_long else 'short'
                     tp_plan = _plan_tp_qty(qty, step, tp1_price, tp2_price)
                     tp1_qty_plan = tp_plan['tp1_qty']
                     tp2_qty_plan = tp_plan['tp2_qty']
+                    tp3_qty_plan = tp_plan['tp3_qty']
                     tp1_ok = False
                     tp2_ok = False
+                    tp3_ok = False
                     sl_ok = False
                     # BUG #3 FIX: sleep(1) → sleep(3) para que el position se refleje en Bitget
                     time.sleep(3)
-                    if tp1_qty_plan >= step:
+
+                    def _tp_cabe(pq: float, px: float) -> bool:
+                        try:
+                            return (pq >= step) and (pq * px) >= MIN_ORDER_USDT
+                        except TypeError:
+                            return False
+
+                    if _tp_cabe(tp3_qty_plan, tp3_price):
+                        tp3_ok = _place_tp_plan(symbol, tp3_price, tp3_qty_plan, trade_side)
+                        if tp3_ok:
+                            log.info("[REAL] %s TP3 plan: %s @ %s (%.0f%%)",
+                                     symbol, tp3_qty_plan, tp3_price, tp_plan.get('tp3_pct', 0) * 100 or 30)
+                    elif tp3_qty_plan >= step:
+                        log.warning("[REAL] %s TP3 remanente %s @ %s no alcanza $%.0f "
+                                    "→ gestión local del remanente",
+                                    symbol, tp3_qty_plan, tp3_price, MIN_ORDER_USDT)
+
+                    if _tp_cabe(tp1_qty_plan, tp1_price):
                         tp1_ok = _place_tp_plan(symbol, tp1_price, tp1_qty_plan, trade_side)
                         if tp1_ok:
                             log.info("[REAL] %s TP1 plan: %s @ %s (%.0f%%)",
                                      symbol, tp1_qty_plan, tp1_price, tp_plan['tp1_pct'] * 100)
-                    if tp2_qty_plan >= step:
+                    if _tp_cabe(tp2_qty_plan, tp2_price):
                         tp2_ok = _place_tp_plan(symbol, tp2_price, tp2_qty_plan, trade_side)
                         if tp2_ok:
                             log.info("[REAL] %s TP2 plan: %s @ %s (%.0f%%) [%s]",
@@ -3894,7 +3966,9 @@ def main():
                                      'MERGE+TP3' if tp_plan['mode'] == 'merge' else 'normal')
 
                     # FALLBACK (solo si TP1 no cabe): colocar TP completo a precio TP1
-                    if not tp1_ok:
+                    # QA-FIX (2026-08-13): el fallback solo aplica si NINGÚN plan parcial
+                    # fue colocado (TP1/TP2/TP3 ausentes por notional o rechazo).
+                    if not (tp1_ok or tp2_ok or tp3_ok):
                         fallback_qty = math.floor(qty / step) * step
                         if fallback_qty >= step and fallback_qty * tp1_price >= MIN_ORDER_USDT:
                             tp1_ok = _place_tp_plan(symbol, tp1_price, fallback_qty, trade_side)
@@ -3934,6 +4008,7 @@ def main():
 
                     # BUG #2 FIX: Telegram muestra [EX] solo si sl_ok, sino [LOCAL]
                     sl_label = '[EX]' if sl_ok else '[LOCAL]'
+                    tp3_label = '[EX]' if tp3_ok else ('[MERGE→TP2]' if tp_plan['mode'] == 'merge' else '[LOCAL]')
                     send_telegram(
                         f"*{symbol} {side_name}* (BITLOBO)\n"
                         f"Entry: `{exchange.price_to_precision(symbol, precio_actual)}`\n"
@@ -3941,7 +4016,7 @@ def main():
                         f"SL: `{exchange.price_to_precision(symbol, sl_price)}` {sl_label}\n"
                         f"TP1(40%): `{exchange.price_to_precision(symbol, tp1_price)}` [{'EX' if tp1_ok else 'LOCAL'}]\n"
                         f"TP2(30%): `{exchange.price_to_precision(symbol, tp2_price)}` [{'EX' if tp2_ok else 'LOCAL'}]\n"
-                        f"TP3(30%): `{exchange.price_to_precision(symbol, tp3_price)}` [EX-SAFETY]\n"
+                        f"TP3(30%): `{exchange.price_to_precision(symbol, tp3_price)}` {tp3_label}\n"
                         f"R:R: {rr:.2f} | Score: {score}/{max_score}"
                     )
                     PARTIAL_LEVEL[symbol] = 0
