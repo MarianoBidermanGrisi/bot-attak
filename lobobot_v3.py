@@ -359,8 +359,10 @@ LOBO_KILL_COOLDOWN_H        = float(os.environ.get('LOBO_KILL_COOLDOWN_H', '24')
 KILL_UNTIL: float = 0.0   # epoch ts; mientras time.time() < KILL_UNTIL → no abrir posiciones
 CONSECUTIVE_LOSSES: int = 0
 
-# SL simple 1.5 ATR (original)
-LOBO_SL_ATR              = float(os.environ.get('LOBO_SL_ATR', '1.5'))
+# SL simple 3.0 ATR (FIX-ANALISIS-AGO13: era 1.5, demasiado tight para mercados laterales)
+# Análisis Aug 13-16: ATR implícita promedio 0.73%, con SL 1.5× = 1.1% distancia
+# → 37% de trades muertos en <40min (ruido puro). SL 3.0× da ~2.2% espacio.
+LOBO_SL_ATR              = 3.0
 LOBO_SL_ATR_SMALL_VOL   = float(os.environ.get('LOBO_SL_ATR_SMALL_VOL', '5000000'))  # volumen diario para clasificar
 # FILTRO DE REGIMEN (A): hipótesis trend-following FALSADA por backtest 2026-08-06
 # (PF 1.22→0.87, +84%→-30%: eliminó los TP3 reversales). DEFAULT OFF.
@@ -371,6 +373,27 @@ LOBO_REGIME_FILTER      = os.environ.get('LOBO_REGIME_FILTER', '0').lower() == '
 # (SOXL/MU/SNDK/SKHY/BLESS...) que el bot no debe tocar. Vacío = sin filtro.
 LOBO_WHITELIST          = {b.strip().upper() for b in os.environ.get('LOBO_WHITELIST', '').split(',') if b.strip()}
 LOBO_REGIME_EMA_PERIOD  = int(os.environ.get('LOBO_REGIME_EMA_PERIOD', '50'))
+
+# === FIX-ANALISIS-AGO13: BLACKLIST de 17 símbolos que NUNCA ganaron (Aug 13-16) ===
+# Análisis de 61 trades (31W/30L) mostró que estos 17 símbolos siempre tocaron SL.
+# Representan el 60% de todas las pérdidas. Excluirlos mejora win rate de 50.8%→~73%.
+# ETFs problemáticos + microcaps/memecoins sin liquidez real.
+LOBO_BLACKLIST = {
+    'SPCX', 'NBIS', 'MRVL', 'SKHYNIX', 'SKHY', 'RKLB', 'INJ',
+    'ENA', 'APT', 'JTO', 'ALICE', 'DOS', 'ENSO', 'GWEI',
+    'BASED', 'CRV', 'HOME',
+}
+#龙虾 excluido del blacklist porque su ticker puede variar en Bitget (meme coin china)
+_log_msg = f"Blacklist activa: {len(LOBO_BLACKLIST)} símbolos bloqueados"
+log.info(_log_msg)
+
+# === FIX-ANALISIS-AGO13: FILTRO HORARIO (solo EU/US session) ===
+# Análisis Aug 14: sesión Asiática (05:00-07:00) = 0% win rate.
+# Solo operar cuando hay liquidez real (EU + US).
+# Valores en HORA LOCAL del servidor (ajustar según timezone de Render/PS).
+LOBO_TRADE_START_HOUR  = 10
+LOBO_TRADE_END_HOUR    = 23
+log.info("Filtro horario: operar entre %02d:00 y %02d:00", LOBO_TRADE_START_HOUR, LOBO_TRADE_END_HOUR)
 
 # (No TP fixed ATR — se usa F12 zone-based)
 
@@ -412,13 +435,14 @@ log.info(
     "BITLOBO v4 Config: TOP=%d | Split Liq:%d%%/Fut:%d%% | "
     "Risk=%.1f%%(sobre %d%%) | SL=%.1fATR | MaxPos=%d | "
     "Hedge=%s(%.0fx trig=%.0f%%) | RSI[%.0f,%.0f] | "
-    "ScoreMin=%d | Paper=%s",
+    "ScoreMin=%d | Paper=%s | Hours=%02d-%02d | BK=%d",
     TOP_N,
     LOBO_LIQUIDEZ_PCT*100, LOBO_FUTUROS_PCT*100,
     LOBO_RISK_PCT*100, LOBO_FUTUROS_PCT*100, LOBO_SL_ATR, LOBO_MAX_POSITIONS,
     LOBO_HEDGE_ENABLED, LOBO_HEDGE_LEV_MULT, LOBO_HEDGE_TRIGGER_PCT*100,
     LOBO_RSI_OVERSOLD, LOBO_RSI_OVERBOUGHT,
     LOBO_SCORE_MIN, PAPER_TRADE,
+    LOBO_TRADE_START_HOUR, LOBO_TRADE_END_HOUR, len(LOBO_BLACKLIST),
 )
 
 # =====================================================================
@@ -2036,8 +2060,12 @@ def evaluar_senal_bitlobo_v4(
     senal['rr'] = rr
     senal['dist_sl'] = dist_sl
 
-    # R:R mínimo 1.0 (TP1) — FIX-AUDIT-4: antes 0.8 (entradas con RR pobre).
-    if rr < 1.0:
+    # R:R mínimo 0.5 (FIX-ANALISIS-AGO13: era 1.0, con SL=3.0 ATR se rechazaba
+    # el 70% de trades. R:R efectivo ponderado (40%TP1+30%TP2+30%TP3) = ~1.37
+    # incluso con SL amplio, porque los TPs son PnL-based (no ATR-based).
+    # TP1_dist = entry×15%/10x = 1.5% precio vs SL 3.0×ATR ≈ 2.2% → R:R TP1 = 0.68
+    # pero R:R real = 30%/2.2% = 1.37 (ganancia ponderada / pérdida SL).
+    if rr < 0.5:
         return None
     if rr >= 1.2:
         score += 1
@@ -3683,6 +3711,20 @@ def main():
                 time.sleep(60)
                 continue
 
+            # ── FIX-ANALISIS-AGO13: FILTRO HORARIO (solo EU/US session) ──
+            # Sesión Asiática (05:00-07:00) = 0% win rate en Aug 14.
+            # Maneja cruce de medianoche: start=22 end=6 → opera 22:00-06:00
+            hora_actual = now.hour
+            if LOBO_TRADE_START_HOUR <= LOBO_TRADE_END_HOUR:
+                en_horario = LOBO_TRADE_START_HOUR <= hora_actual < LOBO_TRADE_END_HOUR
+            else:  # cruce medianoche (ej: 22-6)
+                en_horario = hora_actual >= LOBO_TRADE_START_HOUR or hora_actual < LOBO_TRADE_END_HOUR
+            if not en_horario:
+                log.debug("Fuera de horario de trading (%02d:00 not in %02d-%02d), durmiendo 5min",
+                          hora_actual, LOBO_TRADE_START_HOUR, LOBO_TRADE_END_HOUR)
+                time.sleep(300)
+                continue
+
             # ── Posiciones activas + margen real disponible ──
             try:
                 positions = exchange.fetch_positions()
@@ -3714,6 +3756,11 @@ def main():
                 ]
                 if LOBO_WHITELIST:  # D: restringir a criptos reales
                     top_symbols = [s for s in top_symbols if s.split('/')[0] in LOBO_WHITELIST]
+                # FIX-ANALISIS-AGO13: excluir símbolos blacklisteados (siempre pierden)
+                before_bk = len(top_symbols)
+                top_symbols = [s for s in top_symbols if s.split('/')[0] not in LOBO_BLACKLIST]
+                if before_bk != len(top_symbols):
+                    log.info("Blacklist removió %d símbolos del scan", before_bk - len(top_symbols))
             except Exception as e:
                 log.error("Error fetching tickers: %s", e)
                 time.sleep(60)
