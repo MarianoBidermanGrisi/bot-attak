@@ -309,7 +309,7 @@ LOBO_ATR_PERIOD          = int(os.environ.get('LOBO_ATR_PERIOD', '14'))
 # FIX-AUDIT-8: 5% → 2% (alineado con F8 documentado: 1.5-2% por trade)
 LOBO_RISK_PCT            = float(os.environ.get('LOBO_RISK_PCT', '2')) / 100
 LOBO_RISK_PCT_EXCEP      = float(os.environ.get('LOBO_RISK_PCT_EXCEP', '4')) / 100
-LOBO_MAX_POSITIONS       = int(os.environ.get('LOBO_MAX_POSITIONS', '5'))
+LOBO_MAX_POSITIONS       = int(os.environ.get('LOBO_MAX_POSITIONS', '3'))
 
 # TP/SL (F12: TPs basados en zonas reales)
 LOBO_TP1_SIZE            = float(os.environ.get('LOBO_TP1_SIZE', '0.40'))
@@ -1453,7 +1453,7 @@ def calcular_apalancamiento_optimo(
         max_lev = 20.0
         log.debug("Apalancamiento: %s (alt alta liquidez) -> max %.0fX", base, max_lev)
     else:
-        max_lev = 10.0
+        max_lev = 15.0
         log.debug("Apalancamiento: %s (otro) -> max %.0fX", base, max_lev)
 
     # Encontrar el nivel extremo de la mecha (últimas 5 velas)
