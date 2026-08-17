@@ -28,7 +28,7 @@ Variables de entorno (nuevas respecto a v2):
 """
 
 from __future__ import annotations
-import os, sys, time, json, math, logging, asyncio, threading, csv, warnings
+import os, sys, time, json, math, logging, asyncio, threading, csv, warnings, signal, atexit
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 import numpy as np
@@ -182,8 +182,8 @@ def _bg_refresh_proxy_usdtd():
         if exch_bg:
             try:
                 exch_bg.close()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("BG proxy: error cerrando exchange instance: %s", e)
 
 def _schedule_bg_dominance_refresh():
     """Agenda refresh de dominancia + proxy en background threads (no bloquea).
@@ -358,6 +358,10 @@ LOBO_KILL_MAX_CONSEC_LOSSES = int(os.environ.get('LOBO_KILL_MAX_CONSEC_LOSSES', 
 LOBO_KILL_COOLDOWN_H        = float(os.environ.get('LOBO_KILL_COOLDOWN_H', '24'))
 KILL_UNTIL: float = 0.0   # epoch ts; mientras time.time() < KILL_UNTIL → no abrir posiciones
 CONSECUTIVE_LOSSES: int = 0
+KILL_STREAK_AT_TRIGGER: int = 0  # P0-FIX: racha que disparó el kill-switch (antes era local)
+
+# P1-1: Evento de shutdown graceful (SIGTERM desde Render)
+_shutdown_event: threading.Event = threading.Event()
 
 # SL simple 3.0 ATR (FIX-ANALISIS-AGO13: era 1.5, demasiado tight para mercados laterales)
 # Análisis Aug 13-16: ATR implícita promedio 0.73%, con SL 1.5× = 1.1% distancia
@@ -585,10 +589,12 @@ def check_dominancia_btc_long() -> bool:
     _schedule_bg_dominance_refresh()
 
     # Fallback síncrono RÁPIDO (solo 1 llamada BTC/USDT, no bloqueante)
+    # FIX P0-2: cerrar la instancia CCXT al terminar (evita socket leak).
     result = False
+    _exch_fb = None
     try:
-        exch = ccxt.bitget({'enableRateLimit': True})
-        ohlcv = exch.fetch_ohlcv('BTC/USDT:USDT', timeframe='4h', limit=30)
+        _exch_fb = ccxt.bitget({'enableRateLimit': True})
+        ohlcv = _exch_fb.fetch_ohlcv('BTC/USDT:USDT', timeframe='4h', limit=30)
         if ohlcv and len(ohlcv) > 10:
             closes = pd.Series([c[4] for c in ohlcv])
             sma20 = closes.rolling(20).mean()
@@ -600,6 +606,12 @@ def check_dominancia_btc_long() -> bool:
                 result = pendiente > 0.001
     except Exception as e:
         log.debug("Fallback BTC.D SMA error: %s", e)
+    finally:
+        if _exch_fb:
+            try:
+                _exch_fb.close()
+            except Exception as e:
+                log.debug("Fallback BTC.D: error cerrando exchange instance: %s", e)
     # AUDIT-FIX 2026-08-08: ts=now (antes 0). Con ts=0 el cache NUNCA estaba
     # fresco → el fallback síncrono se repetía cada ciclo (bloqueaba ~1-2s) y
     # _schedule_bg_dominance_refresh() re-creaba los threads cada ciclo (2 llamadas
@@ -1036,6 +1048,38 @@ def detectar_pullback_confirmado(df_h4: pd.DataFrame, nivel_roto: float, es_long
     return False
 
 # ================================================================
+# PIVOTS COMPARTIDOS — reutilizado por Elliott, CHOCH, Expanded Flat,
+# Microfractalidad y D1. Elimina código duplicado (5 funciones).
+# ================================================================
+def find_pivots(df: pd.DataFrame, left: int = 5, right: int = 5) -> tuple[list[int], list[int]]:
+    """
+    Detecta swing pivot highs y pivot lows en un DataFrame de velas.
+    Complejidad: O(n) amortizada.
+    
+    Args:
+        df: DataFrame con columnas 'high'/'low' (o 'h'/'l' para CCXT raw)
+        left: Velas izquierda para confirmar pivote
+        right: Velas derecha para confirmar pivote
+    
+    Returns:
+        (pivot_highs_idx, pivot_lows_idx): listas de índices enteros
+    """
+    col_high = 'high' if 'high' in df.columns else 'h'
+    col_low = 'low' if 'low' in df.columns else 'l'
+    highs = df[col_high].values
+    lows = df[col_low].values
+    n = len(highs)
+    pivot_highs_idx: list[int] = []
+    pivot_lows_idx: list[int] = []
+    for i in range(left, n - right):
+        if highs[i] == max(highs[max(0, i - left):i + right + 1]):
+            pivot_highs_idx.append(i)
+        if lows[i] == min(lows[max(0, i - left):i + right + 1]):
+            pivot_lows_idx.append(i)
+    return pivot_highs_idx, pivot_lows_idx
+
+
+# ================================================================
 # F11: Elliott mejorado con relaciones Fibonacci
 # ================================================================
 def detectar_estructura_elliott_v3(df_h4: pd.DataFrame) -> dict:
@@ -1049,17 +1093,7 @@ def detectar_estructura_elliott_v3(df_h4: pd.DataFrame) -> dict:
     """
     if len(df_h4) < LOBO_ELLIOTT_LOOKBACK:
         return {'fase': 'indefinida', 'razon': 'pocos_datos'}
-    left, right = 5, 5
-    highs = df_h4['high'].values
-    lows = df_h4['low'].values
-    n = len(highs)
-    pivot_highs_idx = []
-    pivot_lows_idx = []
-    for i in range(left, n - right):
-        if highs[i] == max(highs[i-left:i+right+1]):
-            pivot_highs_idx.append(i)
-        if lows[i] == min(lows[i-left:i+right+1]):
-            pivot_lows_idx.append(i)
+    pivot_highs_idx, pivot_lows_idx = find_pivots(df_h4, left=5, right=5)
     if len(pivot_highs_idx) < 3 or len(pivot_lows_idx) < 2:
         return {'fase': 'indefinida', 'razon': 'pocos_pivots'}
     # Buscar secuencia 1-2-3-4-5
@@ -1193,20 +1227,16 @@ def validar_estructura_d1(df_d1: pd.DataFrame, entry_price: float, side: str) ->
     """
     if len(df_d1) < 10:
         return True
+    pivot_highs_idx, pivot_lows_idx = find_pivots(df_d1, left=3, right=3)
     # Mapear nombres de columnas (CCXT devuelve ['ts','o','h','l','c','v'])
     col_low = 'low' if 'low' in df_d1.columns else 'l'
     col_high = 'high' if 'high' in df_d1.columns else 'h'
     col_close = 'close' if 'close' in df_d1.columns else 'c'
     lows = df_d1[col_low].values
     highs = df_d1[col_high].values
-    n = len(lows)
-    swing_lows = []
-    swing_highs = []
-    for i in range(3, n - 3):
-        if lows[i] == min(lows[i-3:i+4]):
-            swing_lows.append((i, lows[i]))
-        if highs[i] == max(highs[i-3:i+4]):
-            swing_highs.append((i, highs[i]))
+    # Construir swing_lows/highs compatibles con la lógica existente
+    swing_lows = [(i, lows[i]) for i in pivot_lows_idx]
+    swing_highs = [(i, highs[i]) for i in pivot_highs_idx]
     ult_cierre = float(df_d1[col_close].iloc[-1])
     if side == 'long':
         if swing_lows:
@@ -1475,14 +1505,7 @@ def detectar_expanded_flat(df_h4: pd.DataFrame, es_long: bool) -> dict:
     lows = df_h4['low'].values
     closes = df_h4['close'].values
     opens = df_h4['open'].values
-    n = len(highs)
-    pivot_highs_idx = []
-    pivot_lows_idx = []
-    for i in range(left, n - right):
-        if highs[i] == max(highs[max(0, i-left):i+right+1]):
-            pivot_highs_idx.append(i)
-        if lows[i] == min(lows[max(0, i-left):i+right+1]):
-            pivot_lows_idx.append(i)
+    pivot_highs_idx, pivot_lows_idx = find_pivots(df_h4, left=left, right=right)
     if len(pivot_highs_idx) < 2 or len(pivot_lows_idx) < 2:
         return {'encontrado': False, 'razon': 'pocos_pivots'}
     if es_long:
@@ -1560,18 +1583,10 @@ def detectar_choch(df_h4: pd.DataFrame, es_long: bool) -> dict:
     """
     if len(df_h4) < LOBO_CHOCH_LOOKBACK:
         return {'choch': False, 'razon': 'pocos_datos'}
-    left, right = 3, 3
     highs = df_h4['high'].values
     lows = df_h4['low'].values
     closes = df_h4['close'].values
-    n = len(highs)
-    pivot_highs_idx = []
-    pivot_lows_idx = []
-    for i in range(left, n - right):
-        if highs[i] == max(highs[max(0, i-left):i+right+1]):
-            pivot_highs_idx.append(i)
-        if lows[i] == min(lows[max(0, i-left):i+right+1]):
-            pivot_lows_idx.append(i)
+    pivot_highs_idx, pivot_lows_idx = find_pivots(df_h4, left=3, right=3)
     if len(pivot_highs_idx) < 3 or len(pivot_lows_idx) < 2:
         return {'choch': False, 'razon': 'pocos_pivots'}
     if es_long:
@@ -1613,17 +1628,9 @@ def verificar_microfractalidad(df_5m: pd.DataFrame) -> dict:
     """
     if len(df_5m) < LOBO_MICRO_LOOKBACK:
         return {'completo': False, 'razon': 'pocos_datos'}
-    left, right = 3, 3
     highs = df_5m['high'].values
     lows = df_5m['low'].values
-    n = len(highs)
-    pivot_highs_idx = []
-    pivot_lows_idx = []
-    for i in range(left, n - right):
-        if highs[i] == max(highs[max(0, i-left):i+right+1]):
-            pivot_highs_idx.append(i)
-        if lows[i] == min(lows[max(0, i-left):i+right+1]):
-            pivot_lows_idx.append(i)
+    pivot_highs_idx, pivot_lows_idx = find_pivots(df_5m, left=3, right=3)
     pivots = sorted(
         [(i, 'high', highs[i]) for i in pivot_highs_idx[-8:]] +
         [(i, 'low', lows[i]) for i in pivot_lows_idx[-8:]],
@@ -2125,8 +2132,8 @@ def send_telegram(message: str):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
         log.info("Telegram: %s ...", message[:80].replace('\n', ' '))
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("Telegram env falló: %s", e)
 
 # =====================================================================
 # 8. CSV LOGGING (adaptado a v4)
@@ -2222,8 +2229,8 @@ def guardar_trade_csv(entry, exit_price, raw_pnl, fees, net, status, close_reaso
             if write_header:
                 w.writeheader()
             w.writerow(row)
-    except Exception:
-        pass
+    except Exception as e:
+        log.error("CRITICO: No se pudo guardar trade CSV: %s", e)
 
 SIGNAL_LOG_HEADERS_V3 = [
     'time', 'symbol', 'side', 'price', 'score', 'max_score',
@@ -2262,8 +2269,8 @@ def guardar_signal_log(symbol, side, price, score, max_score, detalles,
             if write_header:
                 w.writeheader()
             w.writerow(row)
-    except Exception:
-        pass
+    except Exception as e:
+        log.error("CRITICO: No se pudo guardar signal log CSV: %s", e)
 
 # =====================================================================
 # 9. FETCH ASÍNCRONO (idéntico a v2)
@@ -2453,6 +2460,11 @@ def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str,
     Antes: 3 reintentos con el MISMO precio → fallo permanente → TP ausente.
     Ahora: si refresh_on_price_error, se relee el mark y se re-deriva el
     trigger (mark ± buffer de 0.15%) antes del siguiente intento.
+
+    FIX-TP-DIAG (2026-08-16): valida el body de la respuesta de Bitget.
+    Antes: privateMixPost* retornaba True sin verificar el campo 'code' del
+    response body → errores silenciosos (Bitget HTTP 200 + code!=0).
+    Ahora: si resp['code'] != '0', se lanza ExchangeError para activar retry.
     """
     if not exchange or PAPER_TRADE:
         return False
@@ -2471,7 +2483,21 @@ def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str,
                 'holdSide': hold_side,
                 'size': exchange.amount_to_precision(sym, tp_qty),
             }
-            exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
+            resp = exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
+            # FIX-TP-DIAG: validar body de respuesta (Bitget retorna HTTP 200 + code!=0)
+            if isinstance(resp, dict):
+                resp_code = str(resp.get('code', '0'))
+                if resp_code != '0':
+                    resp_msg = resp.get('msg', 'unknown')
+                    # 43030 = plan ya existe → éxito idempotente
+                    if resp_code == '43030':
+                        log.info("TP plan ya existe (resp 43030) %s @ %s qty=%s (attempt %d) — ok",
+                                 sym, tp_price, tp_qty, attempt)
+                        return True
+                    # Cualquier otro error → reintentar
+                    raise ccxt.ExchangeError(f"Bitget API code={resp_code}: {resp_msg}")
+            log.info("TP plan OK %s @ %s qty=%s side=%s (attempt %d/%d)",
+                     sym, tp_price, tp_qty, side, attempt, max_retries)
             return True
         except Exception as e:
             last_err = str(e)
@@ -2561,6 +2587,8 @@ def _place_sl_plan(sym: str, sl_price: float, sl_qty: float, side: str,
     """Coloca una stop-loss plan order vía API directa (hedge mode).
     
     BUG #4 FIX: Reintentos con backoff exponencial (2s, 4s, 8s).
+    FIX-TP-DIAG (2026-08-16): valida el body de la respuesta de Bitget
+    (mismo fix que _place_tp_plan).
     
     Args:
         sym: símbolo del par
@@ -2590,7 +2618,17 @@ def _place_sl_plan(sym: str, sl_price: float, sl_qty: float, side: str,
                 'holdSide': side,  # 'long' o 'short'
                 'size': exchange.amount_to_precision(sym, sl_qty),
             }
-            exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
+            resp = exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
+            # FIX-TP-DIAG: validar body de respuesta
+            if isinstance(resp, dict):
+                resp_code = str(resp.get('code', '0'))
+                if resp_code != '0':
+                    resp_msg = resp.get('msg', 'unknown')
+                    if resp_code == '43030':
+                        log.info("SL plan ya existe (resp 43030) %s @ %s (attempt %d)",
+                                 sym, sl_price, attempt)
+                        return True
+                    raise ccxt.ExchangeError(f"Bitget API code={resp_code}: {resp_msg}")
             log.info("SL plan placed %s @ %s qty=%s side=%s (attempt %d/%d)",
                      sym, sl_price, sl_qty, side, attempt, max_retries)
             return True
@@ -2609,6 +2647,63 @@ def _place_sl_plan(sym: str, sl_price: float, sl_qty: float, side: str,
                 log.error("SL plan FAILED tras %d intentos %s @ %s: %s",
                           max_retries, sym, sl_price, e)
     return False
+
+
+def _diagnose_tp_plans(sym: str, expected_profit: int = 0, expected_loss: int = 0,
+                       expected_tp_prices: list = None) -> dict:
+    """FIX-TP-DIAG (2026-08-16): Consulta Bitget post-placement y verifica
+    qué planes existen realmente en el exchange.
+
+    Retorna dict con el conteo real de planes y detalles para logging.
+    """
+    result = {'profit_plans': 0, 'loss_plans': 0, 'details': [], 'ok': False}
+    if not exchange or PAPER_TRADE:
+        return result
+    try:
+        time.sleep(0.5)  # breve espera para que Bitget propague los planes
+        market_info = exchange.market(sym)
+        params = {
+            'productType': 'usdt-futures',
+            'symbol': market_info['id'].lower(),
+        }
+        pending = exchange.privateMixGetV2MixOrderOrdersPending(params)
+        entries = (pending.get('data') or {}).get('entrustedList') or []
+        for plan in entries:
+            pt = plan.get('planType', '')
+            trigger = plan.get('triggerPrice', '?')
+            size = plan.get('size', '?')
+            status = plan.get('state', plan.get('status', '?'))
+            oid = plan.get('orderId', plan.get('entrustedId', '?'))
+            if pt == 'profit_plan':
+                result['profit_plans'] += 1
+                result['details'].append(f"PROFIT trigger={trigger} size={size} st={status} id={oid}")
+            elif pt == 'loss_plan':
+                result['loss_plans'] += 1
+                result['details'].append(f"LOSS trigger={trigger} size={size} st={status} id={oid}")
+
+        # Verificar si lo que hay en exchange matches lo esperado
+        profit_ok = (expected_profit <= 0) or (result['profit_plans'] >= expected_profit)
+        loss_ok = (expected_loss <= 0) or (result['loss_plans'] >= expected_loss)
+        result['ok'] = profit_ok and loss_ok
+
+        # Log diagnóstico
+        log.info("[DIAG-TP] %s planes en Bitget: %d profit (esperados %d), "
+                 "%d loss (esperados %d) — %s",
+                 sym, result['profit_plans'], expected_profit,
+                 result['loss_plans'], expected_loss,
+                 'OK' if result['ok'] else 'MISMATCH')
+        for d in result['details']:
+            log.info("[DIAG-TP] %s %s", sym, d)
+
+        # Alertar si hay MISMATCH (probable causa del bug TP único)
+        if not result['ok']:
+            log.warning("[DIAG-TP] %s ALERTA: Bitget tiene %d profit plans pero se esperaban %d. "
+                        "Causa probable: Bitget limita profit_plans por símbolo o la API rechazó "
+                        "TP2/TP3 silenciosamente. Verificar en Bitget → Orders → Plan.",
+                        sym, result['profit_plans'], expected_profit)
+    except Exception as e:
+        log.warning("[DIAG-TP] Error consultando planes %s: %s", sym, e)
+    return result
 
 
 def _calc_pnl_parcial(side: str, entry_price: float, qty_sold: float, exit_px: float) -> float:
@@ -2910,8 +3005,8 @@ def adoptar_posiciones_exchange():
             try:
                 market_info = exchange.market(sym)
                 step = market_info['limits']['amount']['min'] or market_info['precision']['amount']
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[ADOP] %s No se pudo leer market info (step default=0.01): %s", sym, e)
 
             atr_val = _atr_est_15m(sym, entry_price)
             remaining_qty = round(contracts, 8)
@@ -3077,8 +3172,8 @@ def _manage_paper_positions_v3(balance_total: float):
                             _full_cleanup(symbol, cooldown=7200)
                             send_telegram(f"[PAPER v4] *{symbol}* Cerrada por D1 estructura")
                             continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.error("[PAPER v4] %s Error validando D1 estructura: %s", symbol, e)
 
             # --- F4: Evaluar cobertura asimétrica v4 ---
             if LOBO_HEDGE_ENABLED and symbol not in HEDGE_ENTRIES:
@@ -3350,8 +3445,8 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                             _full_cleanup(symbol, cooldown=7200)
                             send_telegram(f"[REAL v4] *{symbol}* Cerrada por D1 estructura")
                             continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.error("[REAL v4] %s Error validando D1 estructura: %s", symbol, e)
 
             # --- F4: Evaluar cobertura asimétrica v4 ---
             if LOBO_HEDGE_ENABLED and symbol not in HEDGE_ENTRIES:
@@ -3369,8 +3464,8 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
                         # Abrir cobertura real
                         try:
                             exchange.set_leverage(int(hedge_params['leverage']), symbol)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.warning("[REAL v4] %s set_leverage hedge falló (cobertura Continuará): %s", symbol, e)
                         try:
                             # FIX: usar step del mercado en vez de hardcodear 1
                             try:
@@ -3601,6 +3696,48 @@ def manage_escudo_pro_v3(balance_total: float = 0.0):
             log.error("[REAL] Error gestionando %s: %s", symbol, e)
 
 # =====================================================================
+# 11b. SHUTDOWN GRACEFUL (P1-1: SIGTERM desde Render)
+# =====================================================================
+def _graceful_shutdown():
+    """Ejecuta tareas de limpieza al recibir SIGTERM o al cerrar el proceso."""
+    log.info("=" * 40)
+    log.info("SHUTDOWN GRACEFUL INICIADO")
+    log.info("=" * 40)
+    # 1. Guardar estado de posiciones pendientes
+    try:
+        _save_trade_entries()
+        _save_partial_level()
+    except Exception as e:
+        log.error("Error guardando estado durante shutdown: %s", e)
+    # 2. Logear posiciones abiertas (diagnóstico post-mortem)
+    n_pos = len(TRADE_ENTRIES)
+    if n_pos > 0:
+        log.warning("Posiciones abiertas al cerrar: %d", n_pos)
+        for sym, entry in TRADE_ENTRIES.items():
+            log.warning("  %s %s entry=%.4f sl=%.4f remaining=%.4f",
+                        sym, entry.get('side', '?'),
+                        entry.get('entry_price', 0),
+                        entry.get('sl_price', 0),
+                        entry.get('remaining_qty', 0))
+    # 3. Notificar por Telegram
+    try:
+        send_telegram(
+            f"🔴 *BOT APAGADO*\n"
+            f"Posiciones abiertas: {n_pos}\n"
+            f"Razón: SIGTERM"
+        )
+    except Exception:
+        pass
+    # 4. Flush de logs
+    for handler in logging.root.handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    log.info("SHUTDOWN GRACEFUL COMPLETO")
+
+
+# =====================================================================
 # 12. BUCLE PRINCIPAL v4
 # =====================================================================
 def main():
@@ -3611,6 +3748,14 @@ def main():
     log.info("=" * 60)
     log.info("LOBOBOT v4 — BITLOBO FORMALIZADO (F1-F12 + D2-D9) iniciando")
     log.info("=" * 60)
+
+    # P1-1: Registrar handlers de señal para shutdown graceful
+    def _handle_sigterm(signum, frame):
+        log.warning("Señal %d recibida — activando shutdown graceful", signum)
+        _shutdown_event.set()
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
+    atexit.register(_graceful_shutdown)
 
     if exchange is None:
         if not init_exchange():
@@ -3631,7 +3776,7 @@ def main():
     restaurar_tp_exchange()
     last_report_day = datetime.now().day - 1
 
-    while True:
+    while not _shutdown_event.is_set():
         try:
             now = datetime.now()
 
@@ -3644,8 +3789,8 @@ def main():
                         for row in csv.DictReader(f):
                             if row['entry_time'].startswith(today_str):
                                 today_trades.append(row)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("Reporte diario: no se pudo leer trades CSV: %s", e)
                 # FIX-AUDIT-8: reporte usaba status=='TP' que NUNCA ocurre (status reales:
                 # TP1_PARTIAL/TP2_PARTIAL/TP3/SL/LIQ/Timeout/D1_INVALID/EXCHANGE_CLOSE).
                 # Ahora: WR y PnL se calculan SOLO sobre cierres completos (sin doble conteo
@@ -3688,27 +3833,27 @@ def main():
             manage_escudo_pro_v3(balance_total)
 
             # ── FIX-AUDIT-7: KILL-SWITCH (pausa entradas tras racha de pérdidas) ──
-            global KILL_UNTIL, CONSECUTIVE_LOSSES
+            global KILL_UNTIL, CONSECUTIVE_LOSSES, KILL_STREAK_AT_TRIGGER
             if time.time() < KILL_UNTIL:
                 horas_rest = (KILL_UNTIL - time.time()) / 3600
                 log.warning("KILL-SWITCH activo: %.1fh restantes (racha=%d pérdidas consecutivas)",
                             horas_rest, CONSECUTIVE_LOSSES)
-                time.sleep(60)
+                _shutdown_event.wait(timeout=60)
                 continue
             # AUDIT-FIX: loguear la racha que DISPARÓ el kill-switch (antes se
             # mostraba racha=0 porque se reseteaba justo después de armarse).
             if CONSECUTIVE_LOSSES >= LOBO_KILL_MAX_CONSEC_LOSSES:
                 KILL_STREAK_AT_TRIGGER = CONSECUTIVE_LOSSES
                 KILL_UNTIL = time.time() + LOBO_KILL_COOLDOWN_H * 3600
-                CONSECUTIVE_LOSSES = 0
                 log.warning("KILL-SWITCH ARMADO por racha de %d pérdidas — entradas pausadas %.0fh",
                             KILL_STREAK_AT_TRIGGER, LOBO_KILL_COOLDOWN_H)
                 send_telegram(
                     f"🛑 *KILL-SWITCH ACTIVADO*\n"
-                    f"{LOBO_KILL_MAX_CONSEC_LOSSES} pérdidas consecutivas\n"
+                    f"{KILL_STREAK_AT_TRIGGER} pérdidas consecutivas\n"
                     f"Entradas pausadas {LOBO_KILL_COOLDOWN_H:.0f}h"
                 )
-                time.sleep(60)
+                CONSECUTIVE_LOSSES = 0  # Reset DESPUÉS del log y telegram
+                _shutdown_event.wait(timeout=60)
                 continue
 
             # ── FIX-ANALISIS-AGO13: FILTRO HORARIO (solo EU/US session) ──
@@ -3722,7 +3867,7 @@ def main():
             if not en_horario:
                 log.debug("Fuera de horario de trading (%02d:00 not in %02d-%02d), durmiendo 5min",
                           hora_actual, LOBO_TRADE_START_HOUR, LOBO_TRADE_END_HOUR)
-                time.sleep(300)
+                _shutdown_event.wait(timeout=300)
                 continue
 
             # ── Posiciones activas + margen real disponible ──
@@ -3741,7 +3886,7 @@ def main():
                      now.strftime('%H:%M'), capital_fut, margen_real, len(busy_symbols))
 
             if len(busy_symbols) >= LOBO_MAX_POSITIONS:
-                time.sleep(60)
+                _shutdown_event.wait(timeout=60)
                 continue
 
             # ── TOP símbolos por volumen (R17) ──
@@ -3763,7 +3908,7 @@ def main():
                     log.info("Blacklist removió %d símbolos del scan", before_bk - len(top_symbols))
             except Exception as e:
                 log.error("Error fetching tickers: %s", e)
-                time.sleep(60)
+                _shutdown_event.wait(timeout=60)
                 continue
 
             log.info("Obteniendo OHLCV para %d simbolos...", len(top_symbols))
@@ -3771,7 +3916,7 @@ def main():
                 ohlcv_data = asyncio.run(fetch_all_ohlcv(top_symbols))
             except Exception as e:
                 log.error("Error fetch OHLCV: %s", e)
-                time.sleep(60)
+                _shutdown_event.wait(timeout=60)
                 continue
 
             # BUG-M2 FIX: Calcular ventana_altcoins UNA vez antes del loop (no N veces)
@@ -3977,6 +4122,16 @@ def main():
                     tp1_qty_plan = tp_plan['tp1_qty']
                     tp2_qty_plan = tp_plan['tp2_qty']
                     tp3_qty_plan = tp_plan['tp3_qty']
+                    # FIX-TP-DIAG: loggear el modo del plan para diagnóstico
+                    log.info("[REAL] %s TP PLAN mode=%s | tp1=%s tp2=%s tp3=%s | "
+                             "qty=%.4f step=%.4f tp1_px=%.6f tp2_px=%.6f",
+                             symbol, tp_plan['mode'], tp1_qty_plan, tp2_qty_plan,
+                             tp3_qty_plan, qty, step, tp1_price, tp2_price)
+                    if tp_plan['mode'] != 'normal':
+                        log.warning("[REAL] %s TP PLAN mode=%s — solo %d de 3 TPs en exchange "
+                                    "(posición pequeña o merge activo). Resto se gestiona LOCALMENTE.",
+                                    symbol, tp_plan['mode'],
+                                    (1 if tp_plan['mode'] == 'fallback' else 2))
                     tp1_ok = False
                     tp2_ok = False
                     tp3_ok = False
@@ -4053,6 +4208,13 @@ def main():
                         )
                         continue
 
+                    # FIX-TP-DIAG: verificar qué planes existen REALMENTE en Bitget
+                    expected_profit = sum(1 for ok in [tp1_ok, tp2_ok, tp3_ok] if ok)
+                    diag = _diagnose_tp_plans(symbol,
+                                              expected_profit=expected_profit,
+                                              expected_loss=1 if sl_ok else 0,
+                                              expected_tp_prices=[tp1_price, tp2_price, tp3_price])
+
                     # BUG #2 FIX: Telegram muestra [EX] solo si sl_ok, sino [LOCAL]
                     sl_label = '[EX]' if sl_ok else '[LOCAL]'
                     tp3_label = '[EX]' if tp3_ok else ('[MERGE→TP2]' if tp_plan['mode'] == 'merge' else '[LOCAL]')
@@ -4081,11 +4243,14 @@ def main():
                     log.debug("Error procesando %s: %s", symbol, e)
                     continue
 
-            time.sleep(60)
+            _shutdown_event.wait(timeout=60)
 
         except Exception as e:
             log.error("Error en ciclo principal v4: %s", e, exc_info=True)
-            time.sleep(60)
+            _shutdown_event.wait(timeout=60)
+
+    # P1-1: Cleanup al salir del loop (SIGTERM o _shutdown_event.set())
+    _graceful_shutdown()
 
 # =====================================================================
 # 13. FLASK HEALTHCHECK (FIX Issue 4 — Render uptime)
