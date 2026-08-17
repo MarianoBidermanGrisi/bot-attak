@@ -328,10 +328,6 @@ MAX_SL_PCT         = float(os.environ.get('LOBO_MAX_SL_PCT', '0.030'))  # 3% max
 SL_LOOKBACK        = int(os.environ.get('LOBO_SL_LOOKBACK', '20'))  # velas para SL
 
 # --- TARGETS DE PNL FIJOS (sobre margin, sin importar leverage) ---
-# FIX-AUDIT-3: restaurados a la estrategia DOCUMENTADA (25/50/100% PnL sobre margen).
-# Con 15/30/50% y lev 10-20x, TP3 = solo 2.5-5% de precio vs SL 1.5ATR (~2-3%)
-# → RR efectiva < 1 → EV negativo. 15/30/50% restaura expectativa positiva:
-#   win medio = 0.4×15 + 0.3×30 + 0.3×50 = 30% margen vs pérdida ~30-100% margen.
 TP1_PNL_TARGET     = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.15'))  # 15% PnL en TP1
 TP2_PNL_TARGET     = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.30'))  # 30% PnL en TP2
 TP3_PNL_TARGET     = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))  # 50% PnL safety net
@@ -2390,66 +2386,6 @@ def init_exchange() -> bool:
 # =====================================================================
 # 10b. TAKE PROFIT PLAN ORDERS (extraído de bot_v6)
 # =====================================================================
-def _plan_tp_qty(qty: float, step: float, tp1_price: float, tp2_price: float,
-                 tp1_pct: float = TP1_CLOSE_PCT, tp2_pct: float = TP2_CLOSE_PCT,
-                 min_notional: float = MIN_ORDER_USDT) -> dict:
-    """Planifica qty de TP1/TP2/TP3 como profit_plans.
-
-    FIX (2026-08-17): El min_notional ($5) se verifica SOBRE LA POSICIÓN TOTAL,
-    no sobre cada TP plan individual. Esto permite split de 3 TPs en cuentas
-    pequeñas siempre que la posición completa cumpla el mínimo de Bitget.
-
-    Retorna dict: {tp1_qty, tp2_qty, tp3_qty, tp1_pct, tp2_pct, mode}
-    mode ∈ {'normal', 'fallback', 'none', 'invalid'}
-    """
-    try:
-        if not all(math.isfinite(v) for v in (qty, step, tp1_price, tp2_price)):
-            return {'tp1_qty': 0.0, 'tp2_qty': 0.0, 'tp3_qty': 0.0,
-                    'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': 'invalid'}
-    except TypeError:
-        return {'tp1_qty': 0.0, 'tp2_qty': 0.0, 'tp3_qty': 0.0,
-                'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': 'invalid'}
-
-    if (step is None or step <= 0 or qty is None or qty <= 0
-            or tp1_price <= 0 or tp2_price <= 0
-            or tp1_pct <= 0 or tp1_pct >= 1 or tp2_pct <= 0):
-        return {'tp1_qty': 0.0, 'tp2_qty': 0.0, 'tp3_qty': 0.0,
-                'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': 'invalid'}
-
-    # CHECK: posición total debe cumplir min_notional (ej: $5)
-    total_notional = qty * tp1_price
-    if total_notional < min_notional:
-        return {'tp1_qty': 0.0, 'tp2_qty': 0.0, 'tp3_qty': 0.0,
-                'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': 'none'}
-
-    # Split: TP1 = 40%, TP2 = 30%, TP3 = 30% (sin check individual de min_notional)
-    tp1_qty = math.floor(qty * tp1_pct / step + 0.5) * step
-    rem = qty - tp1_qty
-    tp2_qty = math.floor(rem * (tp2_pct / (1 - tp1_pct)) / step) * step
-    tp3_qty = max(qty - tp1_qty - tp2_qty, 0.0)
-
-    # Ajustar residuo: si tp3 no es múltiplo de step, mover a tp2
-    if tp3_qty > 0 and (tp3_qty % step) > 0:
-        extra = tp3_qty - math.floor(tp3_qty / step) * step
-        tp3_qty = math.floor(tp3_qty / step) * step
-        tp2_qty += extra
-        # Re-validar que tp2 sigue siendo múltiplo de step
-        tp2_qty = math.floor(tp2_qty / step) * step
-        tp3_qty = max(qty - tp1_qty - tp2_qty, 0.0)
-
-    # Si tp2/tp3 no caben por step, fallback a tp1 completo
-    if tp2_qty < step or tp3_qty < step:
-        tp1_qty = math.floor(qty / step) * step
-        tp2_qty = 0.0
-        tp3_qty = 0.0
-        mode = 'fallback'
-    else:
-        mode = 'normal'
-
-    return {'tp1_qty': tp1_qty, 'tp2_qty': tp2_qty, 'tp3_qty': tp3_qty,
-            'tp1_pct': tp1_pct, 'tp2_pct': tp2_pct, 'mode': mode}
-
-
 def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str,
                    max_retries: int = 3, refresh_on_price_error: bool = True) -> bool:
     """Coloca una take-profit plan order vía API directa (hedge mode).
