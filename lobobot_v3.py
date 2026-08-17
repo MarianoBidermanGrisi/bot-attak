@@ -2504,12 +2504,17 @@ def _place_tp_plan(sym: str, tp_price: float, tp_qty: float, side: str,
             }
             resp = exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
             # FIX-TP-DIAG: validar body de respuesta (Bitget retorna HTTP 200 + code!=0)
+            # FIX: Bitget retorna code='00000' (string) como success, no '0'
             if isinstance(resp, dict):
                 resp_code = str(resp.get('code', '0'))
-                if resp_code != '0':
+                try:
+                    resp_code_int = int(resp_code)
+                except (ValueError, TypeError):
+                    resp_code_int = -1
+                if resp_code_int != 0:
                     resp_msg = resp.get('msg', 'unknown')
                     # 43030 = plan ya existe → éxito idempotente
-                    if resp_code == '43030':
+                    if resp_code_int == 43030:
                         log.info("TP plan ya existe (resp 43030) %s @ %s qty=%s (attempt %d) — ok",
                                  sym, tp_price, tp_qty, attempt)
                         return True
@@ -2639,11 +2644,16 @@ def _place_sl_plan(sym: str, sl_price: float, sl_qty: float, side: str,
             }
             resp = exchange.privateMixPostV2MixOrderPlaceTpslOrder(params)
             # FIX-TP-DIAG: validar body de respuesta
+            # FIX: Bitget retorna code='00000' (string) como success, no '0'
             if isinstance(resp, dict):
                 resp_code = str(resp.get('code', '0'))
-                if resp_code != '0':
+                try:
+                    resp_code_int = int(resp_code)
+                except (ValueError, TypeError):
+                    resp_code_int = -1
+                if resp_code_int != 0:
                     resp_msg = resp.get('msg', 'unknown')
-                    if resp_code == '43030':
+                    if resp_code_int == 43030:
                         log.info("SL plan ya existe (resp 43030) %s @ %s (attempt %d)",
                                  sym, sl_price, attempt)
                         return True
