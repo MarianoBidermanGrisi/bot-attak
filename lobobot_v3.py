@@ -3750,11 +3750,19 @@ def main():
     log.info("=" * 60)
 
     # P1-1: Registrar handlers de señal para shutdown graceful
+    # FIX: signal.signal() solo funciona en main thread. En Render, main()
+    # se ejecuta en un background thread (bot_web_service.py), así que
+    # capturamos el ValueError y dependemos de atexit + threading.Event.
     def _handle_sigterm(signum, frame):
         log.warning("Señal %d recibida — activando shutdown graceful", signum)
         _shutdown_event.set()
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-    signal.signal(signal.SIGINT, _handle_sigterm)
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+        signal.signal(signal.SIGINT, _handle_sigterm)
+        log.info("Signal handlers SIGTERM/SIGINT registrados")
+    except ValueError:
+        log.info("Ejecutando en background thread — signal handlers no disponibles, "
+                 "usando atexit + _shutdown_event como fallback")
     atexit.register(_graceful_shutdown)
 
     if exchange is None:
