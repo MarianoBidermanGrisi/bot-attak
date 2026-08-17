@@ -286,9 +286,9 @@ LOBO_SPOT_MARTINGALA_NIVELES = [
 ]
 
 # === Parámetros BITLOBO (heredados de v2) ===
-LOBO_IMPULSO_MIN_VELAS   = int(os.environ.get('LOBO_IMPULSO_MIN_VELAS', '8'))
+LOBO_IMPULSO_MIN_VELAS   = int(os.environ.get('LOBO_IMPULSO_MIN_VELAS', '5'))
 LOBO_IMPULSO_MAX_VELAS   = int(os.environ.get('LOBO_IMPULSO_MAX_VELAS', '40'))
-LOBO_IMPULSO_PEND_MIN    = float(os.environ.get('LOBO_IMPULSO_PEND_MIN', '0.02'))
+LOBO_IMPULSO_PEND_MIN    = float(os.environ.get('LOBO_IMPULSO_PEND_MIN', '0.012'))
 LOBO_SMA100_TOL_ATR      = float(os.environ.get('LOBO_SMA100_TOL_ATR', '1.0'))
 LOBO_ADX_PERIOD          = int(os.environ.get('LOBO_ADX_PERIOD', '14'))
 LOBO_ADX_MIN             = float(os.environ.get('LOBO_ADX_MIN', '15'))
@@ -2079,16 +2079,17 @@ def evaluar_senal_bitlobo_v4(
     senal['dist_sl'] = dist_sl
 
     # FIX H1 (2026-08-17): R:R mínimo ahora usa R:R PONDERADO (no solo TP1).
-    # Antes: rr = TP1_dist/dist_sl. Con leverage >13.7x, rr < 0.5 bloqueaba
-    # señales válidas aunque el R:R ponderado (40%×TP1+30%×TP2+30%×TP3) era > 0.5.
-    # Ejemplo: 20x, ATR=0.73% → TP1_rr=0.34 (bloqueado), ponderado=0.68 (aceptable).
+    # Threshold relajado de 0.45 → 0.30 (2026-08-17) para aceptar trades con
+    # leverage alto donde TP1_rr es bajo pero R:R ponderado es viable.
+    # Ejemplo: 20x, ATR=0.73% → TP1_rr=0.34, ponderado=0.68 → OK con 0.30.
     if dist_sl > 0:
+        tp1_dist_val = abs(tp1_price - precio_actual)
         tp2_dist_val = abs(tp2_price - precio_actual)
         tp3_dist_val = abs(tp3_price - precio_actual)
-        rr_ponderado = (0.40 * tp1_dist + 0.30 * tp2_dist_val + 0.30 * tp3_dist_val) / dist_sl
+        rr_ponderado = (0.40 * tp1_dist_val + 0.30 * tp2_dist_val + 0.30 * tp3_dist_val) / dist_sl
     else:
         rr_ponderado = rr
-    if rr_ponderado < 0.45:
+    if rr_ponderado < 0.30:
         return None
     # Para scoring, usar R:R ponderado
     rr = rr_ponderado
