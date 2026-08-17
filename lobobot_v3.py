@@ -1096,6 +1096,12 @@ def detectar_estructura_elliott_v3(df_h4: pd.DataFrame) -> dict:
     pivot_highs_idx, pivot_lows_idx = find_pivots(df_h4, left=5, right=5)
     if len(pivot_highs_idx) < 3 or len(pivot_lows_idx) < 2:
         return {'fase': 'indefinida', 'razon': 'pocos_pivots'}
+    # FIX H6 (2026-08-17): extraer highs/lows del DataFrame — estaban indefinidos
+    # Causaba NameError silencioso que eliminaba TODAS las señales.
+    col_high = 'high' if 'high' in df_h4.columns else 'h'
+    col_low = 'low' if 'low' in df_h4.columns else 'l'
+    highs = df_h4[col_high].values
+    lows = df_h4[col_low].values
     # Buscar secuencia 1-2-3-4-5
     # Onda 1: de un mínimo a un máximo
     # Onda 2: retroceso del 50-61.8% de Onda 1
@@ -1339,13 +1345,18 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
 
     Retorna (tp1_price, tp2_price, tp3_price, rr_ratio, dist_sl).
     """
-    lev = leverage if leverage > 0 else LEVERAGE
+    # QA-FUZZ (2026-08-17): Guard NaN/inf en inputs — evita propagación al output
+    if not (math.isfinite(precio_actual) and precio_actual > 0):
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    atr_safe = atr_val if (math.isfinite(atr_val) and atr_val > 0) else precio_actual * 0.01
+
+    lev = leverage if (math.isfinite(leverage) and leverage > 0) else LEVERAGE
 
     # Calcular distancia SL real (para R:R mínimo y dist_sl de retorno)
     if sl_price > 0:
         dist_sl = abs(precio_actual - sl_price)
     else:
-        dist_sl = atr_val * LOBO_SL_ATR
+        dist_sl = atr_safe * LOBO_SL_ATR
 
     # --- TPs basados en PnL fijo sobre margin ---
     # PnL = (TP_price - entry) × qty = (TP_price - entry) × (margin × lev / entry)
@@ -1363,7 +1374,7 @@ def calcular_tps_en_zonas(precio_actual: float, atr_val: float, fvg_list: list,
     tp3 = precio_actual + sign * tp3_dist
 
     # Garantizar mínimo sobre ATR para mercados de muy bajo ruido
-    min_dist = atr_val * 0.3
+    min_dist = atr_safe * 0.3
     if es_long:
         tp1 = max(tp1, precio_actual + min_dist)
         tp2 = max(tp2, tp1 + min_dist * 0.5)
@@ -2067,13 +2078,20 @@ def evaluar_senal_bitlobo_v4(
     senal['rr'] = rr
     senal['dist_sl'] = dist_sl
 
-    # R:R mínimo 0.5 (FIX-ANALISIS-AGO13: era 1.0, con SL=3.0 ATR se rechazaba
-    # el 70% de trades. R:R efectivo ponderado (40%TP1+30%TP2+30%TP3) = ~1.37
-    # incluso con SL amplio, porque los TPs son PnL-based (no ATR-based).
-    # TP1_dist = entry×15%/10x = 1.5% precio vs SL 3.0×ATR ≈ 2.2% → R:R TP1 = 0.68
-    # pero R:R real = 30%/2.2% = 1.37 (ganancia ponderada / pérdida SL).
-    if rr < 0.5:
+    # FIX H1 (2026-08-17): R:R mínimo ahora usa R:R PONDERADO (no solo TP1).
+    # Antes: rr = TP1_dist/dist_sl. Con leverage >13.7x, rr < 0.5 bloqueaba
+    # señales válidas aunque el R:R ponderado (40%×TP1+30%×TP2+30%×TP3) era > 0.5.
+    # Ejemplo: 20x, ATR=0.73% → TP1_rr=0.34 (bloqueado), ponderado=0.68 (aceptable).
+    if dist_sl > 0:
+        tp2_dist_val = abs(tp2_price - precio_actual)
+        tp3_dist_val = abs(tp3_price - precio_actual)
+        rr_ponderado = (0.40 * tp1_dist + 0.30 * tp2_dist_val + 0.30 * tp3_dist_val) / dist_sl
+    else:
+        rr_ponderado = rr
+    if rr_ponderado < 0.45:
         return None
+    # Para scoring, usar R:R ponderado
+    rr = rr_ponderado
     if rr >= 1.2:
         score += 1
         detalles.append(f'R13:R:R_{rr:.2f}')
