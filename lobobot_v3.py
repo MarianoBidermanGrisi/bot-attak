@@ -1122,7 +1122,9 @@ def init_exchange() -> bool:
 
 # ── 22. TP/SL PLAN ORDERS ──
 def _place_tp_plan(sym, tp, qty, side, max_retries=3, refresh=True):
-    if not exchange or PAPER_TRADE: return False
+    """Retorna (bool_ok, str_error). Si ok=True, error=''. Si ok=False, error='Bitget code=XXXX: msg'."""
+    last_err = ''
+    if not exchange or PAPER_TRADE: return False, 'paper_mode'
     for att in range(1, max_retries+1):
         try:
             mi = exchange.market(sym)
@@ -1133,21 +1135,23 @@ def _place_tp_plan(sym, tp, qty, side, max_retries=3, refresh=True):
             if isinstance(resp,dict):
                 rc = int(str(resp.get('code','0')))
                 if rc != 0:
-                    if rc == 43030: return True
-                    raise ccxt.ExchangeError(f"Bitget code={rc}: {resp.get('msg','?')}")
-            return True
+                    if rc == 43030: return True, ''
+                    last_err = f"code={rc}: {resp.get('msg','?')}"
+                    raise ccxt.ExchangeError(last_err)
+            return True, ''
         except Exception as e:
             ls = str(e)
-            if '43030' in ls: return True
+            if '43030' in ls: return True, ''
             if refresh and any(c in ls for c in ('45060','45061','45064','45065')):
                 try: mk = float(exchange.fetch_ticker(sym).get('last',0))
                 except: mk = 0
                 if mk > 0:
                     tp = max(tp,mk*1.0015) if side=='long' else min(tp,mk*0.9985)
                     tp = float(exchange.price_to_precision(sym,tp))
+            last_err = str(e)[:120]
             if att < max_retries: time.sleep(2**att)
             else: log.error("TP plan FAILED %s @ %s: %s",sym,tp,e)
-    return False
+    return False, last_err
 
 def _cancel_tp_plans(sym):
     if not exchange or PAPER_TRADE: return
@@ -1352,11 +1356,13 @@ def restaurar_tp_exchange():
             if cq >= oq * 0.85:
                 t1q = ((oq*TP1_CLOSE_PCT)//step)*step
                 if t1q >= step and t1q*t1p >= MIN_ORDER_USDT:
-                    _place_tp_plan(sym, t1p, min(t1q, math.floor(cq/step)*step), sd)
+                    r_ok, r_err = _place_tp_plan(sym, t1p, min(t1q, math.floor(cq/step)*step), sd)
+                    log.info("[RESTORE-TP1-%s] %s %s", 'EX' if r_ok else 'FAIL', sym, r_err if r_err else '')
             elif cq >= oq * 0.45:
                 t2q = ((oq*TP2_CLOSE_PCT)//step)*step
                 if t2q >= step and t2q*t2p >= MIN_ORDER_USDT:
-                    _place_tp_plan(sym, t2p, min(t2q, math.floor(cq/step)*step), sd)
+                    r_ok, r_err = _place_tp_plan(sym, t2p, min(t2q, math.floor(cq/step)*step), sd)
+                    log.info("[RESTORE-TP2-%s] %s %s", 'EX' if r_ok else 'FAIL', sym, r_err if r_err else '')
             csl = float(ed.get('sl_price',0))
             if csl > 0 and cq >= step: _place_sl_plan(sym,csl,cq,sd)
     except Exception as e: log.error("Error restaurar_tp: %s",e)
@@ -1749,7 +1755,9 @@ def main():
                     alv=sn.get('leverage_calculado',LEVERAGE); lvp=sn.get('liq_price',0)
                     rr=sn['rr']; sc=sn['score']; ms2=sn['max_score']
                     rq=sn['qty']; mk2=exchange.market(sym)
-                    stp=mk2['limits']['amount']['min'] or mk2['precision']['amount']
+                    stp = mk2['limits']['amount']['min'] or 10**(-(mk2['precision']['amount'] or 6))
+                    if not stp or stp <= 0: stp = 10**(-(mk2['precision']['amount'] or 6))
+                    stp = max(stp, 1e-12)
                     mq=math.ceil(MIN_ORDER_USDT/pa/stp)*stp
                     if rq<mq:
                         ra2=(mq*pa*abs(pa-slp)/pa)/max(mr,0.01)*100
@@ -1760,6 +1768,8 @@ def main():
                     if mmr < MIN_ORDER_USDT/alv: continue
                     if am>mmr: qty=math.floor((mmr*alv/pa)/stp)*stp; am=(qty*pa)/alv
                     if qty<mq or qty<=0: continue
+                    if qty*pa < MIN_ORDER_USDT:
+                        log.warning("Notional bajo %s: %.4f < %.2f — skip",sym,qty*pa,MIN_ORDER_USDT); continue
                     log.info("%s %s | Entry=%.4f SL=%.4f Liq=%.4f Lev=%.0f TPs=%.4f/%.4f/%.4f RR=%.2f S=%d/%d",
                         sym,snn,pa,slp,lvp,alv,t1p,t2p,t3p,rr,sc,ms2)
                     er = {'entry_time':datetime.now(),'symbol':sym,'side':'long' if es_long else 'short',
@@ -1783,9 +1793,35 @@ def main():
                         log.error("Error orden %s: %s",sym,e); COOLDOWNS[sym]=time.time()+14400; continue
                     tsd = 'long' if es_long else 'short'
                     t1q = ((qty*TP1_CLOSE_PCT)//stp)*stp; t2q = ((qty-t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//stp)*stp
+                    t3q = max(qty - t1q - t2q, 0.0)
+                    log.info("[TP-CALC] %s qty=%.6f step=%.8f | TP1=%.6f (%.0f%%) TP2=%.6f (%.0f%%) TP3=%.6f (%.0f%%)",
+                        sym,qty,stp,t1q,t1q/qty*100,t2q,t2q/qty*100,t3q,t3q/qty*100 if qty>0 else 0)
                     time.sleep(3)
-                    tp1_ok = _place_tp_plan(sym,t1p,t1q,tsd) if t1q>=stp and t1q*t1p>=MIN_ORDER_USDT else False
-                    tp2_ok = _place_tp_plan(sym,t2p,t2q,tsd) if t2q>=stp and t2q*t2p>=MIN_ORDER_USDT else False
+                    # TP1
+                    if t1q >= stp and t1q * t1p >= MIN_ORDER_USDT:
+                        tp1_ok, tp1_err = _place_tp_plan(sym, t1p, t1q, tsd)
+                        log.info("[TP1-%s] %s qty=%.6f price=%.6f notional=%.2f %s",
+                            'EX' if tp1_ok else 'FAIL', sym, t1q, t1p, t1q*t1p,
+                            '' if tp1_ok else f'ERR={tp1_err}')
+                    else:
+                        tp1_ok = False
+                        tp1_err = f'notional={t1q*t1p:.2f}<min={MIN_ORDER_USDT}'
+                        log.warning("[TP1-SKIP] %s qty=%.6f price=%.6f notional=%.2f < min=%.2f",
+                            sym, t1q, t1p, t1q*t1p, MIN_ORDER_USDT)
+                    # TP2
+                    if t2q >= stp and t2q * t2p >= MIN_ORDER_USDT:
+                        tp2_ok, tp2_err = _place_tp_plan(sym, t2p, t2q, tsd)
+                        log.info("[TP2-%s] %s qty=%.6f price=%.6f notional=%.2f %s",
+                            'EX' if tp2_ok else 'FAIL', sym, t2q, t2p, t2q*t2p,
+                            '' if tp2_ok else f'ERR={tp2_err}')
+                    else:
+                        tp2_ok = False
+                        tp2_err = f'notional={t2q*t2p:.2f}<min={MIN_ORDER_USDT}'
+                        log.warning("[TP2-SKIP] %s qty=%.6f price=%.6f notional=%.2f < min=%.2f",
+                            sym, t2q, t2p, t2q*t2p, MIN_ORDER_USDT)
+                    # TP3 via presetStopSurplusPrice en orden de entrada
+                    log.info("[TP3-ENTRY] %s qty_rest=%.6f price=%.6f via=presetStopSurplusPrice",
+                        sym, t3q, t3p)
                     rq2 = None
                     for _fatt in range(3):
                         try:
@@ -1807,7 +1843,11 @@ def main():
                     PARTIAL_LEVEL[sym]=0; TRADE_ENTRIES[sym]=er
                     _save_trade_entries(); _save_partial_level()
                     bs.add(sym); COOLDOWNS[sym]=time.time()+14400
-                    sl_lbl = '[EX]' if sl_ok else '[LOCAL]'
+                    sl_lbl = '[EX]' if sl_ok else '[FAIL]'
+                    tp1_lbl = '[EX]' if tp1_ok else '[LO]'
+                    tp2_lbl = '[EX]' if tp2_ok else '[LO]'
+                    log.info("[ENTRY-OK] %s %s | SL=%s TP1=%s TP2=%s TP3=[EX] | qty=%.6f Entry=%.4f",
+                        sym, snn, sl_lbl, tp1_lbl, tp2_lbl, qty, pa)
                     send_telegram(f"*{sym} {snn}*\nEntry: `{exchange.price_to_precision(sym,pa)}`\n"
                         f"Lev:{alv:.0f}x Liq:`{exchange.price_to_precision(sym,lvp)}`\n"
                         f"SL:`{exchange.price_to_precision(sym,slp)}` {sl_lbl}\n"
