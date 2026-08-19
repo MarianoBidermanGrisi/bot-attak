@@ -694,9 +694,14 @@ def _plan_tp_qty(qty, step, tp1_price, tp2_price,
         mode = 'normal'
     elif tp1_n >= min_notional and (tp2_qty + tp3_qty) * tp2_price >= min_notional:
         # tp2 individual no llega, pero combinado sí → merge
-        tp2_qty += tp3_qty
-        tp3_qty = 0.0
-        mode = 'merge'
+        merged = tp2_qty + tp3_qty
+        tp2_qty = math.floor(merged / step) * step
+        tp3_qty = max(qty - tp1_qty - tp2_qty, 0.0)
+        if tp2_qty < step:
+            tp1_qty = math.floor(qty / step) * step
+            tp2_qty = 0.0; tp3_qty = 0.0; mode = 'fallback'
+        else:
+            mode = 'merge'
     elif tp1_n >= min_notional:
         # ni tp2 ni tp3 alcanzan → fallback todo a tp1
         tp1_qty = math.floor(qty / step) * step
@@ -1344,11 +1349,14 @@ def restaurar_tp_exchange():
             oq=float(ed.get('original_qty',ed.get('quantity',0))); cq=float(pos['contracts'])
             if t1p==ep or t2p==ep or t3p==ep or step<=0: continue
             _cancel_tp_plans(sym); _cancel_sl_plans(sym)
-            t1q=((oq*TP1_CLOSE_PCT)//step)*step; t2q=((oq-t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//step)*step
-            if cq>=oq*0.85 and t1q>=step:
-                _place_tp_plan(sym,t1p,min(t1q,math.floor(cq/step)*step),sd)
-            if cq>=oq*0.45 and t2q>=step:
-                _place_tp_plan(sym,t2p,min(t2q,math.floor(cq/step)*step),sd)
+            if cq >= oq * 0.85:
+                t1q = ((oq*TP1_CLOSE_PCT)//step)*step
+                if t1q >= step and t1q*t1p >= MIN_ORDER_USDT:
+                    _place_tp_plan(sym, t1p, min(t1q, math.floor(cq/step)*step), sd)
+            elif cq >= oq * 0.45:
+                t2q = ((oq*TP2_CLOSE_PCT)//step)*step
+                if t2q >= step and t2q*t2p >= MIN_ORDER_USDT:
+                    _place_tp_plan(sym, t2p, min(t2q, math.floor(cq/step)*step), sd)
             csl = float(ed.get('sl_price',0))
             if csl > 0 and cq >= step: _place_sl_plan(sym,csl,cq,sd)
     except Exception as e: log.error("Error restaurar_tp: %s",e)
@@ -1510,32 +1518,38 @@ def manage_escudo_pro_v3(bt=0.0):
             sp=float(e.get('step',0)); pl=PARTIAL_LEVEL.get(sym,0); lv=float(e.get('leverage',LEVERAGE))
             eq = float(pd['contracts']) if pd else rq
             if pd is not None and eq < rq*0.95:
-                if pl==0 and eq <= oq*0.65:
-                    tp1p = float(e.get('tp1_price',0))
-                    tp1pnl = (tp1p-ep)*oq*TP1_CLOSE_PCT if sd=='long' else (ep-tp1p)*oq*TP1_CLOSE_PCT
-                    e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=1
-                    guardar_trade_csv(e,tp1p,tp1pnl,0,tp1pnl,'TP1_EXCHANGE','tp1_exchange')
-                    _save_trade_entries(); _save_partial_level()
-                elif pl==1 and eq <= oq*0.40:
-                    tp2p = float(e.get('tp2_price',0))
-                    tp2pnl = (tp2p-ep)*oq*TP2_CLOSE_PCT if sd=='long' else (ep-tp2p)*oq*TP2_CLOSE_PCT
-                    e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=2
-                    _update_sl_to_be(sym,e,ep,reason='BE')
-                    guardar_trade_csv(e,tp2p,tp2pnl,0,tp2pnl,'TP2_EXCHANGE','tp2_exchange')
-                    _save_trade_entries(); _save_partial_level()
-                    pl = PARTIAL_LEVEL.get(sym,0); rq = float(e.get('remaining_qty',e.get('quantity',0)))
+                t1p_val = float(e.get('tp1_price',0))
+                t2p_val = float(e.get('tp2_price',0))
+                if pl==0 and eq <= oq*0.65 and t1p_val>0:
+                    tp1_hit = (sd=='long' and mk>=t1p_val) or (sd=='short' and mk<=t1p_val)
+                    if tp1_hit:
+                        tp1pnl = (t1p_val-ep)*oq*TP1_CLOSE_PCT if sd=='long' else (ep-t1p_val)*oq*TP1_CLOSE_PCT
+                        e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=1
+                        guardar_trade_csv(e,t1p_val,tp1pnl,0,tp1pnl,'TP1_EXCHANGE','tp1_exchange')
+                        _save_trade_entries(); _save_partial_level()
+                elif pl==1 and eq <= oq*0.40 and t2p_val>0:
+                    tp2_hit = (sd=='long' and mk>=t2p_val) or (sd=='short' and mk<=t2p_val)
+                    if tp2_hit:
+                        tp2pnl = (t2p_val-ep)*oq*TP2_CLOSE_PCT if sd=='long' else (ep-t2p_val)*oq*TP2_CLOSE_PCT
+                        e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=2
+                        _update_sl_to_be(sym,e,ep,reason='BE')
+                        guardar_trade_csv(e,t2p_val,tp2pnl,0,tp2pnl,'TP2_EXCHANGE','tp2_exchange')
+                        _save_trade_entries(); _save_partial_level()
+                        pl = PARTIAL_LEVEL.get(sym,0); rq = float(e.get('remaining_qty',e.get('quantity',0)))
             sl = float(e.get('sl_price',0))
             if (ls2 and mk<=sl) or (ss and mk>=sl):
                 if rq>0:
                     pnl = _calc_pnl_parcial(sd,ep,rq,mk)
                     _cerrar_pos_real(sym,sd,rq)
                     guardar_trade_csv(e,mk,pnl,0,pnl,'SL','sl')
+                _cancel_tp_plans(sym); _cancel_sl_plans(sym)
                 _full_cleanup(sym); continue
             if (ls2 and mk>=t3) or (ss and mk<=t3):
                 if rq>0:
                     pnl = _calc_pnl_parcial(sd,ep,rq,t3)
                     _cerrar_pos_real(sym,sd,rq)
                     guardar_trade_csv(e,t3,pnl,0,pnl,'TP3','tp3')
+                _cancel_tp_plans(sym); _cancel_sl_plans(sym)
                 _full_cleanup(sym); continue
             if pl==0 and sp>0 and rq>=sp and t1!=ep:
                 if (ls2 and mk>=t1) or (ss and mk<=t1):
@@ -1772,11 +1786,20 @@ def main():
                     time.sleep(3)
                     tp1_ok = _place_tp_plan(sym,t1p,t1q,tsd) if t1q>=stp and t1q*t1p>=MIN_ORDER_USDT else False
                     tp2_ok = _place_tp_plan(sym,t2p,t2q,tsd) if t2q>=stp and t2q*t2p>=MIN_ORDER_USDT else False
-                    rq2 = qty
-                    try:
-                        for pc in exchange.fetch_positions([sym]):
-                            if float(pc.get('contracts',0))>0: rq2=float(pc['contracts']); break
-                    except: pass
+                    rq2 = None
+                    for _fatt in range(3):
+                        try:
+                            for pc in exchange.fetch_positions([sym]):
+                                if float(pc.get('contracts',0))>0: rq2=float(pc['contracts']); break
+                            break
+                        except Exception as fe:
+                            log.warning("fetch_positions retry %d/%d %s: %s",_fatt+1,3,sym,fe)
+                            time.sleep(2**(_fatt+1))
+                    if rq2 is None or rq2 <= 0:
+                        log.error("No se pudo leer posición real %s — abortando",sym)
+                        try: _cerrar_pos_real(sym,tsd,qty)
+                        except: pass
+                        _full_cleanup(sym); send_telegram(f"❌ {sym} ABORTADA — fetch_positions fallo"); continue
                     sl_ok = _place_sl_plan(sym,slp,rq2,tsd)
                     if not sl_ok:
                         _cerrar_pos_real(sym,tsd,rq2); _full_cleanup(sym)
