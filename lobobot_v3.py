@@ -1770,6 +1770,13 @@ def main():
                     if qty<mq or qty<=0: continue
                     if qty*pa < MIN_ORDER_USDT:
                         log.warning("Notional bajo %s: %.4f < %.2f — skip",sym,qty*pa,MIN_ORDER_USDT); continue
+                    # ── Guard pre-entry: verificar que TP1 y TP2 al menos uno sea válido ──
+                    _t1q = ((qty*TP1_CLOSE_PCT)//stp)*stp
+                    _t2q = ((qty-_t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//stp)*stp
+                    _tp1_n = _t1q * t1p; _tp2_n = _t2q * t2p
+                    if _tp1_n < MIN_ORDER_USDT and _tp2_n < MIN_ORDER_USDT:
+                        log.warning("[TP-GUARD] %s TP1=%.2f TP2=%.2f ambas < $%.2f — skip",
+                            sym, _tp1_n, _tp2_n, MIN_ORDER_USDT); continue
                     log.info("%s %s | Entry=%.4f SL=%.4f Liq=%.4f Lev=%.0f TPs=%.4f/%.4f/%.4f RR=%.2f S=%d/%d",
                         sym,snn,pa,slp,lvp,alv,t1p,t2p,t3p,rr,sc,ms2)
                     er = {'entry_time':datetime.now(),'symbol':sym,'side':'long' if es_long else 'short',
