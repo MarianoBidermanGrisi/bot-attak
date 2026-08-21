@@ -987,7 +987,18 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
     if alv > 0: pv = min(pv, mmx*alv)
     mmin = MIN_ORDER_USDT/alv if alv > 0 else MIN_ORDER_USDT
     if ce < mmin: return None
-    if pv < MIN_ORDER_USDT: pv = MIN_ORDER_USDT
+    # F12a: pv mínimo para que TP1 (40%) cumpla MIN_ORDER_USDT individual
+    min_pv_for_tp = MIN_ORDER_USDT / max(TP1_CLOSE_PCT, 0.01)
+    if pv < min_pv_for_tp:
+        # Verificar si podemos cubrir el mínimo sin exceder riesgo 10%
+        margin_needed = min_pv_for_tp / alv if alv > 0 else min_pv_for_tp
+        risk_if_forced = (min_pv_for_tp * ds2) / max(ce, 0.01) * 100
+        if margin_needed <= ce * 0.90 and risk_if_forced <= 15.0:
+            pv = min_pv_for_tp
+        else:
+            log.debug("[SIZING] %s pv=%.2f < min_tp=%.2f (ce=%.2f riskWould=%.1f%%) — skip",
+                sym, pv, min_pv_for_tp, ce, risk_if_forced)
+            return None
     qty = pv/pa; mr = pv/alv if alv > 0 else 0
     s['qty']=qty; s['pos_value']=pv; s['liq_price']=lp; s['size_usdt']=mr
     s['leverage_calculado']=alv; s['riesgo_real_pct']=round((pv*ds2)/max(ce,0.01)*100,2)
@@ -1073,6 +1084,15 @@ def guardar_signal_log(sym, sd, pr, sc, ms, det, sl, lp, lv, t1, t2, t3, rr, tak
     except Exception as e: log.error("CRITICO: No se pudo guardar signal log CSV: %s", e)
 
 # ── 20. FETCH ASINCRONO ──
+_ASYNC_EXCH: Optional[ccxt_async.bitget] = None
+_ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+def _get_async_loop():
+    global _ASYNC_LOOP
+    if _ASYNC_LOOP is None or _ASYNC_LOOP.is_closed():
+        _ASYNC_LOOP = asyncio.new_event_loop()
+    return _ASYNC_LOOP
+
 async def _fetch_symbol_async(exch, sym):
     le = None
     for att in range(3):
@@ -1092,15 +1112,38 @@ async def _fetch_symbol_async(exch, sym):
     if le: log.warning("Fetch fallo %s: %s",sym,le)
     return sym, None, None, None, None
 
-async def fetch_all_ohlcv(symbols):
-    exch = ccxt_async.bitget({'apiKey':API_KEY,'secret':SECRET_KEY,'password':PASSPHRASE,
-        'enableRateLimit':True,'options':{'defaultType':'swap'}})
+async def _fetch_all_async(symbols):
+    global _ASYNC_EXCH
+    if _ASYNC_EXCH is None:
+        _ASYNC_EXCH = ccxt_async.bitget({'apiKey':API_KEY,'secret':SECRET_KEY,'password':PASSPHRASE,
+            'enableRateLimit':True,'options':{'defaultType':'swap'}})
     sem = asyncio.Semaphore(FETCH_CONCURRENCY)
     async def _w(s):
-        async with sem: return await _fetch_symbol_async(exch, s)
-    try: results = await asyncio.gather(*[_w(s) for s in symbols])
-    finally: await exch.close()
+        async with sem: return await _fetch_symbol_async(_ASYNC_EXCH, s)
+    return await asyncio.gather(*[_w(s) for s in symbols])
+
+def fetch_all_ohlcv(symbols):
+    global _ASYNC_EXCH
+    loop = _get_async_loop()
+    try:
+        results = loop.run_until_complete(_fetch_all_async(symbols))
+    except Exception as e:
+        log.error("Error fetch_all_async: %s", e)
+        return {}
+    finally:
+        pass  # Mantener exchange abierto para reusar
     return {r[0]:(r[1],r[2],r[3],r[4]) for r in results}
+
+def _close_async_exchange():
+    global _ASYNC_EXCH, _ASYNC_LOOP
+    if _ASYNC_EXCH:
+        try: loop = _get_async_loop(); loop.run_until_complete(_ASYNC_EXCH.close())
+        except: pass
+        _ASYNC_EXCH = None
+    if _ASYNC_LOOP and not _ASYNC_LOOP.is_closed():
+        try: _ASYNC_LOOP.close()
+        except: pass
+        _ASYNC_LOOP = None
 
 # ── 21. EXCHANGE ──
 exchange: ccxt.bitget | None = None
@@ -1606,6 +1649,7 @@ def _graceful_shutdown():
     log.info("="*40); log.info("SHUTDOWN GRACEFUL INICIADO"); log.info("="*40)
     try: _save_trade_entries(); _save_partial_level()
     except: pass
+    _close_async_exchange()
     n = len(TRADE_ENTRIES)
     if n > 0:
         log.warning("Posiciones abiertas al cerrar: %d",n)
@@ -1717,9 +1761,10 @@ def main():
                 if bk!=len(ts2): log.info("Blacklist: %d removidos",bk-len(ts2))
             except Exception as e: log.error("Error tickers: %s",e); _shutdown_event.wait(timeout=60); continue
             log.info("OHLCV para %d simbolos...",len(ts2))
-            try: od = asyncio.run(fetch_all_ohlcv(ts2))
+            try: od = fetch_all_ohlcv(ts2)
             except Exception as e: log.error("Error OHLCV: %s",e); _shutdown_event.wait(timeout=60); continue
             va = check_btcd_elliott_ventana_altcoins()
+            _rej = {'no_data':0,'no_signal':0,'tp_guard':0,'entered':0}
             for sym in ts2:
                 if sym in bs or len(bs)>=LOBO_MAX_POSITIONS: continue
                 if sym in COOLDOWNS:
@@ -1727,8 +1772,8 @@ def main():
                     else: del COOLDOWNS[sym]
                 try:
                     o15,o4h,o5m,o1d = od.get(sym,(None,None,None,None))
-                    if not o15 or not o4h: continue
-                    if len(o15)<50 or len(o4h)<10: continue
+                    if not o15 or not o4h: _rej['no_data']+=1; continue
+                    if len(o15)<50 or len(o4h)<10: _rej['no_data']+=1; continue
                     df15 = pd.DataFrame(o15[:-1],columns=['timestamp','open','high','low','close','volume'])
                     df4h = pd.DataFrame(o4h[:-1],columns=['timestamp','open','high','low','close','volume'])
                     df5m = pd.DataFrame(o5m[:-1],columns=['timestamp','open','high','low','close','volume']) if o5m and len(o5m)>1 else None
@@ -1749,7 +1794,7 @@ def main():
                     ss = None
                     if cs: ss = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=False,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
                     sn = sl or ss
-                    if not sn: continue
+                    if not sn: _rej['no_signal']+=1; continue
                     es_long=sn['es_long']; snn='LARGO' if es_long else 'CORTO'
                     slp=sn['sl_price']; t1p=sn['tp1_price']; t2p=sn['tp2_price']; t3p=sn['tp3_price']
                     alv=sn.get('leverage_calculado',LEVERAGE); lvp=sn.get('liq_price',0)
@@ -1775,6 +1820,7 @@ def main():
                     _t2q = ((qty-_t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//stp)*stp
                     _tp1_n = _t1q * t1p; _tp2_n = _t2q * t2p
                     if _tp1_n < MIN_ORDER_USDT and _tp2_n < MIN_ORDER_USDT:
+                        _rej['tp_guard']+=1
                         log.warning("[TP-GUARD] %s TP1=%.2f TP2=%.2f ambas < $%.2f — skip",
                             sym, _tp1_n, _tp2_n, MIN_ORDER_USDT); continue
                     log.info("%s %s | Entry=%.4f SL=%.4f Liq=%.4f Lev=%.0f TPs=%.4f/%.4f/%.4f RR=%.2f S=%d/%d",
@@ -1789,6 +1835,7 @@ def main():
                         TRADE_ENTRIES[sym]=er; PARTIAL_LEVEL[sym]=0
                         _save_trade_entries(); _save_partial_level()
                         bs.add(sym); COOLDOWNS[sym]=time.time()+14400
+                        _rej['entered']+=1
                         continue
                     try: exchange.set_leverage(int(alv),sym)
                     except: pass
@@ -1850,6 +1897,7 @@ def main():
                     PARTIAL_LEVEL[sym]=0; TRADE_ENTRIES[sym]=er
                     _save_trade_entries(); _save_partial_level()
                     bs.add(sym); COOLDOWNS[sym]=time.time()+14400
+                    _rej['entered']+=1
                     sl_lbl = '[EX]' if sl_ok else '[FAIL]'
                     tp1_lbl = '[EX]' if tp1_ok else '[LO]'
                     tp2_lbl = '[EX]' if tp2_ok else '[LO]'
@@ -1863,6 +1911,9 @@ def main():
                         f"TP3(30%):`{exchange.price_to_precision(sym,t3p)}` [EX]\n"
                         f"RR:{rr:.2f} Score:{sc}/{ms2}")
                 except Exception as e: log.debug("Error %s: %s",sym,e); continue
+            if any(v > 0 for v in _rej.values()):
+                log.info("Scan: %d simbolos | sin_data=%d sin_señal=%d tp_guard=%d entradas=%d",
+                    len(ts2), _rej['no_data'], _rej['no_signal'], _rej['tp_guard'], _rej['entered'])
             _shutdown_event.wait(timeout=60)
         except Exception as e: log.error("Error ciclo: %s",e,exc_info=True); _shutdown_event.wait(timeout=60)
     _graceful_shutdown()
