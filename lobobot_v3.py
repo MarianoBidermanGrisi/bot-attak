@@ -49,6 +49,7 @@ DAILY_STATS: dict = {'tp':0,'sl':0,'be':0,'timeout':0,'pnl':0.0,'fees':0.0,
 TRADE_ENTRIES: dict = {}; HEDGE_ENTRIES: dict = {}; TRAIL_COUNTS: dict = {}
 LAST_KNOWN_INDICATORS: dict = {}; ADVERSE_PRICES: dict = {}; PRICE_PATHS: dict = {}
 SPOT_POSITIONS: dict = {}; PARTIAL_LEVEL: dict = {}
+_LAST_SCAN_TIME: float = 0.0
 DOMINANCE_CACHE: dict = {'btc':None,'usdtd':None,'usdtd_short':None,'ts':0}
 DOMINANCE_CACHE_TTL = 300; USDTD_HISTORY: list = []
 _DOMINANCE_LOCK = threading.Lock()
@@ -214,7 +215,7 @@ TP2_PNL_TARGET = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.30'))
 TP3_PNL_TARGET = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))
 LOBO_TIMEOUT_HORAS = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
 LEVERAGE = float(os.environ.get('LOBO_LEVERAGE', '20.0'))
-LOBO_SCORE_MIN = int(os.environ.get('LOBO_SCORE_MIN', '8'))
+LOBO_SCORE_MIN = int(os.environ.get('LOBO_SCORE_MIN', '12'))
 MIN_ORDER_USDT = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 FEE_TAKER = float(os.environ.get('LOBO_FEE_TAKER', '0.0006'))
@@ -591,7 +592,7 @@ HIGH_LIQ_ALTS = {'ETH','SOL','BNB','XRP','ADA','DOGE','AVAX','LINK','DOT','MATIC
 
 def calcular_apalancamiento_optimo(ep, df, zi, zs, es_long, sweeps, sym):
     base = sym.split('/')[0].replace(':USDT','').strip()
-    mx = 50.0 if base=='BTC' else 20.0 if base in HIGH_LIQ_ALTS else 10.0
+    mx = 20.0 if base=='BTC' else 20.0 if base in HIGH_LIQ_ALTS else 10.0
     n = min(8, len(df)); u = df.iloc[-n:]
     if es_long:
         ne = float(u['low'].min())
@@ -978,7 +979,7 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
         t1v,t2v,t3v = abs(t1-pa),abs(t2-pa),abs(t3-pa)
         rrp = (0.40*t1v+0.30*t2v+0.30*t3v)/ds
     else: rrp = rr
-    if rrp < 0.30: return None
+    if rrp < 1.0: return None
     rr = rrp
     if rr >= 1.2: sc+=1; d.append(f'R13:R:R_{rr:.2f}')
     rc = ce*LOBO_RISK_PCT; ds2 = abs(pa-sl)/pa
@@ -1730,7 +1731,7 @@ def main():
             log.info("Balance=%.2f Futuros(80%%)=%.2f",bt,cf)
             _schedule_bg_dominance_refresh()
             manage_escudo_pro_v3(bt)
-            global KILL_UNTIL, CONSECUTIVE_LOSSES, KILL_STREAK_AT_TRIGGER
+            global KILL_UNTIL, CONSECUTIVE_LOSSES, KILL_STREAK_AT_TRIGGER, _LAST_SCAN_TIME
             if time.time() < KILL_UNTIL:
                 log.warning("KILL-SWITCH: %.1fh restantes", (KILL_UNTIL-time.time())/3600)
                 _shutdown_event.wait(timeout=60); continue
@@ -1753,6 +1754,8 @@ def main():
             mr = calcular_margen_real_disponible(bt,positions_list=pos)
             log.info("Ciclo [%s] Fut=%.2f MR=%.2f Ocup=%d",now.strftime('%H:%M'),cf,mr,len(bs))
             if len(bs) >= LOBO_MAX_POSITIONS: _shutdown_event.wait(timeout=60); continue
+            if time.time() - _LAST_SCAN_TIME < 840: _shutdown_event.wait(timeout=60); continue
+            _LAST_SCAN_TIME = time.time()
             try:
                 tk = exchange.fetch_tickers()
                 ts2 = [p[0] for p in sorted([(s2,float(t.get('quoteVolume',0))) for s2,t in tk.items() if s2.endswith('/USDT:USDT')],key=lambda x:x[1],reverse=True)[:TOP_N]]
@@ -1817,7 +1820,10 @@ def main():
                         log.warning("Notional bajo %s: %.4f < %.2f — skip",sym,qty*pa,MIN_ORDER_USDT); continue
                     # ── Guard pre-entry: verificar que TP1 y TP2 al menos uno sea válido ──
                     _t1q = ((qty*TP1_CLOSE_PCT)//stp)*stp
+                    if _t1q < stp: _t1q = stp
                     _t2q = ((qty-_t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//stp)*stp
+                    if _t2q < 0: _t2q = 0.0
+                    if _t2q > 0 and _t2q * t2p < MIN_ORDER_USDT: _t2q = 0.0
                     _tp1_n = _t1q * t1p; _tp2_n = _t2q * t2p
                     if _tp1_n < MIN_ORDER_USDT and _tp2_n < MIN_ORDER_USDT:
                         _rej['tp_guard']+=1
@@ -1846,7 +1852,11 @@ def main():
                     except Exception as e:
                         log.error("Error orden %s: %s",sym,e); COOLDOWNS[sym]=time.time()+14400; continue
                     tsd = 'long' if es_long else 'short'
-                    t1q = ((qty*TP1_CLOSE_PCT)//stp)*stp; t2q = ((qty-t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//stp)*stp
+                    t1q = ((qty*TP1_CLOSE_PCT)//stp)*stp
+                    if t1q < stp: t1q = stp
+                    t2q = ((qty-t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//stp)*stp
+                    if t2q < 0: t2q = 0.0
+                    if t2q > 0 and t2q * t2p < MIN_ORDER_USDT: t2q = 0.0
                     t3q = max(qty - t1q - t2q, 0.0)
                     log.info("[TP-CALC] %s qty=%.6f step=%.8f | TP1=%.6f (%.0f%%) TP2=%.6f (%.0f%%) TP3=%.6f (%.0f%%)",
                         sym,qty,stp,t1q,t1q/qty*100,t2q,t2q/qty*100,t3q,t3q/qty*100 if qty>0 else 0)
