@@ -894,21 +894,31 @@ def check_regime_tendencia(df, es_long, df_d1=None):
 
 # ── 17. EVALUACION COMPLETA DE SENAL (22 pts max) ──
 def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=None, mrd=None, dfd1=None):
+    side_lbl = 'LONG' if es_long else 'SHORT'
     cf = capital_disponible_futuros(bt)
     ce = mrd if mrd is not None else cf
     s = {'symbol':sym,'precio_actual':pa,'atr_val':atr,'es_long':es_long}
     d = []; sc = 0; ms = 22
     ar, dr = check_regime_tendencia(dfc, es_long, dfd1)
-    if not ar: return None
+    if not ar:
+        log.debug("[EVAL-%s] %s RECHAZO: REGIME filtró (%s)", side_lbl, sym, dr)
+        return None
     d.append(dr)
     imp = detectar_impulso(dfp)
-    if not imp: return None
+    if not imp:
+        log.debug("[EVAL-%s] %s RECHAZO: sin impulso detectado", side_lbl, sym)
+        return None
     fb = calcular_fibonacci(imp)
-    if not fb or 'level_0_5' not in fb or 'level_0_618' not in fb: return None
+    if not fb or 'level_0_5' not in fb or 'level_0_618' not in fb:
+        log.debug("[EVAL-%s] %s RECHAZO: Fibonacci incompleto (fb=%s)", side_lbl, sym, bool(fb))
+        return None
     s['impulso']=imp; s['fibo']=fb; sc+=1; d.append(f'R1:impulso_{imp["tipo"]}_{imp["velas"]}v')
     zi = min(fb['level_0_5'],fb['level_0_618']); zs = max(fb['level_0_5'],fb['level_0_618'])
     s['zona_ote_inf']=zi; s['zona_ote_sup']=zs; tol=atr*1.0
-    if not (zi-tol <= pa <= zs+tol): return None
+    if not (zi-tol <= pa <= zs+tol):
+        log.debug("[EVAL-%s] %s RECHAZO: precio %.4f fuera de zona OTE [%.4f-%.4f] ± tol %.4f",
+            side_lbl, sym, pa, zi, zs, tol)
+        return None
     if zi <= pa <= zs: sc+=1; d.append('R1:en_OTE')
     if len(dfp) >= 100:
         sm = _sma(dfp['close'],100).iloc[-1]
@@ -942,7 +952,9 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
         sok = any((s2['tipo']=='sweep_bajista_long' and es_long) or (s2['tipo']=='sweep_alcista_short' and not es_long) for s2 in sws)
         if sok: sc+=1; d.append('R8:Sweep')
     mk, md = validar_mecha_absorcion_en_zona(dfp, zi, zs, es_long, atr)
-    if not mk: return None
+    if not mk:
+        log.debug("[EVAL-%s] %s RECHAZO: mecha absorción falló (%s)", side_lbl, sym, md)
+        return None
     sc+=1; d.append(f'R9:Mecha_{md}')
     ro, rv = filtro_rsi(dfp, es_long)
     if ro: sc+=1; d.append(f'F5:RSI_{rv:.0f}')
@@ -964,7 +976,9 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
     if detectar_flat_continuacion(dfp, es_long): sc+=1; d.append('D5:flat_continuacion')
     de = dfd1 if (dfd1 is not None and len(dfd1)>=10) else dfc
     if validar_estructura_d1(de, pa, 'long' if es_long else 'short'): sc+=1; d.append('F10:D1_ok')
-    else: return None
+    else:
+        log.debug("[EVAL-%s] %s RECHAZO: D1 estructura inválida", side_lbl, sym)
+        return None
     alv, lp = calcular_apalancamiento_optimo(pa, dfp, zi, zs, es_long, sws, sym)
     sl = pa-(atr*LOBO_SL_ATR) if es_long else pa+(atr*LOBO_SL_ATR); s['sl_price']=sl
     if es_long:
@@ -979,15 +993,21 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
         t1v,t2v,t3v = abs(t1-pa),abs(t2-pa),abs(t3-pa)
         rrp = (0.40*t1v+0.30*t2v+0.30*t3v)/ds
     else: rrp = rr
-    if rrp < 1.0: return None
+    if rrp < 1.0:
+        log.debug("[EVAL-%s] %s RECHAZO: R:R promedio %.2f < 1.0", side_lbl, sym, rrp)
+        return None
     rr = rrp
     if rr >= 1.2: sc+=1; d.append(f'R13:R:R_{rr:.2f}')
     rc = ce*LOBO_RISK_PCT; ds2 = abs(pa-sl)/pa
-    if ds2 <= 0: return None
+    if ds2 <= 0:
+        log.debug("[EVAL-%s] %s RECHAZO: dist_SL/precio = 0", side_lbl, sym)
+        return None
     pv = rc/ds2; mmx = ce*0.90
     if alv > 0: pv = min(pv, mmx*alv)
     mmin = MIN_ORDER_USDT/alv if alv > 0 else MIN_ORDER_USDT
-    if ce < mmin: return None
+    if ce < mmin:
+        log.debug("[EVAL-%s] %s RECHAZO: capital elegible %.2f < minimo %.2f", side_lbl, sym, ce, mmin)
+        return None
     # F12a: pv mínimo para que TP1 (40%) cumpla MIN_ORDER_USDT individual
     min_pv_for_tp = MIN_ORDER_USDT / max(TP1_CLOSE_PCT, 0.01)
     if pv < min_pv_for_tp:
@@ -1004,8 +1024,12 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
     s['qty']=qty; s['pos_value']=pv; s['liq_price']=lp; s['size_usdt']=mr
     s['leverage_calculado']=alv; s['riesgo_real_pct']=round((pv*ds2)/max(ce,0.01)*100,2)
     sc+=1; d.append(f'F3:lev{alv:.0f}x_mrg{mr:.2f}')
-    if sc < LOBO_SCORE_MIN: return None
+    if sc < LOBO_SCORE_MIN:
+        log.debug("[EVAL-%s] %s RECHAZO: score %d/%d < min %d | %s",
+            side_lbl, sym, sc, ms, LOBO_SCORE_MIN, ' | '.join(d))
+        return None
     s['score']=sc; s['max_score']=ms; s['detalles']=d; s['fvg_usado']=fez[0] if fez else None
+    log.info("[EVAL-%s] %s SEÑAL OK score=%d/%d | %s", side_lbl, sym, sc, ms, ' | '.join(d))
     return s
 
 # ── 18. TELEGRAM ──
@@ -1254,6 +1278,47 @@ def _diagnose_tp_plans(sym, ep=0, el=0):
     except: pass
     return r
 
+# ── 22b. SAFE FETCH WITH BACKOFF ──
+_last_fetch_ts: dict = {}
+_MIN_FETCH_INTERVAL_S = 2.0  # mínimo 2s entre fetches al mismo endpoint
+
+def _safe_fetch(fn, *args, max_retries=3, label='fetch', **kwargs):
+    """Wrapper con backoff exponencial y rate-limit mínimo entre llamadas."""
+    key = label + '|' + str(args)
+    now = time.time()
+    last = _last_fetch_ts.get(key, 0)
+    if now - last < _MIN_FETCH_INTERVAL_S:
+        time.sleep(_MIN_FETCH_INTERVAL_S - (now - last))
+    for att in range(max_retries):
+        try:
+            result = fn(*args, **kwargs)
+            _last_fetch_ts[key] = time.time()
+            return result
+        except (ccxt.RateLimitExceeded, ccxt.ExchangeNotAvailable) as e:
+            wait = min(2 ** att * 3, 60)
+            log.warning("[SAFE] %s RateLimit/Unavailable (att %d/%d) — retry %ds: %s",
+                label, att+1, max_retries, wait, str(e)[:80])
+            time.sleep(wait)
+        except ccxt.NetworkError as e:
+            wait = min(2 ** att * 2, 30)
+            log.warning("[SAFE] %s NetworkError (att %d/%d) — retry %ds: %s",
+                label, att+1, max_retries, wait, str(e)[:80])
+            time.sleep(wait)
+        except Exception as e:
+            log.error("[SAFE] %s Error fatal: %s", label, str(e)[:120])
+            return None
+    log.error("[SAFE] %s agotó %d reintentos", label, max_retries)
+    return None
+
+def _safe_fetch_balance():
+    r = _safe_fetch(exchange.fetch_balance, label='fetch_balance')
+    if r is None: return None
+    return float(r.get('total',{}).get('USDT',0))
+
+def _safe_fetch_positions():
+    r = _safe_fetch(exchange.fetch_positions, label='fetch_positions')
+    return r if r is not None else []
+
 # ── 23. UTILIDADES DE POSICIONES ──
 def _calc_pnl_parcial(side, ep, qty, xp):
     return (xp-ep)*qty if side=='long' else (ep-xp)*qty
@@ -1334,39 +1399,64 @@ def _update_sl_to_be(sym, entry, nsl, reason='BE'):
 def adoptar_posiciones_exchange():
     if not exchange or PAPER_TRADE: return 0
     try: positions = exchange.fetch_positions()
-    except: return 0
+    except Exception as e:
+        log.warning("[ADOP] Error fetch_positions: %s", e)
+        return 0
+    active = [p for p in positions if float(p.get('contracts',0) or 0) > 0]
+    log.info("[ADOP] Posiciones en exchange: %d activas de %d totales", len(active), len(positions))
     ad = 0
-    for pos in positions:
+    for pos in active:
         sym = pos.get('symbol')
-        if not sym or sym in TRADE_ENTRIES: continue
+        ct = float(pos.get('contracts',0) or 0)
+        sd = pos.get('side','?')
+        ep = float(pos.get('entryPrice',0) or 0)
+        lv = float(pos.get('leverage') or LEVERAGE)
+        li = float(pos.get('liquidationPrice') or 0)
+        ts = pos.get('timestamp')
+        age_h = (time.time()*1000 - ts)/3600000 if ts else 0
+        if not sym:
+            log.warning("[ADOP] Posición sin symbol: ct=%.4f side=%s", ct, sd)
+            continue
+        if sym in TRADE_ENTRIES:
+            log.debug("[ADOP] %s ya trackeada — skip", sym)
+            continue
+        log.info("[ADOP] %s HUÉRFANA detectada: side=%s entry=%.4f ct=%.4f lev=%.1f liq=%.4f age=%.1fh",
+            sym, sd, ep, ct, lv, li, age_h)
         try:
-            ct = float(pos.get('contracts',0) or 0)
             if ct <= 0: continue
-            sd = pos.get('side')
             if sd not in ('long','short'): continue
-            ep = float(pos.get('entryPrice',0) or 0)
             if ep <= 0: continue
-            lv = float(pos.get('leverage') or LEVERAGE)
             if lv <= 0: lv = LEVERAGE
-            li = float(pos.get('liquidationPrice') or 0)
             if li <= 0: li = ep*(1-1/lv) if sd=='long' else ep*(1+1/lv)
-            ts = pos.get('timestamp'); et = datetime.fromtimestamp(ts/1000) if ts else datetime.now()
+            et = datetime.fromtimestamp(ts/1000) if ts else datetime.now()
             pr, lo = _fetch_plans_exchange(sym)
             slp = None; sl_pl = False
             if not lo:
                 slp = _sl_desde_posicion(pos, sd, ep)
                 if slp is not None: ls2=ct; sl_pl=True
-                else: continue
+                else:
+                    log.warning("[ADOP] %s SIN SL plans ni SL en posición — SKIP (riesgo de liquidación)", sym)
+                    continue
             else: ls2 = sum(p['size'] for p in lo)
-            if abs(ls2-ct) > ct*0.05: continue
-            if not pr: continue
+            if abs(ls2-ct) > ct*0.05:
+                log.warning("[ADOP] %s desajuste SL qty: plans=%.4f pos=%.4f diff=%.1f%% — SKIP",
+                    sym, ls2, ct, abs(ls2-ct)/max(ct,1)*100)
+                continue
+            if not pr:
+                log.warning("[ADOP] %s SIN TP plans — posición sin objetivo de salida", sym)
+                continue
             sl = slp if sl_pl else (min(lo,key=lambda p:p['triggerPrice'])['triggerPrice'] if sd=='long' else max(lo,key=lambda p:p['triggerPrice'])['triggerPrice'])
             np2 = len(pr)
             if np2==3: pl,oq = 0, ct
             elif np2==2: pl,oq = 1, ct/(1-TP1_CLOSE_PCT)
             elif np2==1: pl,oq = 2, ct/(1-TP1_CLOSE_PCT-TP2_CLOSE_PCT)
-            else: continue
-            if abs(sum(p['size'] for p in pr)-ct) > ct*0.05: continue
+            else:
+                log.warning("[ADOP] %s TP plans inesperados: %d — SKIP", sym, np2)
+                continue
+            if abs(sum(p['size'] for p in pr)-ct) > ct*0.05:
+                log.warning("[ADOP] %s desajuste TP qty: plans=%.4f pos=%.4f — SKIP",
+                    sym, sum(p['size'] for p in pr), ct)
+                continue
             sn = 1 if sd=='long' else -1
             pr.sort(key=lambda p:p['triggerPrice'],reverse=(sd=='short'))
             if np2==3: t1p,t2p,t3p = (p['triggerPrice'] for p in pr)
@@ -1381,7 +1471,9 @@ def adoptar_posiciones_exchange():
                 'original_qty':round(oq,8),'remaining_qty':round(ct,8),'step':step,'balance_before':0.0,
                 'capital_futuros':0.0,'atr_val':av,'size_usdt':round(ct*ep/lv,2),'risk_pct':0.0,'score':0,'rr':0.0,'adoptada':True}
             TRADE_ENTRIES[sym]=er; PARTIAL_LEVEL[sym]=pl; _save_trade_entries(); _save_partial_level()
-            log.info("[ADOP] %s adoptada lvl=%d entry=%.4f",sym,pl,ep); ad+=1
+            log.info("[ADOP] %s adoptada OK | side=%s lvl=%d entry=%.4f sl=%.4f tp1=%.4f tp2=%.4f tp3=%.4f lev=%.1f age=%.1fh",
+                sym, sd, pl, ep, sl, t1p, t2p, t3p, lv, age_h)
+            ad+=1
         except Exception as e: log.error("[ADOP] Error %s: %s",sym,e)
     return ad
 
@@ -1420,230 +1512,237 @@ def _full_cleanup(sym, cd=3600):
     TRAIL_COUNTS.pop(sym,None); PARTIAL_LEVEL.pop(sym,None); _save_partial_level()
     _cancel_tp_plans(sym); _cancel_sl_plans(sym)
 
-def _manage_paper_positions_v3(bt):
-    if not TRADE_ENTRIES: return
-    for sym in list(TRADE_ENTRIES.keys()):
+
+# ─ 25. GESTION DE POSICIONES (UNIFICADA DRY) ─
+def _full_cleanup(sym, cd=3600):
+    TRADE_ENTRIES.pop(sym,None); HEDGE_ENTRIES.pop(sym,None); _save_trade_entries()
+    SESSION_ACTIVE_SYMBOLS.discard(sym); COOLDOWNS[sym]=time.time()+cd
+    PEAK_PRICES.pop(sym,None); ADVERSE_PRICES.pop(sym,None)
+    for k in [k for k in ALERTS_HISTORY if sym in k]: ALERTS_HISTORY.pop(k,None)
+    TRAIL_COUNTS.pop(sym,None); PARTIAL_LEVEL.pop(sym,None); _save_partial_level()
+    _cancel_tp_plans(sym); _cancel_sl_plans(sym)
+
+def _tick_manage_posicion(sym, paper=False):
+    """Tick unificado de gestion para una posicion. Retorna 'continue' si debe saltar, None si OK."""
+    e = TRADE_ENTRIES[sym]; sd = e.get('side','long')
+    ep = float(e['entry_price']); sl = float(e.get('sl_price',0))
+    t1=float(e.get('tp1_price',0)); t2=float(e.get('tp2_price',0))
+    t3=float(e.get('tp3_price',0)); li=float(e.get('liq_price',0))
+    # --- fetch ticker ---
+    try:
+        if paper:
+            mk = float(exchange.fetch_ticker(sym)['last'])
+        else:
+            _t = _safe_fetch(exchange.fetch_ticker, sym, label=f'ticker_{sym}')
+            mk = float(_t['last']) if _t else None
+            if mk is None:
+                log.warning("[MGMT] %s Error fetch_ticker \u2014 skip ciclo", sym)
+                return 'continue'
+    except:
+        log.warning("[MGMT] %s Error fetch_ticker \u2014 skip ciclo", sym)
+        return 'continue'
+    pp = (mk-ep)/ep if sd=='long' else (ep-mk)/ep
+    rq = float(e.get('remaining_qty',e.get('quantity',0)))
+    age_h = (datetime.now()-e.get('entry_time',datetime.now())).total_seconds()/3600
+    # --- logging ---
+    if paper:
+        log.debug("[PAPER] %s %s | entry=%.4f mk=%.4f pp=%.2f%%", sym, sd.upper(), ep, mk, pp*100)
+    else:
+        log.info("[MGMT] %s %s | entry=%.4f mk=%.4f pp=%.2f%% sl=%.4f lvl=%d rem=%.4f age=%.1fh",
+            sym, sd.upper(), ep, mk, pp*100, sl, PARTIAL_LEVEL.get(sym,0), rq, age_h)
+    # --- D1 validation (compartido) ---
+    if debe_validar_h4():
         try:
-            e = TRADE_ENTRIES[sym]; sd = e.get('side','long')
-            ep = float(e['entry_price']); sl = float(e.get('sl_price',0))
-            t1 = float(e.get('tp1_price',0)); t2 = float(e.get('tp2_price',0)); t3 = float(e.get('tp3_price',0))
-            li = float(e.get('liq_price',0))
-            try: mk = float(exchange.fetch_ticker(sym)['last'])
-            except: continue
-            pp = (mk-ep)/ep if sd=='long' else (ep-mk)/ep
-            if debe_validar_h4():
-                try:
-                    oh = exchange.fetch_ohlcv(sym,'4h',30)
-                    if len(oh)>=10:
-                        df4 = pd.DataFrame(oh,columns=['ts','o','h','l','c','v'])
-                        if not validar_estructura_d1(df4,ep,sd):
-                            rq = e.get('remaining_qty',e['quantity']); pnl = (mk-ep)*rq if sd=='long' else (ep-mk)*rq
-                            guardar_trade_csv(e,mk,pnl,0,pnl,'D1_INVALID','d1_estructura')
-                            _full_cleanup(sym,7200); continue
-                except: pass
-            if LOBO_HEDGE_ENABLED and sym not in HEDGE_ENTRIES:
-                hp = evaluar_cobertura_v4(e, mk)
-                if hp: HEDGE_ENTRIES[sym]=hp
-            he = HEDGE_ENTRIES.get(sym)
-            if he:
-                hs,ht,hs2 = he['side'],he['tp_price'],he['sl_price']
-                if (hs=='short' and mk<=ht) or (hs=='long' and mk>=ht): HEDGE_ENTRIES.pop(sym,None)
-                if (hs=='short' and mk>=hs2) or (hs=='long' and mk<=hs2): HEDGE_ENTRIES.pop(sym,None)
-            ls2=sd=='long'; ss=sd=='short'
-            oq=float(e.get('original_qty',e.get('quantity',0))); rq=float(e.get('remaining_qty',e.get('quantity',0)))
-            sp=float(e.get('step',0)); pl=PARTIAL_LEVEL.get(sym,0); lv=float(e.get('leverage',LEVERAGE))
-            if (ls2 and mk<=sl) or (ss and mk>=sl):
-                if rq>0:
-                    pnl = _calc_pnl_parcial(sd,ep,rq,mk)
-                    guardar_trade_csv(e,mk,pnl,0,pnl,'SL','sl')
-                _full_cleanup(sym); continue
-            if (ls2 and mk>=t3) or (ss and mk<=t3):
-                if rq>0:
-                    pnl = _calc_pnl_parcial(sd,ep,rq,t3)
-                    guardar_trade_csv(e,t3,pnl,0,pnl,'TP3','tp3')
-                _full_cleanup(sym); continue
-            if pl==0 and sp>0 and rq>=sp and t1!=ep:
-                if (ls2 and mk>=t1) or (ss and mk<=t1):
-                    tq = ((oq*TP1_CLOSE_PCT)//sp)*sp; tq = min(tq,rq-sp)
-                    if tq>=sp:
-                        pnl = _calc_pnl_parcial(sd,ep,tq,t1)
-                        e['remaining_qty']=rq-tq; PARTIAL_LEVEL[sym]=1
-                        guardar_trade_csv(e,t1,pnl,0,pnl,'TP1_PARTIAL','tp1')
-                        _save_trade_entries(); _save_partial_level()
-            elif pl==1 and sp>0 and rq>=sp and t2!=ep:
-                if (ls2 and mk>=t2) or (ss and mk<=t2):
-                    ra = oq-((oq*TP1_CLOSE_PCT)//sp)*sp
-                    tq = ((ra*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT))//sp)*sp; tq = min(tq,rq-sp)
-                    if tq>=sp:
-                        pnl = _calc_pnl_parcial(sd,ep,tq,t2)
-                        e['remaining_qty']=rq-tq; PARTIAL_LEVEL[sym]=2
-                        _update_sl_to_be(sym,e,ep,reason='BE')
-                        guardar_trade_csv(e,t2,pnl,0,pnl,'TP2_PARTIAL','tp2')
-                        _save_trade_entries(); _save_partial_level()
-            et = e.get('entry_time')
-            if isinstance(et,datetime) and pp<0:
-                if (datetime.now()-et).total_seconds()/3600 >= LOBO_TIMEOUT_HORAS:
-                    rq = float(e.get('remaining_qty',e.get('quantity',0)))
-                    if rq>0:
-                        pnl = _calc_pnl_parcial(sd,ep,rq,mk)
-                        guardar_trade_csv(e,mk,pnl,0,pnl,'Timeout','timeout')
-                    _full_cleanup(sym); continue
-            if sym not in PEAK_PRICES: PEAK_PRICES[sym]=mk
-            else: PEAK_PRICES[sym] = max(PEAK_PRICES[sym],mk) if sd=='long' else min(PEAK_PRICES[sym],mk)
-            if sym not in ADVERSE_PRICES: ADVERSE_PRICES[sym]=mk
-            else: ADVERSE_PRICES[sym] = min(ADVERSE_PRICES[sym],mk) if sd=='long' else max(ADVERSE_PRICES[sym],mk)
-            if PARTIAL_LEVEL.get(sym,0)>=2 and pp>0:
-                dist = LOBO_TRAIL_ATR_MULT*e.get('atr_val',0)*1.5
-                if dist>0:
-                    ns = (PEAK_PRICES[sym]-dist) if sd=='long' else (PEAK_PRICES[sym]+dist)
-                    us = e.get('sl_price',0 if sd=='long' else 999999)
-                    mej = (ns-us) if sd=='long' else (us-ns)
-                    if mej > (ep*0.002): _update_sl_to_be(sym,e,ns,reason='TRAIL')
-        except Exception as e: log.error("[PAPER] Error %s: %s",sym,e)
+            oh = exchange.fetch_ohlcv(sym,'4h',30)
+            if len(oh)>=10:
+                df4 = pd.DataFrame(oh,columns=['ts','o','h','l','c','v'])
+                if not validar_estructura_d1(df4,ep,sd):
+                    rq2 = e.get('remaining_qty',e['quantity'])
+                    pnl = (mk-ep)*rq2 if sd=='long' else (ep-mk)*rq2
+                    if not paper:
+                        log.warning("[MGMT] %s D1 INVALID \u2014 cerrando. pnl=%.4f", sym, pnl)
+                        _cerrar_pos_real(sym,sd,rq2)
+                    guardar_trade_csv(e,mk,pnl,0,pnl,'D1_INVALID','d1_estructura')
+                    _full_cleanup(sym,7200); return 'continue'
+        except: pass
+    # --- Hedge (compartido) ---
+    if LOBO_HEDGE_ENABLED and sym not in HEDGE_ENTRIES:
+        hp = evaluar_cobertura_v4(e, mk)
+        if hp:
+            if paper:
+                HEDGE_ENTRIES[sym]=hp
+            else:
+                hn = float(hp.get('size_usdt',0))
+                if hn < MIN_ORDER_USDT:
+                    log.debug("[MGMT] %s hedge candidato pero margen %.2f < min %.2f", sym, hn, MIN_ORDER_USDT)
+                else:
+                    HEDGE_ENTRIES[sym]=hp
+                    log.info("[MGMT] %s HEDGE ACTIVADO: side=%s lev=%sx tp=%.4f sl=%.4f margin=%.2f",
+                        sym, hp['side'], hp['leverage'], hp['tp_price'], hp['sl_price'], hn)
+                    try: exchange.set_leverage(int(hp['leverage']),sym)
+                    except: pass
+                    try:
+                        try: hmi=exchange.market(sym); hs2=hmi['limits']['amount']['min'] or hmi['precision']['amount'] or 1
+                        except: hs2=1
+                        hq = math.ceil((hn/mk)/hs2)*hs2
+                        exchange.create_order(sym,'market','buy' if hp['side']=='long' else 'sell',hq,
+                            params={'marginCoin':'USDT','marginMode':'isolated','tradeSide':'open',
+                                'presetStopSurplusPrice':str(exchange.price_to_precision(sym,hp['tp_price'])),
+                                'presetStopLossPrice':str(exchange.price_to_precision(sym,hp['sl_price']))})
+                    except Exception as ex: log.error("[MGMT] Error creando hedge: %s",ex)
+    # --- Hedge tracking (compartido) ---
+    he = HEDGE_ENTRIES.get(sym)
+    if he:
+        hs,ht,hs2 = he['side'],he['tp_price'],he['sl_price']
+        if (hs=='short' and mk<=ht) or (hs=='long' and mk>=ht): HEDGE_ENTRIES.pop(sym,None)
+        if (hs=='short' and mk>=hs2) or (hs=='long' and mk<=hs2): HEDGE_ENTRIES.pop(sym,None)
+    # --- Exchange TP detection (real only) ---
+    ls2=sd=='long'; ss=sd=='short'
+    oq=float(e.get('original_qty',e.get('quantity',0))); rq=float(e.get('remaining_qty',e.get('quantity',0)))
+    sp=float(e.get('step',0)); pl=PARTIAL_LEVEL.get(sym,0); lv=float(e.get('leverage',LEVERAGE))
+    pd_pos = e.get('_exchange_pos')
+    if not paper and pd_pos is not None:
+        eq = float(pd_pos.get('contracts',rq))
+        if eq < rq*0.95:
+            t1p_val = float(e.get('tp1_price',0)); t2p_val = float(e.get('tp2_price',0))
+            if pl==0 and eq <= oq*0.65 and t1p_val>0:
+                tp1_hit = (sd=='long' and mk>=t1p_val) or (sd=='short' and mk<=t1p_val)
+                if tp1_hit:
+                    tp1pnl = (t1p_val-ep)*oq*TP1_CLOSE_PCT if sd=='long' else (ep-t1p_val)*oq*TP1_CLOSE_PCT
+                    e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=1
+                    guardar_trade_csv(e,t1p_val,tp1pnl,0,tp1pnl,'TP1_EXCHANGE','tp1_exchange')
+                    _save_trade_entries(); _save_partial_level()
+            elif pl==1 and eq <= oq*0.40 and t2p_val>0:
+                tp2_hit = (sd=='long' and mk>=t2p_val) or (sd=='short' and mk<=t2p_val)
+                if tp2_hit:
+                    tp2pnl = (t2p_val-ep)*oq*TP2_CLOSE_PCT if sd=='long' else (ep-t2p_val)*oq*TP2_CLOSE_PCT
+                    e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=2
+                    _update_sl_to_be(sym,e,ep,reason='BE')
+                    guardar_trade_csv(e,t2p_val,tp2pnl,0,tp2pnl,'TP2_EXCHANGE','tp2_exchange')
+                    _save_trade_entries(); _save_partial_level()
+                    pl = PARTIAL_LEVEL.get(sym,0); rq = float(e.get('remaining_qty',e.get('quantity',0)))
+    # --- SL check (compartido) ---
+    if (ls2 and mk<=sl) or (ss and mk>=sl):
+        log.info("[MGMT] %s SL HIT! mk=%.4f sl=%.4f", sym, mk, sl)
+        if rq>0:
+            pnl = _calc_pnl_parcial(sd,ep,rq,mk)
+            if not paper: _cerrar_pos_real(sym,sd,rq)
+            guardar_trade_csv(e,mk,pnl,0,pnl,'SL','sl')
+        if not paper: _cancel_tp_plans(sym); _cancel_sl_plans(sym)
+        _full_cleanup(sym); return 'continue'
+    # --- TP3 check (compartido) ---
+    if (ls2 and mk>=t3) or (ss and mk<=t3):
+        log.info("[MGMT] %s TP3 HIT! mk=%.4f t3=%.4f", sym, mk, t3)
+        if rq>0:
+            pnl = _calc_pnl_parcial(sd,ep,rq,t3)
+            if not paper: _cerrar_pos_real(sym,sd,rq)
+            guardar_trade_csv(e,t3,pnl,0,pnl,'TP3','tp3')
+        if not paper: _cancel_tp_plans(sym); _cancel_sl_plans(sym)
+        _full_cleanup(sym); return 'continue'
+    # --- TP1 partial (compartido) ---
+    if pl==0 and sp>0 and rq>=sp and t1!=ep:
+        if (ls2 and mk>=t1) or (ss and mk<=t1):
+            tq = ((oq*TP1_CLOSE_PCT)//sp)*sp; tq = min(tq,rq-sp)
+            if tq>=sp:
+                pnl = _calc_pnl_parcial(sd,ep,tq,t1)
+                if paper or _cerrar_pos_real(sym,sd,tq):
+                    log.info("[MGMT] %s TP1 PARTIAL: qty=%.4f pnl=%.4f", sym, tq, pnl)
+                    e['remaining_qty']=rq-tq; PARTIAL_LEVEL[sym]=1
+                    guardar_trade_csv(e,t1,pnl,0,pnl,'TP1_PARTIAL','tp1')
+                    _save_trade_entries(); _save_partial_level()
+    # --- TP2 partial + BE (compartido) ---
+    elif pl==1 and sp>0 and rq>=sp and t2!=ep:
+        if (ls2 and mk>=t2) or (ss and mk<=t2):
+            ra = oq-((oq*TP1_CLOSE_PCT)//sp)*sp
+            tq = ((ra*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT))//sp)*sp; tq = min(tq,rq-sp)
+            if tq>=sp:
+                pnl = _calc_pnl_parcial(sd,ep,tq,t2)
+                if paper or _cerrar_pos_real(sym,sd,tq):
+                    log.info("[MGMT] %s TP2 PARTIAL: qty=%.4f pnl=%.4f -> BE", sym, tq, pnl)
+                    e['remaining_qty']=rq-tq; PARTIAL_LEVEL[sym]=2
+                    _update_sl_to_be(sym,e,ep,reason='BE')
+                    guardar_trade_csv(e,t2,pnl,0,pnl,'TP2_PARTIAL','tp2')
+                    _save_trade_entries(); _save_partial_level()
+    # --- Timeout (compartido) ---
+    et = e.get('entry_time')
+    if isinstance(et,datetime) and pp<0:
+        if (datetime.now()-et).total_seconds()/3600 >= LOBO_TIMEOUT_HORAS:
+            rq = float(e.get('remaining_qty',e.get('quantity',0)))
+            log.warning("[MGMT] %s TIMEOUT (%.1fh) \u2014 cerrando. pp=%.2f%%", sym, age_h, pp*100)
+            if rq>0:
+                pnl = _calc_pnl_parcial(sd,ep,rq,mk)
+                if not paper: _cerrar_pos_real(sym,sd,rq)
+                guardar_trade_csv(e,mk,pnl,0,pnl,'Timeout','timeout')
+            _full_cleanup(sym); return 'continue'
+    # --- Peak/Adverse tracking (compartido) ---
+    if sym not in PEAK_PRICES: PEAK_PRICES[sym]=mk
+    else: PEAK_PRICES[sym] = max(PEAK_PRICES[sym],mk) if sd=='long' else min(PEAK_PRICES[sym],mk)
+    if sym not in ADVERSE_PRICES: ADVERSE_PRICES[sym]=mk
+    else: ADVERSE_PRICES[sym] = min(ADVERSE_PRICES[sym],mk) if sd=='long' else max(ADVERSE_PRICES[sym],mk)
+    # --- Trailing (compartido) ---
+    if PARTIAL_LEVEL.get(sym,0)>=2 and pp>0:
+        dist = LOBO_TRAIL_ATR_MULT*e.get('atr_val',0)*1.5
+        if dist>0:
+            ns = (PEAK_PRICES[sym]-dist) if sd=='long' else (PEAK_PRICES[sym]+dist)
+            us = e.get('sl_price',0 if sd=='long' else 999999)
+            mej = (ns-us) if sd=='long' else (us-ns)
+            if mej > (ep*0.002):
+                if _update_sl_to_be(sym,e,ns,reason='TRAIL'):
+                    TRAIL_COUNTS[sym]=TRAIL_COUNTS.get(sym,0)+1
+                    log.info("[MGMT] %s TRAIL #%d: sl \u2192 %.4f (peak=%.4f dist=%.4f)",
+                        sym, TRAIL_COUNTS[sym], ns, PEAK_PRICES.get(sym,mk), dist)
+    return None
 
 def manage_escudo_pro_v3(bt=0.0):
-    if PAPER_TRADE: _manage_paper_positions_v3(bt); return
+    """Punto de entrada unificado. Paper y real usan el mismo tick."""
     if not TRADE_ENTRIES: return
     pos_by_sym = {}; po = False
-    try:
-        ap = exchange.fetch_positions(); po = True
-        for p in ap:
-            if float(p.get('contracts',0))>0: pos_by_sym[p['symbol']]=p
-    except: pass
+    if not PAPER_TRADE:
+        try:
+            ap = exchange.fetch_positions(); po = True
+            for p in ap:
+                if float(p.get('contracts',0))>0: pos_by_sym[p['symbol']]=p
+        except Exception as e:
+            log.warning("[MGMT] Error fetch_positions: %s", e)
+        log.info("[MGMT] Ciclo gestion: %d posiciones trackeadas, %d en exchange", len(TRADE_ENTRIES), len(pos_by_sym))
     for sym in list(TRADE_ENTRIES.keys()):
         try:
-            e = TRADE_ENTRIES[sym]; sd = e.get('side','long'); ep = float(e['entry_price'])
-            sl = float(e.get('sl_price',0)); t1=float(e.get('tp1_price',0))
-            t2=float(e.get('tp2_price',0)); t3=float(e.get('tp3_price',0)); li=float(e.get('liq_price',0))
-            try: mk = float(exchange.fetch_ticker(sym)['last'])
-            except: continue
-            pp = (mk-ep)/ep if sd=='long' else (ep-mk)/ep
-            pd = pos_by_sym.get(sym); rq = float(e.get('remaining_qty',e.get('quantity',0)))
-            if po and pd is None:
-                if rq>0:
+            e = TRADE_ENTRIES[sym]
+            if not PAPER_TRADE:
+                pd_pos = pos_by_sym.get(sym)
+                rq = float(e.get('remaining_qty',e.get('quantity',0)))
+                ep = float(e['entry_price']); sd = e.get('side','long')
+                # --- Exchange close detection (real only) ---
+                if po and pd_pos is None:
+                    try:
+                        _t = _safe_fetch(exchange.fetch_ticker, sym, label=f'ticker_{sym}')
+                        mk = float(_t['last']) if _t else 0
+                    except: mk = ep
+                    log.warning("[MGMT] %s CERRADA EN EXCHANGE (no encontrada) \u2014 limpiando", sym)
+                    if rq>0:
+                        pnl = (mk-ep)*rq if sd=='long' else (ep-mk)*rq
+                        guardar_trade_csv(e,mk,pnl,0,pnl,'EXCHANGE_CLOSE','exchange')
+                    _full_cleanup(sym); continue
+                if pd_pos is None and rq>0:
+                    log.warning("[MGMT] %s posicion fantasma (rq>0 pero sin pos en exchange) \u2014 limpiando", sym)
+                    try:
+                        _t = _safe_fetch(exchange.fetch_ticker, sym, label=f'ticker_{sym}')
+                        mk = float(_t['last']) if _t else ep
+                    except: mk = ep
                     pnl = (mk-ep)*rq if sd=='long' else (ep-mk)*rq
                     guardar_trade_csv(e,mk,pnl,0,pnl,'EXCHANGE_CLOSE','exchange')
-                _full_cleanup(sym); continue
-            if pd is None and rq>0:
-                pnl = (mk-ep)*rq if sd=='long' else (ep-mk)*rq
-                guardar_trade_csv(e,mk,pnl,0,pnl,'EXCHANGE_CLOSE','exchange')
-                _full_cleanup(sym); continue
-            if debe_validar_h4():
-                try:
-                    oh = exchange.fetch_ohlcv(sym,'4h',30)
-                    if len(oh)>=10:
-                        df4 = pd.DataFrame(oh,columns=['ts','o','h','l','c','v'])
-                        if not validar_estructura_d1(df4,ep,sd):
-                            rq2 = e.get('remaining_qty',e['quantity'])
-                            pnl = (mk-ep)*rq2 if sd=='long' else (ep-mk)*rq2
-                            _cerrar_pos_real(sym,sd,rq2)
-                            guardar_trade_csv(e,mk,pnl,0,pnl,'D1_INVALID','d1_estructura')
-                            _full_cleanup(sym,7200); continue
-                except: pass
-            if LOBO_HEDGE_ENABLED and sym not in HEDGE_ENTRIES:
-                hp = evaluar_cobertura_v4(e,mk)
-                if hp:
-                    hn = float(hp.get('size_usdt',0))
-                    if hn < MIN_ORDER_USDT: pass
-                    else:
-                        HEDGE_ENTRIES[sym]=hp
-                        try: exchange.set_leverage(int(hp['leverage']),sym)
-                        except: pass
-                        try:
-                            try: hmi=exchange.market(sym); hs2=hmi['limits']['amount']['min'] or hmi['precision']['amount'] or 1
-                            except: hs2=1
-                            hq = math.ceil((hn/mk)/hs2)*hs2
-                            exchange.create_order(sym,'market','buy' if hp['side']=='long' else 'sell',hq,
-                                params={'marginCoin':'USDT','marginMode':'isolated','tradeSide':'open',
-                                    'presetStopSurplusPrice':str(exchange.price_to_precision(sym,hp['tp_price'])),
-                                    'presetStopLossPrice':str(exchange.price_to_precision(sym,hp['sl_price']))})
-                        except: pass
-            he = HEDGE_ENTRIES.get(sym)
-            if he:
-                hs,ht,hs2 = he['side'],he['tp_price'],he['sl_price']
-                if (hs=='short' and mk<=ht) or (hs=='long' and mk>=ht): HEDGE_ENTRIES.pop(sym,None)
-                if (hs=='short' and mk>=hs2) or (hs=='long' and mk<=hs2): HEDGE_ENTRIES.pop(sym,None)
-            ls2=sd=='long'; ss=sd=='short'
-            oq=float(e.get('original_qty',e.get('quantity',0))); rq=float(e.get('remaining_qty',e.get('quantity',0)))
-            sp=float(e.get('step',0)); pl=PARTIAL_LEVEL.get(sym,0); lv=float(e.get('leverage',LEVERAGE))
-            eq = float(pd['contracts']) if pd else rq
-            if pd is not None and eq < rq*0.95:
-                t1p_val = float(e.get('tp1_price',0))
-                t2p_val = float(e.get('tp2_price',0))
-                if pl==0 and eq <= oq*0.65 and t1p_val>0:
-                    tp1_hit = (sd=='long' and mk>=t1p_val) or (sd=='short' and mk<=t1p_val)
-                    if tp1_hit:
-                        tp1pnl = (t1p_val-ep)*oq*TP1_CLOSE_PCT if sd=='long' else (ep-t1p_val)*oq*TP1_CLOSE_PCT
-                        e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=1
-                        guardar_trade_csv(e,t1p_val,tp1pnl,0,tp1pnl,'TP1_EXCHANGE','tp1_exchange')
-                        _save_trade_entries(); _save_partial_level()
-                elif pl==1 and eq <= oq*0.40 and t2p_val>0:
-                    tp2_hit = (sd=='long' and mk>=t2p_val) or (sd=='short' and mk<=t2p_val)
-                    if tp2_hit:
-                        tp2pnl = (t2p_val-ep)*oq*TP2_CLOSE_PCT if sd=='long' else (ep-t2p_val)*oq*TP2_CLOSE_PCT
-                        e['remaining_qty']=eq; rq=eq; PARTIAL_LEVEL[sym]=2
-                        _update_sl_to_be(sym,e,ep,reason='BE')
-                        guardar_trade_csv(e,t2p_val,tp2pnl,0,tp2pnl,'TP2_EXCHANGE','tp2_exchange')
-                        _save_trade_entries(); _save_partial_level()
-                        pl = PARTIAL_LEVEL.get(sym,0); rq = float(e.get('remaining_qty',e.get('quantity',0)))
-            sl = float(e.get('sl_price',0))
-            if (ls2 and mk<=sl) or (ss and mk>=sl):
-                if rq>0:
-                    pnl = _calc_pnl_parcial(sd,ep,rq,mk)
-                    _cerrar_pos_real(sym,sd,rq)
-                    guardar_trade_csv(e,mk,pnl,0,pnl,'SL','sl')
-                _cancel_tp_plans(sym); _cancel_sl_plans(sym)
-                _full_cleanup(sym); continue
-            if (ls2 and mk>=t3) or (ss and mk<=t3):
-                if rq>0:
-                    pnl = _calc_pnl_parcial(sd,ep,rq,t3)
-                    _cerrar_pos_real(sym,sd,rq)
-                    guardar_trade_csv(e,t3,pnl,0,pnl,'TP3','tp3')
-                _cancel_tp_plans(sym); _cancel_sl_plans(sym)
-                _full_cleanup(sym); continue
-            if pl==0 and sp>0 and rq>=sp and t1!=ep:
-                if (ls2 and mk>=t1) or (ss and mk<=t1):
-                    tq = ((oq*TP1_CLOSE_PCT)//sp)*sp; tq = min(tq,rq-sp)
-                    if tq>=sp:
-                        pnl = _calc_pnl_parcial(sd,ep,tq,t1)
-                        if _cerrar_pos_real(sym,sd,tq):
-                            e['remaining_qty']=rq-tq; PARTIAL_LEVEL[sym]=1
-                            guardar_trade_csv(e,t1,pnl,0,pnl,'TP1_PARTIAL','tp1')
-                            _save_trade_entries(); _save_partial_level()
-            elif pl==1 and sp>0 and rq>=sp and t2!=ep:
-                if (ls2 and mk>=t2) or (ss and mk<=t2):
-                    ra = oq-((oq*TP1_CLOSE_PCT)//sp)*sp
-                    tq = ((ra*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT))//sp)*sp; tq = min(tq,rq-sp)
-                    if tq>=sp:
-                        pnl = _calc_pnl_parcial(sd,ep,tq,t2)
-                        if _cerrar_pos_real(sym,sd,tq):
-                            e['remaining_qty']=rq-tq; PARTIAL_LEVEL[sym]=2
-                            _update_sl_to_be(sym,e,ep,reason='BE')
-                            guardar_trade_csv(e,t2,pnl,0,pnl,'TP2_PARTIAL','tp2')
-                            _save_trade_entries(); _save_partial_level()
-            et = e.get('entry_time')
-            if isinstance(et,datetime) and pp<0:
-                if (datetime.now()-et).total_seconds()/3600 >= LOBO_TIMEOUT_HORAS:
-                    rq = float(e.get('remaining_qty',e.get('quantity',0)))
-                    if rq>0:
-                        pnl = _calc_pnl_parcial(sd,ep,rq,mk)
-                        _cerrar_pos_real(sym,sd,rq)
-                        guardar_trade_csv(e,mk,pnl,0,pnl,'Timeout','timeout')
                     _full_cleanup(sym); continue
-            if sym not in PEAK_PRICES: PEAK_PRICES[sym]=mk
-            else: PEAK_PRICES[sym] = max(PEAK_PRICES[sym],mk) if sd=='long' else min(PEAK_PRICES[sym],mk)
-            if sym not in ADVERSE_PRICES: ADVERSE_PRICES[sym]=mk
-            else: ADVERSE_PRICES[sym] = min(ADVERSE_PRICES[sym],mk) if sd=='long' else max(ADVERSE_PRICES[sym],mk)
-            if PARTIAL_LEVEL.get(sym,0)>=2 and pp>0:
-                dist = LOBO_TRAIL_ATR_MULT*e.get('atr_val',0)*1.5
-                if dist>0:
-                    ns = (PEAK_PRICES[sym]-dist) if sd=='long' else (PEAK_PRICES[sym]+dist)
-                    us = e.get('sl_price',0 if sd=='long' else 999999)
-                    mej = (ns-us) if sd=='long' else (us-ns)
-                    if mej > (ep*0.002):
-                        if _update_sl_to_be(sym,e,ns,reason='TRAIL'):
-                            TRAIL_COUNTS[sym]=TRAIL_COUNTS.get(sym,0)+1
-        except Exception as e: log.error("[REAL] Error %s: %s",sym,e)
+                # Injectar pos_data para deteccion exchange TP
+                if pd_pos is not None:
+                    e['_exchange_pos'] = pd_pos
+                ret = _tick_manage_posicion(sym, paper=False)
+                e.pop('_exchange_pos', None)  # cleanup temp key
+            else:
+                ret = _tick_manage_posicion(sym, paper=True)
+            if ret == 'continue': continue
+        except Exception as ex:
+            log.error("[%s] Error %s: %s", 'REAL' if not PAPER_TRADE else 'PAPER', sym, ex)
+
 
 # ── 26. SHUTDOWN GRACEFUL ──
 def _graceful_shutdown():
@@ -1706,7 +1805,16 @@ def main():
         if na > 0: log.info("Posiciones adoptadas: %d",na)
     except Exception as e: log.error("Error adoptar: %s",e)
     restaurar_tp_exchange()
+    if TRADE_ENTRIES:
+        log.info("=== ESTADO POST-ARRANQUE: %d posiciones ===", len(TRADE_ENTRIES))
+        for _sym, _e in TRADE_ENTRIES.items():
+            _age = (datetime.now()-_e.get('entry_time',datetime.now())).total_seconds()/3600
+            log.info("  %s %s entry=%.4f sl=%.4f tp1=%.4f tp2=%.4f tp3=%.4f lvl=%d rem=%.4f age=%.1fh score=%d",
+                _sym, _e.get('side','?'), _e.get('entry_price',0), _e.get('sl_price',0),
+                _e.get('tp1_price',0), _e.get('tp2_price',0), _e.get('tp3_price',0),
+                PARTIAL_LEVEL.get(_sym,0), _e.get('remaining_qty',0), _age, _e.get('score',0))
     lrd = datetime.now().day-1
+    _prev_balance = 0.0
     while not _shutdown_event.is_set():
         try:
             now = datetime.now()
@@ -1723,12 +1831,18 @@ def main():
                 pt=sum(float(r['net_pnl']) for r in cl); wr=len(tp2)/max(tc2,1)*100
                 send_telegram(f"*REPORTE DIARIO* ({now.strftime('%d/%m')})\nOps:{tc2} TP:{len(tp2)} WR:{wr:.0f}% PnL:{pt:+.2f}")
                 lrd=now.day
-            try: bt = float(exchange.fetch_balance()['total'].get('USDT',0))
+            try:
+                bt = _safe_fetch_balance()
+                if bt is None:
+                    if PAPER_TRADE: bt=10000.0
+                    else: log.error("Error balance (backoff agotado)"); bt=0.0
             except:
                 if PAPER_TRADE: bt=10000.0
                 else: log.error("Error balance"); bt=0.0
             cf = capital_disponible_futuros(bt)
-            log.info("Balance=%.2f Futuros(80%%)=%.2f",bt,cf)
+            bal_delta = bt - _prev_balance if _prev_balance > 0 else 0
+            _prev_balance = bt
+            log.info("Balance=%.2f Futuros(80%%)=%.2f Δ=%.4f",bt,cf,bal_delta)
             _schedule_bg_dominance_refresh()
             manage_escudo_pro_v3(bt)
             global KILL_UNTIL, CONSECUTIVE_LOSSES, KILL_STREAK_AT_TRIGGER, _LAST_SCAN_TIME
@@ -1747,17 +1861,25 @@ def main():
             if not enh:
                 _shutdown_event.wait(timeout=300); continue
             try:
-                pos = exchange.fetch_positions()
-                bs = {p['symbol'] for p in pos if float(p['contracts'])>0}
+                pos = _safe_fetch_positions()
+                bs = {p['symbol'] for p in pos if float(p.get('contracts',0))>0}
             except: pos=[]; bs=set()
             if PAPER_TRADE: bs.update(TRADE_ENTRIES.keys())
             mr = calcular_margen_real_disponible(bt,positions_list=pos)
             log.info("Ciclo [%s] Fut=%.2f MR=%.2f Ocup=%d",now.strftime('%H:%M'),cf,mr,len(bs))
-            if len(bs) >= LOBO_MAX_POSITIONS: _shutdown_event.wait(timeout=60); continue
-            if time.time() - _LAST_SCAN_TIME < 840: _shutdown_event.wait(timeout=60); continue
+            if len(bs) >= LOBO_MAX_POSITIONS:
+                log.info("[SCAN] SKIP: máx posiciones alcanzado (%d/%d)", len(bs), LOBO_MAX_POSITIONS)
+                _shutdown_event.wait(timeout=60); continue
+            scan_elapsed = time.time() - _LAST_SCAN_TIME
+            if scan_elapsed < 840:
+                log.debug("[SCAN] SKIP: intervalo %.0fs < 840s (restan %.0fs)", scan_elapsed, 840-scan_elapsed)
+                _shutdown_event.wait(timeout=60); continue
             _LAST_SCAN_TIME = time.time()
             try:
-                tk = exchange.fetch_tickers()
+                tk = _safe_fetch(exchange.fetch_tickers, label='fetch_tickers')
+                if tk is None:
+                    log.error("fetch_tickers None tras reintentos")
+                    _shutdown_event.wait(timeout=60); continue
                 ts2 = [p[0] for p in sorted([(s2,float(t.get('quoteVolume',0))) for s2,t in tk.items() if s2.endswith('/USDT:USDT')],key=lambda x:x[1],reverse=True)[:TOP_N]]
                 if LOBO_WHITELIST: ts2=[s2 for s2 in ts2 if s2.split('/')[0] in LOBO_WHITELIST]
                 bk = len(ts2); ts2=[s2 for s2 in ts2 if s2.split('/')[0] not in LOBO_BLACKLIST]
@@ -1783,7 +1905,9 @@ def main():
                     df1d = pd.DataFrame(o1d[:-1],columns=['timestamp','open','high','low','close','volume']) if o1d and len(o1d)>1 else None
                     if not es_nueva_vela_principal(df15,sym): continue
                     pa = float(df15['close'].iloc[-1]); av = float(_atr(df15,LOBO_ATR_PERIOD).iloc[-1])
-                    if av==0 or pd.isna(av): continue
+                    if av==0 or pd.isna(av):
+                        log.debug("[SCAN] %s ATR=0/NaN — skip", sym)
+                        continue
                     sl = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=True,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
                     sws = detectar_sweep(df15)
                     hs = any(s2['tipo']=='sweep_alcista_short' for s2 in sws)
@@ -1797,7 +1921,11 @@ def main():
                     ss = None
                     if cs: ss = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=False,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
                     sn = sl or ss
-                    if not sn: _rej['no_signal']+=1; continue
+                    if not sn:
+                        _rej['no_signal']+=1
+                        log.debug("[SCAN] %s sin señal (long=%s short=%scs=%s hs=%s rsi=%.1f)",
+                            sym, bool(sl), bool(ss), cs, hs, rv)
+                        continue
                     es_long=sn['es_long']; snn='LARGO' if es_long else 'CORTO'
                     slp=sn['sl_price']; t1p=sn['tp1_price']; t2p=sn['tp2_price']; t3p=sn['tp3_price']
                     alv=sn.get('leverage_calculado',LEVERAGE); lvp=sn.get('liq_price',0)
@@ -1921,9 +2049,9 @@ def main():
                         f"TP3(30%):`{exchange.price_to_precision(sym,t3p)}` [EX]\n"
                         f"RR:{rr:.2f} Score:{sc}/{ms2}")
                 except Exception as e: log.debug("Error %s: %s",sym,e); continue
-            if any(v > 0 for v in _rej.values()):
-                log.info("Scan: %d simbolos | sin_data=%d sin_señal=%d tp_guard=%d entradas=%d",
-                    len(ts2), _rej['no_data'], _rej['no_signal'], _rej['tp_guard'], _rej['entered'])
+            scan_dur = time.time() - _LAST_SCAN_TIME
+            log.info("Scan completado en %.0fs: %d símbolos | sin_data=%d sin_señal=%d tp_guard=%d entradas=%d",
+                scan_dur, len(ts2), _rej['no_data'], _rej['no_signal'], _rej['tp_guard'], _rej['entered'])
             _shutdown_event.wait(timeout=60)
         except Exception as e: log.error("Error ciclo: %s",e,exc_info=True); _shutdown_event.wait(timeout=60)
     _graceful_shutdown()
