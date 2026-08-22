@@ -1435,15 +1435,30 @@ def adoptar_posiciones_exchange():
                 slp = _sl_desde_posicion(pos, sd, ep)
                 if slp is not None: ls2=ct; sl_pl=True
                 else:
-                    log.warning("[ADOP] %s SIN SL plans ni SL en posición — SKIP (riesgo de liquidación)", sym)
+                    log.warning("[ADOP] %s SIN SL plans ni SL en posición — cerrando por seguridad", sym)
+                    try:
+                        _cerrar_pos_real(sym, sd, ct)
+                        log.info("[ADOP] %s CERRADA OK (sin SL plans)", sym)
+                        send_telegram(f"⚠️ *{sym} CERRADA* (huérfana sin SL)")
+                    except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
                     continue
             else: ls2 = sum(p['size'] for p in lo)
             if abs(ls2-ct) > ct*0.05:
-                log.warning("[ADOP] %s desajuste SL qty: plans=%.4f pos=%.4f diff=%.1f%% — SKIP",
+                log.warning("[ADOP] %s desajuste SL qty: plans=%.4f pos=%.4f diff=%.1f%% — cerrando",
                     sym, ls2, ct, abs(ls2-ct)/max(ct,1)*100)
+                try:
+                    _cerrar_pos_real(sym, sd, ct)
+                    log.info("[ADOP] %s CERRADA OK (desajuste SL qty)", sym)
+                    send_telegram(f"⚠️ *{sym} CERRADA* (desajuste SL qty)")
+                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
                 continue
             if not pr:
-                log.warning("[ADOP] %s SIN TP plans — posición sin objetivo de salida", sym)
+                log.warning("[ADOP] %s SIN TP plans — cerrando por seguridad", sym)
+                try:
+                    _cerrar_pos_real(sym, sd, ct)
+                    log.info("[ADOP] %s CERRADA OK (sin TP plans)", sym)
+                    send_telegram(f"⚠️ *{sym} CERRADA* (huérfana sin TP)")
+                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
                 continue
             sl = slp if sl_pl else (min(lo,key=lambda p:p['triggerPrice'])['triggerPrice'] if sd=='long' else max(lo,key=lambda p:p['triggerPrice'])['triggerPrice'])
             np2 = len(pr)
@@ -1451,11 +1466,21 @@ def adoptar_posiciones_exchange():
             elif np2==2: pl,oq = 1, ct/(1-TP1_CLOSE_PCT)
             elif np2==1: pl,oq = 2, ct/(1-TP1_CLOSE_PCT-TP2_CLOSE_PCT)
             else:
-                log.warning("[ADOP] %s TP plans inesperados: %d — SKIP", sym, np2)
+                log.warning("[ADOP] %s TP plans inesperados: %d — cerrando", sym, np2)
+                try:
+                    _cerrar_pos_real(sym, sd, ct)
+                    log.info("[ADOP] %s CERRADA OK (TP plans inesperados)", sym)
+                    send_telegram(f"⚠️ *{sym} CERRADA* (TP plans inesperados: {np2})")
+                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
                 continue
             if abs(sum(p['size'] for p in pr)-ct) > ct*0.05:
-                log.warning("[ADOP] %s desajuste TP qty: plans=%.4f pos=%.4f — SKIP",
+                log.warning("[ADOP] %s desajuste TP qty: plans=%.4f pos=%.4f — cerrando",
                     sym, sum(p['size'] for p in pr), ct)
+                try:
+                    _cerrar_pos_real(sym, sd, ct)
+                    log.info("[ADOP] %s CERRADA OK (desajuste TP qty)", sym)
+                    send_telegram(f"⚠️ *{sym} CERRADA* (desajuste TP qty)")
+                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
                 continue
             sn = 1 if sd=='long' else -1
             pr.sort(key=lambda p:p['triggerPrice'],reverse=(sd=='short'))
