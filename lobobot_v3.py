@@ -230,6 +230,7 @@ LOBO_WHITELIST = {b.strip().upper() for b in os.environ.get('LOBO_WHITELIST', ''
 LOBO_REGIME_EMA_PERIOD = int(os.environ.get('LOBO_REGIME_EMA_PERIOD', '50'))
 LOBO_BLACKLIST = {'SPCX','NBIS','MRVL','SKHYNIX','SKHY','RKLB','INJ','ENA','APT','JTO','ALICE','DOS','ENSO','GWEI','BASED','CRV','HOME'}
 LOBO_TRADE_START_HOUR = 10; LOBO_TRADE_END_HOUR = 23
+LOBO_TRADING_HOURS_ENABLED = False  # True = activar filtro de horario, False = operar 24/7
 LOBO_HEDGE_ENABLED = os.environ.get('LOBO_HEDGE_ENABLED', 'true').lower() == 'true'
 LOBO_HEDGE_LEV_MULT = float(os.environ.get('LOBO_HEDGE_LEV_MULT', '3.0'))
 LOBO_HEDGE_TRIGGER_PCT = float(os.environ.get('LOBO_HEDGE_TRIGGER_PCT', '0.5'))
@@ -899,86 +900,124 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
     ce = mrd if mrd is not None else cf
     s = {'symbol':sym,'precio_actual':pa,'atr_val':atr,'es_long':es_long}
     d = []; sc = 0; ms = 22
+    sr = {'regime':0,'impulso':0,'fibo_zone':0,'sma100':0,'adx':0,'usdtd':0,'btcd':0,
+          'fvg':0,'ob':0,'sweep':0,'mecha':0,'rsi':0,'vol':0,'pullback':0,'elliott':0,
+          'choch':0,'exp_flat':0,'micro':0,'flat_cont':0,'d1':0,'rr':0,'lev':0}
+    # R0: REGIME
     ar, dr = check_regime_tendencia(dfc, es_long, dfd1)
     if not ar:
+        sr['regime'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: REGIME filtró (%s)", side_lbl, sym, dr)
-        return None
-    d.append(dr)
+        s['score']=sc; s['max_score']=ms; s['detalles']=[dr]; s['score_report']=sr; s['_rejected']=True
+        return s
+    d.append(dr); sr['regime'] = 1
+    # R1: IMPULSO
     imp = detectar_impulso(dfp)
     if not imp:
+        sr['impulso'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: sin impulso detectado", side_lbl, sym)
-        return None
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
+    # R1: FIBONACCI
     fb = calcular_fibonacci(imp)
     if not fb or 'level_0_5' not in fb or 'level_0_618' not in fb:
+        sr['impulso'] = 1; sr['fibo_zone'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: Fibonacci incompleto (fb=%s)", side_lbl, sym, bool(fb))
-        return None
-    s['impulso']=imp; s['fibo']=fb; sc+=1; d.append(f'R1:impulso_{imp["tipo"]}_{imp["velas"]}v')
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
+    s['impulso']=imp; s['fibo']=fb; sc+=1; sr['impulso']=1; sr['fibo_zone']=1
+    d.append(f'R1:impulso_{imp["tipo"]}_{imp["velas"]}v')
     zi = min(fb['level_0_5'],fb['level_0_618']); zs = max(fb['level_0_5'],fb['level_0_618'])
     s['zona_ote_inf']=zi; s['zona_ote_sup']=zs; tol=atr*1.0
+    # R1: PRECIO EN ZONA OTE
     if not (zi-tol <= pa <= zs+tol):
+        sr['fibo_zone'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: precio %.4f fuera de zona OTE [%.4f-%.4f] ± tol %.4f",
             side_lbl, sym, pa, zi, zs, tol)
-        return None
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
     if zi <= pa <= zs: sc+=1; d.append('R1:en_OTE')
+    # R2: SMA100
     if len(dfp) >= 100:
         sm = _sma(dfp['close'],100).iloc[-1]
-        if not pd.isna(sm) and sma100_en_zona_ote(sm,fb,atr): sc+=1; d.append('R2:SMA100_en_OTE')
-    if adx_permite_entrada(dfp): sc+=1; d.append('R3:ADX_ok')
+        if not pd.isna(sm) and sma100_en_zona_ote(sm,fb,atr): sc+=1; sr['sma100']=1; d.append('R2:SMA100_en_OTE')
+    # R3: ADX
+    if adx_permite_entrada(dfp): sc+=1; sr['adx']=1; d.append('R3:ADX_ok')
+    # R4: USDT.D
     if es_long:
-        if check_usdtd_resistencia_long(): sc+=1; d.append('R4:USDT.D_resistencia')
+        if check_usdtd_resistencia_long(): sc+=1; sr['usdtd']=1; d.append('R4:USDT.D_resistencia')
     else:
-        if check_usdtd_resistencia_short(): sc+=1; d.append('R4:USDT.D_debil')
+        if check_usdtd_resistencia_short(): sc+=1; sr['usdtd']=1; d.append('R4:USDT.D_debil')
+    # R5: BTC.D
     bdb = va.get('btcd_bajista',False) if va else False
     if 'BTC' in sym:
         btu = False
         if len(dfp)>=20:
             sm20 = _sma(dfp['close'],20)
             if not sm20.isna().all(): btu = bool(float(dfp['close'].iloc[-1])>float(sm20.iloc[-1]))
-        if btu: sc+=1; d.append('R5:BTC_trend_up')
+        if btu: sc+=1; sr['btcd']=1; d.append('R5:BTC_trend_up')
         else: d.append('R5:BTC_trend_down')
     else:
-        if bdb: sc+=1; d.append('R5:BTC.D_baja_alt_ok')
+        if bdb: sc+=1; sr['btcd']=1; d.append('R5:BTC.D_baja_alt_ok')
         else: d.append('R5:BTC.D_sube_bloquea_alt')
+    # R6: FVG
     fvs = detectar_fvg(dfp)
     fez = [f for f in fvs if f['gap_sup']>=zi and f['gap_inf']<=zs]
     s['fvgs']=fez
-    if fez: sc+=1; d.append(f'R6:FVG_{len(fez)}')
+    if fez: sc+=1; sr['fvg']=1; d.append(f'R6:FVG_{len(fez)}')
+    # R7: ORDER BLOCKS
     obs = detectar_order_blocks(dfp)
     oez = [o for o in obs if o['low']<=zs and o['high']>=zi]
     s['obs']=oez
-    if oez: sc+=1; d.append(f'R7:OB_{len(oez)}')
+    if oez: sc+=1; sr['ob']=1; d.append(f'R7:OB_{len(oez)}')
+    # R8: SWEEP
     sws = detectar_sweep(dfp); s['sweeps']=sws
     if sws:
         sok = any((s2['tipo']=='sweep_bajista_long' and es_long) or (s2['tipo']=='sweep_alcista_short' and not es_long) for s2 in sws)
-        if sok: sc+=1; d.append('R8:Sweep')
+        if sok: sc+=1; sr['sweep']=1; d.append('R8:Sweep')
+    # R9: MECHA / ABSORCION
     mk, md = validar_mecha_absorcion_en_zona(dfp, zi, zs, es_long, atr)
     if not mk:
+        sr['mecha'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: mecha absorción falló (%s)", side_lbl, sym, md)
-        return None
-    sc+=1; d.append(f'R9:Mecha_{md}')
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
+    sc+=1; sr['mecha']=1; d.append(f'R9:Mecha_{md}')
+    # F5: RSI
     ro, rv = filtro_rsi(dfp, es_long)
-    if ro: sc+=1; d.append(f'F5:RSI_{rv:.0f}')
+    if ro: sc+=1; sr['rsi']=1; d.append(f'F5:RSI_{rv:.0f}')
+    # F5: VOLUMEN
     vo, vr = validar_volumen(dfp, es_long)
-    if vo: sc+=1; d.append(f'F5:Vol_{vr:.1f}x')
+    if vo: sc+=1; sr['vol']=1; d.append(f'F5:Vol_{vr:.1f}x')
+    # F6: PULLBACK
     nf = zs if es_long else zi
-    if detectar_pullback_confirmado(dfp, nf, es_long): sc+=1; d.append('F6:Pullback_ok')
+    if detectar_pullback_confirmado(dfp, nf, es_long): sc+=1; sr['pullback']=1; d.append('F6:Pullback_ok')
+    # F11: ELLIOTT
     el = detectar_estructura_elliott_v3(dfp); s['elliott']=el
-    if el['fase']=='estructura_5_ondas': sc+=1; d.append('F11:Elliott_5ondas')
+    if el['fase']=='estructura_5_ondas': sc+=1; sr['elliott']=1; d.append('F11:Elliott_5ondas')
+    # D3: CHoCH
     ch = detectar_choch(dfp, es_long); s['choch']=ch
-    if ch.get('choch',False): sc+=1; d.append(f'D3:{ch["tipo"]}')
+    if ch.get('choch',False): sc+=1; sr['choch']=1; d.append(f'D3:{ch["tipo"]}')
+    # D2: EXPANDED FLAT / DOUBLE KILL
     ef = detectar_expanded_flat(dfp, es_long); s['expanded_flat']=ef
-    if ef.get('encontrado',False): sc+=2; d.append(f'D2:DoubleKill_{ef["tipo"]}')
+    if ef.get('encontrado',False): sc+=2; sr['exp_flat']=2; d.append(f'D2:DoubleKill_{ef["tipo"]}')
+    # D4: MICROFRACTALIDAD
     if dfm is not None and len(dfm)>0:
         mi = verificar_microfractalidad(dfm); s['microfractal']=mi
         if mi.get('completo',False):
             if (es_long and mi.get('tipo')=='impulsivo_alcista') or (not es_long and mi.get('tipo')=='impulsivo_bajista'):
-                sc+=1; d.append(f'D4:micro_{mi["tipo"]}')
-    if detectar_flat_continuacion(dfp, es_long): sc+=1; d.append('D5:flat_continuacion')
+                sc+=1; sr['micro']=1; d.append(f'D4:micro_{mi["tipo"]}')
+    # D5: FLAT CONTINUACION
+    if detectar_flat_continuacion(dfp, es_long): sc+=1; sr['flat_cont']=1; d.append('D5:flat_continuacion')
+    # F10: D1 ESTRUCTURAL
     de = dfd1 if (dfd1 is not None and len(dfd1)>=10) else dfc
-    if validar_estructura_d1(de, pa, 'long' if es_long else 'short'): sc+=1; d.append('F10:D1_ok')
+    if validar_estructura_d1(de, pa, 'long' if es_long else 'short'): sc+=1; sr['d1']=1; d.append('F10:D1_ok')
     else:
+        sr['d1'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: D1 estructura inválida", side_lbl, sym)
-        return None
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
+    # F3: LEVERAGE + SL
     alv, lp = calcular_apalancamiento_optimo(pa, dfp, zi, zs, es_long, sws, sym)
     sl = pa-(atr*LOBO_SL_ATR) if es_long else pa+(atr*LOBO_SL_ATR); s['sl_price']=sl
     if es_long:
@@ -987,50 +1026,97 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
     else:
         lm = sl+atr*1.0
         if lp <= sl: lp = lm
+    # F12b: TPs
     t1,t2,t3,rr,ds = calcular_tps_en_zonas(pa, atr, fez, oez, es_long, leverage=alv, slp=sl)
     s['tp1_price']=t1; s['tp2_price']=t2; s['tp3_price']=t3; s['rr']=rr; s['dist_sl']=ds
     if ds > 0:
         t1v,t2v,t3v = abs(t1-pa),abs(t2-pa),abs(t3-pa)
         rrp = (0.40*t1v+0.30*t2v+0.30*t3v)/ds
     else: rrp = rr
+    # R:R MINIMO
     if rrp < 1.0:
+        sr['rr'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: R:R promedio %.2f < 1.0", side_lbl, sym, rrp)
-        return None
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
     rr = rrp
-    if rr >= 1.2: sc+=1; d.append(f'R13:R:R_{rr:.2f}')
+    if rr >= 1.2: sc+=1; sr['rr']=1; d.append(f'R13:R:R_{rr:.2f}')
+    # F3: SIZING
     rc = ce*LOBO_RISK_PCT; ds2 = abs(pa-sl)/pa
     if ds2 <= 0:
+        sr['lev'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: dist_SL/precio = 0", side_lbl, sym)
-        return None
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
     pv = rc/ds2; mmx = ce*0.90
     if alv > 0: pv = min(pv, mmx*alv)
     mmin = MIN_ORDER_USDT/alv if alv > 0 else MIN_ORDER_USDT
     if ce < mmin:
+        sr['lev'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: capital elegible %.2f < minimo %.2f", side_lbl, sym, ce, mmin)
-        return None
+        s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+        return s
     # F12a: pv mínimo para que TP1 (40%) cumpla MIN_ORDER_USDT individual
     min_pv_for_tp = MIN_ORDER_USDT / max(TP1_CLOSE_PCT, 0.01)
     if pv < min_pv_for_tp:
-        # Verificar si podemos cubrir el mínimo sin exceder riesgo 10%
         margin_needed = min_pv_for_tp / alv if alv > 0 else min_pv_for_tp
         risk_if_forced = (min_pv_for_tp * ds2) / max(ce, 0.01) * 100
         if margin_needed <= ce * 0.90 and risk_if_forced <= 15.0:
             pv = min_pv_for_tp
         else:
+            sr['lev'] = -1
             log.debug("[SIZING] %s pv=%.2f < min_tp=%.2f (ce=%.2f riskWould=%.1f%%) — skip",
                 sym, pv, min_pv_for_tp, ce, risk_if_forced)
-            return None
+            s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
+            return s
     qty = pv/pa; mr = pv/alv if alv > 0 else 0
     s['qty']=qty; s['pos_value']=pv; s['liq_price']=lp; s['size_usdt']=mr
     s['leverage_calculado']=alv; s['riesgo_real_pct']=round((pv*ds2)/max(ce,0.01)*100,2)
-    sc+=1; d.append(f'F3:lev{alv:.0f}x_mrg{mr:.2f}')
+    sc+=1; sr['lev']=1; d.append(f'F3:lev{alv:.0f}x_mrg{mr:.2f}')
+    # ── SCORE MINIMO ──
+    s['score']=sc; s['max_score']=ms; s['detalles']=d; s['fvg_usado']=fez[0] if fez else None
+    s['score_report']=sr
     if sc < LOBO_SCORE_MIN:
+        s['_rejected']=True
         log.debug("[EVAL-%s] %s RECHAZO: score %d/%d < min %d | %s",
             side_lbl, sym, sc, ms, LOBO_SCORE_MIN, ' | '.join(d))
-        return None
-    s['score']=sc; s['max_score']=ms; s['detalles']=d; s['fvg_usado']=fez[0] if fez else None
-    log.info("[EVAL-%s] %s SEÑAL OK score=%d/%d | %s", side_lbl, sym, sc, ms, ' | '.join(d))
+    else:
+        s['_rejected']=False
+        log.info("[EVAL-%s] %s SEÑAL OK score=%d/%d | %s", side_lbl, sym, sc, ms, ' | '.join(d))
     return s
+
+# ── 17b. SCORE REPORT POR SIMBOLO ──
+SCORE_LABELS = {
+    'regime':'REGIME','impulso':'Impulso','fibo_zone':'Fibo+ZonaOTE',
+    'sma100':'SMA100','adx':'ADX','usdtd':'USDT.D','btcd':'BTC.D',
+    'fvg':'FVG','ob':'OrderBlock','sweep':'Sweep','mecha':'MechaAbs',
+    'rsi':'RSI','vol':'Volumen','pullback':'Pullback','elliott':'Elliott',
+    'choch':'CHoCH','exp_flat':'ExpFlat','micro':'MicroFrac',
+    'flat_cont':'FlatCont','d1':'D1_Estruct','rr':'R:R','lev':'Lev sizing'
+}
+
+def log_score_report(sym, es_long, result):
+    """Log detallado de scores por símbolo (tomado o rechazado)."""
+    if not result or not isinstance(result, dict):
+        log.info("[SCORE-?] %s %s | result_invalid=%s", sym, 'LONG' if es_long else 'SHORT', type(result))
+        return
+    side = 'LONG' if es_long else 'SHORT'
+    sc = result.get('score', 0)
+    ms = result.get('max_score', 22)
+    sr = result.get('score_report', {}) or {}
+    d = result.get('detalles', []) or []
+    rejected = result.get('_rejected', True)
+    status = 'TOMADA' if not rejected else 'RECHAZADA'
+    won = [k for k, v in sr.items() if v > 0]
+    lost = [k for k, v in sr.items() if v < 0]
+    off  = [k for k, v in sr.items() if v == 0]
+    won_s = '+'.join(SCORE_LABELS.get(k, k) for k in won) if won else 'ninguno'
+    lost_s = '+'.join(SCORE_LABELS.get(k, k) for k in lost) if lost else 'ninguno'
+    off_s  = '+'.join(SCORE_LABELS.get(k, k) for k in off) if off else 'todos'
+    log.info("[SCORE-%s] %s %s | score=%d/%d | +%s | -%s | off=%s | %s",
+        status, sym, side, sc, ms, won_s, lost_s, off_s,
+        ' | '.join(d) if d else 'sin_detalle')
+
 
 # ── 18. TELEGRAM ──
 def send_telegram(msg):
@@ -1356,14 +1442,67 @@ def _sl_desde_posicion(pos, side, ep):
     return sl
 
 def _cerrar_pos_real(sym, side, qty):
+    """Cierra posición real con verificación. Retorna True solo si confirmado."""
     cs = 'sell' if side=='long' else 'buy'
-    try:
-        exchange.create_order(sym,'market',cs,qty,params={'marginCoin':'USDT','marginMode':'isolated','tradeSide':'close'})
+    # Intentar con tradeSide (hedge mode) Y reduceOnly (one-way mode)
+    params_base = {'marginCoin':'USDT','marginMode':'isolated'}
+    for attempt in range(3):
+        try:
+            # Primer intento: hedge mode (tradeSide)
+            resp = exchange.create_order(sym,'market',cs,qty,
+                params={**params_base,'tradeSide':'close'})
+            log.info("[REAL] %s close order sent (hedge), resp=%s", sym,
+                     str(resp)[:200] if resp else 'None')
+            # Verificar que se ejecutó
+            if _verify_position_closed(sym):
+                return True
+            # Si no se cerró, intentar con reduceOnly (one-way mode)
+            log.warning("[REAL] %s hedge close no confirmado, intentando reduceOnly", sym)
+            resp2 = exchange.create_order(sym,'market',cs,qty,
+                params={**params_base,'reduceOnly':True})
+            log.info("[REAL] %s close order sent (reduceOnly), resp=%s", sym,
+                     str(resp2)[:200] if resp2 else 'None')
+            if _verify_position_closed(sym):
+                return True
+            # Si aún no, intentar closePosition de ccxt
+            log.warning("[REAL] %s reduceOnly no confirmado, intentando closePosition", sym)
+            try:
+                exchange.close_position(sym)
+                if _verify_position_closed(sym):
+                    return True
+            except Exception as ecp:
+                log.warning("[REAL] %s closePosition fallo: %s", sym, ecp)
+        except ccxt.ExchangeError as e:
+            es = str(e)
+            if '22002' in es or 'No position' in es or 'no position' in es.lower():
+                log.info("[REAL] %s ya cerrada en exchange (code match): %s", sym, es[:100])
+                return True
+            log.error("[REAL] %s ExchangeError att %d: %s", sym, attempt+1, es[:200])
+            if attempt < 2: time.sleep(2 ** attempt)
+        except Exception as e:
+            log.error("[REAL] %s Error att %d: %s", sym, attempt+1, str(e)[:200])
+            if attempt < 2: time.sleep(2 ** attempt)
+    # Verificación final
+    if _verify_position_closed(sym):
+        log.info("[REAL] %s confirmada cerrada tras reintentos", sym)
         return True
-    except ccxt.ExchangeError as e:
-        if '22002' in str(e) or 'No position' in str(e): return True
-        log.error("[REAL] %s ExchangeError: %s",sym,e); return False
-    except Exception as e: log.error("[REAL] %s Error: %s",sym,e); return False
+    log.error("[REAL] %s FALLO cerrar tras 3 intentos — POSICIÓN ABIERTA", sym)
+    return False
+
+def _verify_position_closed(sym, max_wait=5):
+    """Verifica que la posición ya no existe en el exchange."""
+    try:
+        time.sleep(max_wait)
+        for pos in exchange.fetch_positions([sym]):
+            ct = float(pos.get('contracts', 0) or 0)
+            if ct > 0:
+                log.warning("[VERIFY] %s aún abierta: ct=%.6f", sym, ct)
+                return False
+        log.info("[VERIFY] %s cerrada confirmada", sym)
+        return True
+    except Exception as e:
+        log.warning("[VERIFY] %s error verificando: %s", sym, e)
+        return False  # No asumir cerrada
 
 def _update_sl_to_be(sym, entry, nsl, reason='BE'):
     if not exchange or PAPER_TRADE:
@@ -1387,8 +1526,13 @@ def _update_sl_to_be(sym, entry, nsl, reason='BE'):
     _cancel_sl_plans(sym)
     ok = _place_sl_plan(sym, nsl, rq, side)
     if not ok:
-        _cerrar_pos_real(sym, side, rq); _full_cleanup(sym)
-        send_telegram(f"❌ *{sym} CERRADA* ({reason} fallo)")
+        closed = _cerrar_pos_real(sym, side, rq)
+        _full_cleanup(sym)
+        if not closed:
+            log.error("[ADOP] %s FALLO cerrar SL plan fallo — POSICION ABIERTA", sym)
+            send_telegram(f"❌ *{sym} NO CERRADA* (SL plan fallo — intervenir manual)")
+        else:
+            send_telegram(f"❌ *{sym} CERRADA* ({reason} fallo)")
         return False
     entry['sl_price']=nsl
     if reason=='BE': ALERTS_HISTORY[f"{sym}_be_price"]=nsl
@@ -1436,29 +1580,35 @@ def adoptar_posiciones_exchange():
                 if slp is not None: ls2=ct; sl_pl=True
                 else:
                     log.warning("[ADOP] %s SIN SL plans ni SL en posición — cerrando por seguridad", sym)
-                    try:
-                        _cerrar_pos_real(sym, sd, ct)
+                    closed = _cerrar_pos_real(sym, sd, ct)
+                    if closed:
                         log.info("[ADOP] %s CERRADA OK (sin SL plans)", sym)
                         send_telegram(f"⚠️ *{sym} CERRADA* (huérfana sin SL)")
-                    except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
+                    else:
+                        log.error("[ADOP] %s FALLO CERRAR (sin SL plans) — POSICIÓN ABIERTA", sym)
+                        send_telegram(f"❌ *{sym} NO CERRADA* (huérfana sin SL — intervenir manual)")
                     continue
             else: ls2 = sum(p['size'] for p in lo)
             if abs(ls2-ct) > ct*0.05:
                 log.warning("[ADOP] %s desajuste SL qty: plans=%.4f pos=%.4f diff=%.1f%% — cerrando",
                     sym, ls2, ct, abs(ls2-ct)/max(ct,1)*100)
-                try:
-                    _cerrar_pos_real(sym, sd, ct)
+                closed = _cerrar_pos_real(sym, sd, ct)
+                if closed:
                     log.info("[ADOP] %s CERRADA OK (desajuste SL qty)", sym)
                     send_telegram(f"⚠️ *{sym} CERRADA* (desajuste SL qty)")
-                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
+                else:
+                    log.error("[ADOP] %s FALLO CERRAR (desajuste SL qty) — POSICIÓN ABIERTA", sym)
+                    send_telegram(f"❌ *{sym} NO CERRADA* (desajuste SL qty — intervenir manual)")
                 continue
             if not pr:
                 log.warning("[ADOP] %s SIN TP plans — cerrando por seguridad", sym)
-                try:
-                    _cerrar_pos_real(sym, sd, ct)
+                closed = _cerrar_pos_real(sym, sd, ct)
+                if closed:
                     log.info("[ADOP] %s CERRADA OK (sin TP plans)", sym)
                     send_telegram(f"⚠️ *{sym} CERRADA* (huérfana sin TP)")
-                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
+                else:
+                    log.error("[ADOP] %s FALLO CERRAR (sin TP plans) — POSICIÓN ABIERTA", sym)
+                    send_telegram(f"❌ *{sym} NO CERRADA* (huérfana sin TP — intervenir manual)")
                 continue
             sl = slp if sl_pl else (min(lo,key=lambda p:p['triggerPrice'])['triggerPrice'] if sd=='long' else max(lo,key=lambda p:p['triggerPrice'])['triggerPrice'])
             np2 = len(pr)
@@ -1467,20 +1617,24 @@ def adoptar_posiciones_exchange():
             elif np2==1: pl,oq = 2, ct/(1-TP1_CLOSE_PCT-TP2_CLOSE_PCT)
             else:
                 log.warning("[ADOP] %s TP plans inesperados: %d — cerrando", sym, np2)
-                try:
-                    _cerrar_pos_real(sym, sd, ct)
+                closed = _cerrar_pos_real(sym, sd, ct)
+                if closed:
                     log.info("[ADOP] %s CERRADA OK (TP plans inesperados)", sym)
                     send_telegram(f"⚠️ *{sym} CERRADA* (TP plans inesperados: {np2})")
-                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
+                else:
+                    log.error("[ADOP] %s FALLO CERRAR (TP plans inesperados) — POSICION ABIERTA", sym)
+                    send_telegram(f"❌ *{sym} NO CERRADA* (TP plans inesperados — intervenir manual)")
                 continue
             if abs(sum(p['size'] for p in pr)-ct) > ct*0.05:
                 log.warning("[ADOP] %s desajuste TP qty: plans=%.4f pos=%.4f — cerrando",
                     sym, sum(p['size'] for p in pr), ct)
-                try:
-                    _cerrar_pos_real(sym, sd, ct)
+                closed = _cerrar_pos_real(sym, sd, ct)
+                if closed:
                     log.info("[ADOP] %s CERRADA OK (desajuste TP qty)", sym)
                     send_telegram(f"⚠️ *{sym} CERRADA* (desajuste TP qty)")
-                except Exception as ex: log.error("[ADOP] Error cerrando %s: %s", sym, ex)
+                else:
+                    log.error("[ADOP] %s FALLO CERRAR (desajuste TP qty) — POSICION ABIERTA", sym)
+                    send_telegram(f"❌ *{sym} NO CERRADA* (desajuste TP qty — intervenir manual)")
                 continue
             sn = 1 if sd=='long' else -1
             pr.sort(key=lambda p:p['triggerPrice'],reverse=(sd=='short'))
@@ -1585,8 +1739,9 @@ def _tick_manage_posicion(sym, paper=False):
                     rq2 = e.get('remaining_qty',e['quantity'])
                     pnl = (mk-ep)*rq2 if sd=='long' else (ep-mk)*rq2
                     if not paper:
-                        log.warning("[MGMT] %s D1 INVALID \u2014 cerrando. pnl=%.4f", sym, pnl)
-                        _cerrar_pos_real(sym,sd,rq2)
+                        log.warning("[MGMT] %s D1 INVALID — cerrando. pnl=%.4f", sym, pnl)
+                        if not _cerrar_pos_real(sym,sd,rq2):
+                            log.error("[MGMT] %s FALLO cerrar D1_INVALID — reintento próximo ciclo", sym)
                     guardar_trade_csv(e,mk,pnl,0,pnl,'D1_INVALID','d1_estructura')
                     _full_cleanup(sym,7200); return 'continue'
         except: pass
@@ -1651,7 +1806,9 @@ def _tick_manage_posicion(sym, paper=False):
         log.info("[MGMT] %s SL HIT! mk=%.4f sl=%.4f", sym, mk, sl)
         if rq>0:
             pnl = _calc_pnl_parcial(sd,ep,rq,mk)
-            if not paper: _cerrar_pos_real(sym,sd,rq)
+            if not paper:
+                if not _cerrar_pos_real(sym,sd,rq):
+                    log.error("[MGMT] %s FALLO cerrar SL — reintento en próximo ciclo", sym)
             guardar_trade_csv(e,mk,pnl,0,pnl,'SL','sl')
         if not paper: _cancel_tp_plans(sym); _cancel_sl_plans(sym)
         _full_cleanup(sym); return 'continue'
@@ -1660,7 +1817,9 @@ def _tick_manage_posicion(sym, paper=False):
         log.info("[MGMT] %s TP3 HIT! mk=%.4f t3=%.4f", sym, mk, t3)
         if rq>0:
             pnl = _calc_pnl_parcial(sd,ep,rq,t3)
-            if not paper: _cerrar_pos_real(sym,sd,rq)
+            if not paper:
+                if not _cerrar_pos_real(sym,sd,rq):
+                    log.error("[MGMT] %s FALLO cerrar TP3 — reintento en próximo ciclo", sym)
             guardar_trade_csv(e,t3,pnl,0,pnl,'TP3','tp3')
         if not paper: _cancel_tp_plans(sym); _cancel_sl_plans(sym)
         _full_cleanup(sym); return 'continue'
@@ -1693,10 +1852,12 @@ def _tick_manage_posicion(sym, paper=False):
     if isinstance(et,datetime) and pp<0:
         if (datetime.now()-et).total_seconds()/3600 >= LOBO_TIMEOUT_HORAS:
             rq = float(e.get('remaining_qty',e.get('quantity',0)))
-            log.warning("[MGMT] %s TIMEOUT (%.1fh) \u2014 cerrando. pp=%.2f%%", sym, age_h, pp*100)
+            log.warning("[MGMT] %s TIMEOUT (%.1fh) — cerrando. pp=%.2f%%", sym, age_h, pp*100)
             if rq>0:
                 pnl = _calc_pnl_parcial(sd,ep,rq,mk)
-                if not paper: _cerrar_pos_real(sym,sd,rq)
+                if not paper:
+                    if not _cerrar_pos_real(sym,sd,rq):
+                        log.error("[MGMT] %s FALLO cerrar TIMEOUT — reintento en próximo ciclo", sym)
                 guardar_trade_csv(e,mk,pnl,0,pnl,'Timeout','timeout')
             _full_cleanup(sym); return 'continue'
     # --- Peak/Adverse tracking (compartido) ---
@@ -1882,7 +2043,9 @@ def main():
                 CONSECUTIVE_LOSSES=0
                 _shutdown_event.wait(timeout=60); continue
             h = now.hour
-            enh = (LOBO_TRADE_START_HOUR <= h < LOBO_TRADE_END_HOUR) if LOBO_TRADE_START_HOUR<=LOBO_TRADE_END_HOUR else (h>=LOBO_TRADE_START_HOUR or h<LOBO_TRADE_END_HOUR)
+            enh = True
+            if LOBO_TRADING_HOURS_ENABLED:
+                enh = (LOBO_TRADE_START_HOUR <= h < LOBO_TRADE_END_HOUR) if LOBO_TRADE_START_HOUR<=LOBO_TRADE_END_HOUR else (h>=LOBO_TRADE_START_HOUR or h<LOBO_TRADE_END_HOUR)
             if not enh:
                 _shutdown_event.wait(timeout=300); continue
             try:
@@ -1934,6 +2097,7 @@ def main():
                         log.debug("[SCAN] %s ATR=0/NaN — skip", sym)
                         continue
                     sl = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=True,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
+                    log_score_report(sym, True, sl)
                     sws = detectar_sweep(df15)
                     hs = any(s2['tipo']=='sweep_alcista_short' for s2 in sws)
                     fvs = detectar_fvg(df15)
@@ -1943,13 +2107,18 @@ def main():
                     except: rv = 50.0
                     hsc = not pd.isna(rv) and rv > LOBO_RSI_OVERBOUGHT
                     cs = hs or hsc
-                    ss = None
-                    if cs: ss = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=False,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
-                    sn = sl or ss
-                    if not sn:
+                    ss = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=False,dfm=df5m,va=va,mrd=mr,dfd1=df1d) if cs else None
+                    if ss: log_score_report(sym, False, ss)
+                    # Seleccionar mejor señal: priorizar la no rechazada
+                    if sl and not sl.get('_rejected', True):
+                        sn = sl
+                    elif ss and not ss.get('_rejected', True):
+                        sn = ss
+                    else:
                         _rej['no_signal']+=1
-                        log.debug("[SCAN] %s sin señal (long=%s short=%scs=%s hs=%s rsi=%.1f)",
-                            sym, bool(sl), bool(ss), cs, hs, rv)
+                        log.debug("[SCAN] %s sin señal (long=%s short=%s cs=%s hs=%s rsi=%.1f)",
+                            sym, not sl.get('_rejected',True) if sl else False,
+                            not ss.get('_rejected',True) if ss else False, cs, hs, rv)
                         continue
                     es_long=sn['es_long']; snn='LARGO' if es_long else 'CORTO'
                     slp=sn['sl_price']; t1p=sn['tp1_price']; t2p=sn['tp2_price']; t3p=sn['tp3_price']
@@ -2050,12 +2219,16 @@ def main():
                             time.sleep(2**(_fatt+1))
                     if rq2 is None or rq2 <= 0:
                         log.error("No se pudo leer posición real %s — abortando",sym)
-                        try: _cerrar_pos_real(sym,tsd,qty)
+                        try:
+                            if not _cerrar_pos_real(sym,tsd,qty):
+                                send_telegram(f"❌ {sym} ABORTADA + NO CERRADA — intervenir manual")
                         except: pass
                         _full_cleanup(sym); send_telegram(f"❌ {sym} ABORTADA — fetch_positions fallo"); continue
                     sl_ok = _place_sl_plan(sym,slp,rq2,tsd)
                     if not sl_ok:
-                        _cerrar_pos_real(sym,tsd,rq2); _full_cleanup(sym)
+                        if not _cerrar_pos_real(sym,tsd,rq2):
+                            send_telegram(f"❌ {sym} ABORTADA + NO CERRADA — intervenir manual")
+                        _full_cleanup(sym)
                         send_telegram(f"❌ {sym} ABORTADA — SL fallo"); continue
                     PARTIAL_LEVEL[sym]=0; TRADE_ENTRIES[sym]=er
                     _save_trade_entries(); _save_partial_level()
