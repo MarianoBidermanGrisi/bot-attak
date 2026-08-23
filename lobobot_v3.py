@@ -1444,44 +1444,49 @@ def _sl_desde_posicion(pos, side, ep):
 def _cerrar_pos_real(sym, side, qty):
     """Cierra posición real con verificación. Retorna True solo si confirmado."""
     cs = 'sell' if side=='long' else 'buy'
-    # Intentar con tradeSide (hedge mode) Y reduceOnly (one-way mode)
     params_base = {'marginCoin':'USDT','marginMode':'isolated'}
     for attempt in range(3):
         try:
-            # Primer intento: hedge mode (tradeSide)
-            resp = exchange.create_order(sym,'market',cs,qty,
-                params={**params_base,'tradeSide':'close'})
-            log.info("[REAL] %s close order sent (hedge), resp=%s", sym,
-                     str(resp)[:200] if resp else 'None')
-            # Verificar que se ejecutó
-            if _verify_position_closed(sym):
-                return True
-            # Si no se cerró, intentar con reduceOnly (one-way mode)
-            log.warning("[REAL] %s hedge close no confirmado, intentando reduceOnly", sym)
-            resp2 = exchange.create_order(sym,'market',cs,qty,
-                params={**params_base,'reduceOnly':True})
-            log.info("[REAL] %s close order sent (reduceOnly), resp=%s", sym,
-                     str(resp2)[:200] if resp2 else 'None')
-            if _verify_position_closed(sym):
-                return True
-            # Si aún no, intentar closePosition de ccxt
-            log.warning("[REAL] %s reduceOnly no confirmado, intentando closePosition", sym)
+            # Método 1: hedge mode (tradeSide)
+            try:
+                resp = exchange.create_order(sym,'market',cs,qty,
+                    params={**params_base,'tradeSide':'close'})
+                log.info("[REAL] %s hedge close sent, resp=%s", sym, str(resp)[:150])
+                if _verify_position_closed(sym): return True
+            except ccxt.ExchangeError as e1:
+                e1s = str(e1)
+                if '22002' in e1s or 'No position' in e1s.lower():
+                    log.info("[REAL] %s hedge mode 22002 — probando reduceOnly", sym)
+                else:
+                    log.warning("[REAL] %s hedge error: %s", sym, e1s[:150])
+            # Método 2: reduceOnly (one-way mode)
+            try:
+                resp2 = exchange.create_order(sym,'market',cs,qty,
+                    params={**params_base,'reduceOnly':True})
+                log.info("[REAL] %s reduceOnly close sent, resp=%s", sym, str(resp2)[:150])
+                if _verify_position_closed(sym): return True
+            except ccxt.ExchangeError as e2:
+                e2s = str(e2)
+                if '22002' in e2s or 'No position' in e2s.lower():
+                    log.info("[REAL] %s reduceOnly 22002 — probando closePosition", sym)
+                else:
+                    log.warning("[REAL] %s reduceOnly error: %s", sym, e2s[:150])
+            # Método 3: closePosition de ccxt
             try:
                 exchange.close_position(sym)
-                if _verify_position_closed(sym):
-                    return True
-            except Exception as ecp:
-                log.warning("[REAL] %s closePosition fallo: %s", sym, ecp)
-        except ccxt.ExchangeError as e:
-            es = str(e)
-            if '22002' in es or 'No position' in es or 'no position' in es.lower():
-                log.info("[REAL] %s ya cerrada en exchange (code match): %s", sym, es[:100])
-                return True
-            log.error("[REAL] %s ExchangeError att %d: %s", sym, attempt+1, es[:200])
-            if attempt < 2: time.sleep(2 ** attempt)
+                if _verify_position_closed(sym): return True
+            except ccxt.ExchangeError as e3:
+                e3s = str(e3)
+                if '22002' in e3s or 'No position' in e3s.lower():
+                    log.info("[REAL] %s closePosition 22002 — verificando estado", sym)
+                    if _verify_position_closed(sym): return True
+                else:
+                    log.warning("[REAL] %s closePosition error: %s", sym, e3s[:150])
+            except Exception as e3:
+                log.warning("[REAL] %s closePosition exception: %s", sym, str(e3)[:150])
         except Exception as e:
-            log.error("[REAL] %s Error att %d: %s", sym, attempt+1, str(e)[:200])
-            if attempt < 2: time.sleep(2 ** attempt)
+            log.error("[REAL] %s Error inesperado att %d: %s", sym, attempt+1, str(e)[:200])
+        if attempt < 2: time.sleep(2 ** attempt)
     # Verificación final
     if _verify_position_closed(sym):
         log.info("[REAL] %s confirmada cerrada tras reintentos", sym)
@@ -2077,7 +2082,7 @@ def main():
             try: od = fetch_all_ohlcv(ts2)
             except Exception as e: log.error("Error OHLCV: %s",e); _shutdown_event.wait(timeout=60); continue
             va = check_btcd_elliott_ventana_altcoins()
-            _rej = {'no_data':0,'no_signal':0,'tp_guard':0,'entered':0}
+            _rej = {'no_data':0,'no_signal':0,'tp_guard':0,'entered':0,'no_new_candle':0,'atr_zero':0}
             for sym in ts2:
                 if sym in bs or len(bs)>=LOBO_MAX_POSITIONS: continue
                 if sym in COOLDOWNS:
@@ -2085,16 +2090,17 @@ def main():
                     else: del COOLDOWNS[sym]
                 try:
                     o15,o4h,o5m,o1d = od.get(sym,(None,None,None,None))
-                    if not o15 or not o4h: _rej['no_data']+=1; continue
-                    if len(o15)<50 or len(o4h)<10: _rej['no_data']+=1; continue
+                    if not o15 or not o4h: _rej['no_data']+=1; log.info("[SCAN] %s SKIP: sin datos OHLCV", sym); continue
+                    if len(o15)<50 or len(o4h)<10: _rej['no_data']+=1; log.info("[SCAN] %s SKIP: velas insuficientes (15m=%d 4h=%d)", sym, len(o15), len(o4h)); continue
                     df15 = pd.DataFrame(o15[:-1],columns=['timestamp','open','high','low','close','volume'])
                     df4h = pd.DataFrame(o4h[:-1],columns=['timestamp','open','high','low','close','volume'])
                     df5m = pd.DataFrame(o5m[:-1],columns=['timestamp','open','high','low','close','volume']) if o5m and len(o5m)>1 else None
                     df1d = pd.DataFrame(o1d[:-1],columns=['timestamp','open','high','low','close','volume']) if o1d and len(o1d)>1 else None
-                    if not es_nueva_vela_principal(df15,sym): continue
+                    if not es_nueva_vela_principal(df15,sym): _rej['no_new_candle']+=1; log.info("[SCAN] %s SKIP: sin vela 15m nueva", sym); continue
                     pa = float(df15['close'].iloc[-1]); av = float(_atr(df15,LOBO_ATR_PERIOD).iloc[-1])
                     if av==0 or pd.isna(av):
-                        log.debug("[SCAN] %s ATR=0/NaN — skip", sym)
+                        _rej['atr_zero']+=1
+                        log.info("[SCAN] %s SKIP: ATR=0/NaN", sym)
                         continue
                     sl = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=True,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
                     log_score_report(sym, True, sl)
@@ -2248,8 +2254,8 @@ def main():
                         f"RR:{rr:.2f} Score:{sc}/{ms2}")
                 except Exception as e: log.debug("Error %s: %s",sym,e); continue
             scan_dur = time.time() - _LAST_SCAN_TIME
-            log.info("Scan completado en %.0fs: %d símbolos | sin_data=%d sin_señal=%d tp_guard=%d entradas=%d",
-                scan_dur, len(ts2), _rej['no_data'], _rej['no_signal'], _rej['tp_guard'], _rej['entered'])
+            log.info("Scan completado en %.0fs: %d símbolos | sin_data=%d sin_vela=%d atr_zero=%d sin_señal=%d tp_guard=%d entradas=%d",
+                scan_dur, len(ts2), _rej['no_data'], _rej['no_new_candle'], _rej['atr_zero'], _rej['no_signal'], _rej['tp_guard'], _rej['entered'])
             _shutdown_event.wait(timeout=60)
         except Exception as e: log.error("Error ciclo: %s",e,exc_info=True); _shutdown_event.wait(timeout=60)
     _graceful_shutdown()
