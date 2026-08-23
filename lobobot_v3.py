@@ -337,7 +337,8 @@ def check_usdtd_resistencia_long():
     return True
 
 # ── DETECCION DE PATRONES ──
-def detectar_impulso(df):
+def detectar_impulso(df, es_long=None):
+    """Detecta impulso. es_long=None (cualquier dirección), True (solo alcista), False (solo bajista)."""
     min_v = LOBO_IMPULSO_MIN_VELAS; max_v = min(LOBO_IMPULSO_MAX_VELAS, len(df)-2)
     n = len(df)
     for length in range(min(max_v, n-1), min_v-1, -1):
@@ -348,7 +349,12 @@ def detectar_impulso(df):
         p0, p1 = float(tramo['close'].iloc[0]), float(tramo['close'].iloc[-1])
         pend = (p1-p0)/p0 if p0 > 0 else 0
         if abs(pend) < LOBO_IMPULSO_PEND_MIN: continue
-        alcista = pend > 0; diff_total = abs(p1-p0); max_retro = diff_total * 0.382
+        alcista = pend > 0
+        # Filtrar dirección según es_long
+        if es_long is not None:
+            if es_long and not alcista: continue   # LONG necesita impulso alcista
+            if not es_long and alcista: continue   # SHORT necesita impulso bajista
+        diff_total = abs(p1-p0); max_retro = diff_total * 0.382
         ok_velas = 0; total_velas = len(tramo)-1
         for j in range(1, len(tramo)):
             c0, c1 = float(tramo['close'].iloc[j-1]), float(tramo['close'].iloc[j])
@@ -926,8 +932,8 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
         s['score']=sc; s['max_score']=ms; s['detalles']=[dr]; s['score_report']=sr; s['_rejected']=True
         return s
     d.append(dr); sr['regime'] = 1
-    # R1: IMPULSO
-    imp = detectar_impulso(dfp)
+    # R1: IMPULSO (filtrado por dirección)
+    imp = detectar_impulso(dfp, es_long)
     if not imp:
         sr['impulso'] = -1
         log.debug("[EVAL-%s] %s RECHAZO: sin impulso detectado", side_lbl, sym)
@@ -973,16 +979,28 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
         if btu: sc+=1; sr['btcd']=1; d.append('R5:BTC_trend_up')
         else: d.append('R5:BTC_trend_down')
     else:
-        if bdb: sc+=1; sr['btcd']=1; d.append('R5:BTC.D_baja_alt_ok')
-        else: d.append('R5:BTC.D_sube_bloquea_alt')
-    # R6: FVG
+        if es_long:
+            # LONG: BTC.D baja = bueno para altcoins
+            if bdb: sc+=1; sr['btcd']=1; d.append('R5:BTC.D_baja_alt_ok')
+            else: d.append('R5:BTC.D_sube_bloquea_alt')
+        else:
+            # SHORT: BTC.D sube = bueno (dinero sale de alts hacia BTC)
+            if not bdb: sc+=1; sr['btcd']=1; d.append('R5:BTC.D_sube_alt_baja_ok')
+            else: d.append('R5:BTC.D_baja_no_bloquea_short')
+    # R6: FVG (filtrado por dirección)
     fvs = detectar_fvg(dfp)
-    fez = [f for f in fvs if f['gap_sup']>=zi and f['gap_inf']<=zs]
+    if es_long:
+        fez = [f for f in fvs if f['tipo']=='alcista' and f['gap_sup']>=zi and f['gap_inf']<=zs]
+    else:
+        fez = [f for f in fvs if f['tipo']=='bajista' and f['gap_sup']>=zi and f['gap_inf']<=zs]
     s['fvgs']=fez
     if fez: sc+=1; sr['fvg']=1; d.append(f'R6:FVG_{len(fez)}')
-    # R7: ORDER BLOCKS
+    # R7: ORDER BLOCKS (filtrado por dirección)
     obs = detectar_order_blocks(dfp)
-    oez = [o for o in obs if o['low']<=zs and o['high']>=zi]
+    if es_long:
+        oez = [o for o in obs if o['tipo']=='alcista' and o['low']<=zs and o['high']>=zi]
+    else:
+        oez = [o for o in obs if o['tipo']=='bajista' and o['low']<=zs and o['high']>=zi]
     s['obs']=oez
     if oez: sc+=1; sr['ob']=1; d.append(f'R7:OB_{len(oez)}')
     # R8: SWEEP
