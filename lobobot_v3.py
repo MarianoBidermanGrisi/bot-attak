@@ -1442,50 +1442,59 @@ def _sl_desde_posicion(pos, side, ep):
     return sl
 
 def _cerrar_pos_real(sym, side, qty):
-    """Cierra posición real con verificación. Retorna True solo si confirmado."""
+    """Cierra posición real con verificación. Retorna True solo si confirmado.
+    Flujos: hedge (posSide) → reduceOnly (one-way) → closePosition (ccxt)"""
     cs = 'sell' if side=='long' else 'buy'
+    ps = side  # posSide en hedge mode: 'long' o 'short'
     params_base = {'marginCoin':'USDT','marginMode':'isolated'}
     for attempt in range(3):
+        closed = False
+        # Método 1: hedge mode — requiere tradeSide:'close' + posSide
         try:
-            # Método 1: hedge mode (tradeSide)
-            try:
-                resp = exchange.create_order(sym,'market',cs,qty,
-                    params={**params_base,'tradeSide':'close'})
-                log.info("[REAL] %s hedge close sent, resp=%s", sym, str(resp)[:150])
+            resp = exchange.create_order(sym,'market',cs,qty,
+                params={**params_base,'tradeSide':'close','posSide':ps})
+            log.info("[REAL] %s hedge OK, resp=%s", sym, str(resp)[:150])
+            closed = True
+        except ccxt.ExchangeError as e1:
+            e1s = str(e1)
+            if '22002' in e1s or 'No position' in e1s.lower():
+                log.info("[REAL] %s hedge 22002 — sin posición hedge, probando reduceOnly", sym)
+            else:
+                log.warning("[REAL] %s hedge error: %s", sym, e1s[:150])
+        except Exception as e1:
+            log.warning("[REAL] %s hedge exception: %s", sym, str(e1)[:100])
+        if closed and _verify_position_closed(sym): return True
+        # Método 2: reduceOnly (one-way mode) — falla en hedge mode, pero intentar
+        try:
+            resp2 = exchange.create_order(sym,'market',cs,qty,
+                params={**params_base,'reduceOnly':True})
+            log.info("[REAL] %s reduceOnly OK, resp=%s", sym, str(resp2)[:150])
+            closed = True
+        except ccxt.ExchangeError as e2:
+            e2s = str(e2)
+            if '22002' in e2s or 'No position' in e2s.lower():
+                log.info("[REAL] %s reduceOnly 22002 — probando closePosition", sym)
+            elif '40774' in e2s or 'unilateral' in e2s.lower():
+                log.info("[REAL] %s reduceOnly no disponible (hedge mode account)", sym)
+            else:
+                log.warning("[REAL] %s reduceOnly error: %s", sym, e2s[:150])
+        except Exception as e2:
+            log.warning("[REAL] %s reduceOnly exception: %s", sym, str(e2)[:100])
+        if closed and _verify_position_closed(sym): return True
+        # Método 3: closePosition de ccxt (maneja hedge internamente)
+        try:
+            exchange.close_position(sym)
+            log.info("[REAL] %s closePosition OK", sym)
+            if _verify_position_closed(sym): return True
+        except ccxt.ExchangeError as e3:
+            e3s = str(e3)
+            if '22002' in e3s or 'No position' in e3s.lower():
+                log.info("[REAL] %s closePosition 22002 — verificando estado", sym)
                 if _verify_position_closed(sym): return True
-            except ccxt.ExchangeError as e1:
-                e1s = str(e1)
-                if '22002' in e1s or 'No position' in e1s.lower():
-                    log.info("[REAL] %s hedge mode 22002 — probando reduceOnly", sym)
-                else:
-                    log.warning("[REAL] %s hedge error: %s", sym, e1s[:150])
-            # Método 2: reduceOnly (one-way mode)
-            try:
-                resp2 = exchange.create_order(sym,'market',cs,qty,
-                    params={**params_base,'reduceOnly':True})
-                log.info("[REAL] %s reduceOnly close sent, resp=%s", sym, str(resp2)[:150])
-                if _verify_position_closed(sym): return True
-            except ccxt.ExchangeError as e2:
-                e2s = str(e2)
-                if '22002' in e2s or 'No position' in e2s.lower():
-                    log.info("[REAL] %s reduceOnly 22002 — probando closePosition", sym)
-                else:
-                    log.warning("[REAL] %s reduceOnly error: %s", sym, e2s[:150])
-            # Método 3: closePosition de ccxt
-            try:
-                exchange.close_position(sym)
-                if _verify_position_closed(sym): return True
-            except ccxt.ExchangeError as e3:
-                e3s = str(e3)
-                if '22002' in e3s or 'No position' in e3s.lower():
-                    log.info("[REAL] %s closePosition 22002 — verificando estado", sym)
-                    if _verify_position_closed(sym): return True
-                else:
-                    log.warning("[REAL] %s closePosition error: %s", sym, e3s[:150])
-            except Exception as e3:
-                log.warning("[REAL] %s closePosition exception: %s", sym, str(e3)[:150])
-        except Exception as e:
-            log.error("[REAL] %s Error inesperado att %d: %s", sym, attempt+1, str(e)[:200])
+            else:
+                log.warning("[REAL] %s closePosition error: %s", sym, e3s[:150])
+        except Exception as e3:
+            log.warning("[REAL] %s closePosition exception: %s", sym, str(e3)[:100])
         if attempt < 2: time.sleep(2 ** attempt)
     # Verificación final
     if _verify_position_closed(sym):
