@@ -2206,7 +2206,7 @@ def main():
                     if qty<mq or qty<=0: continue
                     if qty*pa < MIN_ORDER_USDT:
                         log.warning("Notional bajo %s: %.4f < %.2f — skip",sym,qty*pa,MIN_ORDER_USDT); continue
-                    # ── Guard pre-entry: verificar que TP1 y TP2 al menos uno sea válido ──
+                    # ── Guard pre-entry: warn if TPs small, but don't block — execution code handles gracefully ──
                     _t1q = ((qty*TP1_CLOSE_PCT)//stp)*stp
                     if _t1q < stp: _t1q = stp
                     _t2q = ((qty-_t1q)*TP2_CLOSE_PCT/(1-TP1_CLOSE_PCT)//stp)*stp
@@ -2214,9 +2214,8 @@ def main():
                     if _t2q > 0 and _t2q * t2p < MIN_ORDER_USDT: _t2q = 0.0
                     _tp1_n = _t1q * t1p; _tp2_n = _t2q * t2p
                     if _tp1_n < MIN_ORDER_USDT and _tp2_n < MIN_ORDER_USDT:
-                        _rej['tp_guard']+=1
-                        log.warning("[TP-GUARD] %s TP1=%.2f TP2=%.2f ambas < $%.2f — skip",
-                            sym, _tp1_n, _tp2_n, MIN_ORDER_USDT); continue
+                        log.warning("[TP-GUARD] %s TP1=%.2f TP2=%.2f ambos < $%.2f — continuando con TP3-only",
+                            sym, _tp1_n, _tp2_n, MIN_ORDER_USDT)
                     log.info("%s %s | Entry=%.4f SL=%.4f Liq=%.4f Lev=%.0f TPs=%.4f/%.4f/%.4f RR=%.2f S=%d/%d",
                         sym,snn,pa,slp,lvp,alv,t1p,t2p,t3p,rr,sc,ms2)
                     er = {'entry_time':datetime.now(),'symbol':sym,'side':'long' if es_long else 'short',
