@@ -2101,11 +2101,14 @@ def main():
                     o15,o4h,o5m,o1d = od.get(sym,(None,None,None,None))
                     if not o15 or not o4h: _rej['no_data']+=1; log.info("[SCAN] %s SKIP: sin datos OHLCV", sym); continue
                     if len(o15)<50 or len(o4h)<10: _rej['no_data']+=1; log.info("[SCAN] %s SKIP: velas insuficientes (15m=%d 4h=%d)", sym, len(o15), len(o4h)); continue
+                    # Checkear vela FORMANDO (no completada) para detectar si es nueva
+                    formando_ts = int(o15[-1][0])
+                    if _ULTIMA_VELA_EVALUADA.get(sym) == formando_ts: _rej['no_new_candle']+=1; continue
+                    _ULTIMA_VELA_EVALUADA[sym] = formando_ts
                     df15 = pd.DataFrame(o15[:-1],columns=['timestamp','open','high','low','close','volume'])
                     df4h = pd.DataFrame(o4h[:-1],columns=['timestamp','open','high','low','close','volume'])
                     df5m = pd.DataFrame(o5m[:-1],columns=['timestamp','open','high','low','close','volume']) if o5m and len(o5m)>1 else None
                     df1d = pd.DataFrame(o1d[:-1],columns=['timestamp','open','high','low','close','volume']) if o1d and len(o1d)>1 else None
-                    if not es_nueva_vela_principal(df15,sym): _rej['no_new_candle']+=1; log.info("[SCAN] %s SKIP: sin vela 15m nueva", sym); continue
                     pa = float(df15['close'].iloc[-1]); av = float(_atr(df15,LOBO_ATR_PERIOD).iloc[-1])
                     if av==0 or pd.isna(av):
                         _rej['atr_zero']+=1
