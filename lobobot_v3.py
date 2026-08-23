@@ -893,6 +893,21 @@ def check_regime_tendencia(df, es_long, df_d1=None):
         return allow, f'REGIME:{("LONG_ok" if es_long else "SHORT_ok") if allow else "BLOQUEADO"}:4h{"UP" if up4 else "DN"}'
     except: return True, 'REGIME:error'
 
+def get_regime_direction(df4h, df1d=None):
+    """Determina dirección del régimen: 'bullish', 'bearish', o 'neutral'"""
+    try:
+        if df4h is None or 'close' not in df4h.columns: return 'neutral'
+        c4 = df4h['close'].dropna(); mr = max(LOBO_REGIME_EMA_PERIOD//2, 10)
+        if len(c4) < mr: return 'neutral'
+        e4 = _ema(c4, LOBO_REGIME_EMA_PERIOD)
+        up4 = bool(float(c4.iloc[-1]) > float(e4.iloc[-1])) if not pd.isna(e4.iloc[-1]) else bool(float(c4.iloc[-1]) > float(c4.mean()))
+        if df1d is not None and 'close' in df1d.columns and len(df1d) >= mr:
+            c1 = df1d['close'].dropna(); e1 = _ema(c1, LOBO_REGIME_EMA_PERIOD)
+            up1 = bool(float(c1.iloc[-1]) > float(e1.iloc[-1])) if not pd.isna(e1.iloc[-1]) else bool(float(c1.iloc[-1]) > float(c1.mean()))
+            if up4 != up1: return 'neutral'
+        return 'bullish' if up4 else 'bearish'
+    except: return 'neutral'
+
 # ── 17. EVALUACION COMPLETA DE SENAL (22 pts max) ──
 def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=None, mrd=None, dfd1=None):
     side_lbl = 'LONG' if es_long else 'SHORT'
@@ -2091,7 +2106,8 @@ def main():
             try: od = fetch_all_ohlcv(ts2)
             except Exception as e: log.error("Error OHLCV: %s",e); _shutdown_event.wait(timeout=60); continue
             va = check_btcd_elliott_ventana_altcoins()
-            _rej = {'no_data':0,'no_signal':0,'tp_guard':0,'entered':0,'no_new_candle':0,'atr_zero':0}
+            _rej = {'no_data':0,'no_signal':0,'tp_guard':0,'entered':0,'no_new_candle':0,'atr_zero':0,'bearish_skip':0}
+            _regime_cnt = {'bullish':0,'bearish':0,'neutral':0}
             for sym in ts2:
                 if sym in bs or len(bs)>=LOBO_MAX_POSITIONS: continue
                 if sym in COOLDOWNS:
@@ -2114,19 +2130,32 @@ def main():
                         _rej['atr_zero']+=1
                         log.info("[SCAN] %s SKIP: ATR=0/NaN", sym)
                         continue
-                    sl = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=True,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
-                    log_score_report(sym, True, sl)
-                    sws = detectar_sweep(df15)
-                    hs = any(s2['tipo']=='sweep_alcista_short' for s2 in sws)
-                    fvs = detectar_fvg(df15)
-                    hb = any(f['tipo']=='bajista' for f in fvs)
+                    # ── Determinar régimen de mercado ──
+                    _regime = get_regime_direction(df4h, df1d)
+                    _regime_cnt[_regime] = _regime_cnt.get(_regime, 0) + 1
                     rvs = _rsi(df15['close'],LOBO_RSI_PERIOD)
                     try: rv = float(rvs.iloc[-1])
                     except: rv = 50.0
-                    hsc = not pd.isna(rv) and rv > LOBO_RSI_OVERBOUGHT
-                    cs = hs or hsc
-                    ss = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=False,dfm=df5m,va=va,mrd=mr,dfd1=df1d) if cs else None
-                    if ss: log_score_report(sym, False, ss)
+
+                    if _regime == 'bearish':
+                        # ── BAJISTA: NO evaluar LONG, evaluar SHORT siempre ──
+                        sl = None
+                        ss = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=False,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
+                        log_score_report(sym, False, ss)
+                        cs = True; hs = False
+                    else:
+                        # ── ALCISTA/NEUTRAL: comportamiento actual ──
+                        sl = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=True,dfm=df5m,va=va,mrd=mr,dfd1=df1d)
+                        log_score_report(sym, True, sl)
+                        sws = detectar_sweep(df15)
+                        hs = any(s2['tipo']=='sweep_alcista_short' for s2 in sws)
+                        fvs = detectar_fvg(df15)
+                        hb = any(f['tipo']=='bajista' for f in fvs)
+                        hsc = not pd.isna(rv) and rv > LOBO_RSI_OVERBOUGHT
+                        cs = hs or hsc
+                        ss = evaluar_senal_bitlobo_v4(sym,df15,df4h,pa,av,bt,es_long=False,dfm=df5m,va=va,mrd=mr,dfd1=df1d) if cs else None
+                        if ss: log_score_report(sym, False, ss)
+
                     # Seleccionar mejor señal: priorizar la no rechazada
                     if sl and not sl.get('_rejected', True):
                         sn = sl
@@ -2134,9 +2163,10 @@ def main():
                         sn = ss
                     else:
                         _rej['no_signal']+=1
-                        log.debug("[SCAN] %s sin señal (long=%s short=%s cs=%s hs=%s rsi=%.1f)",
-                            sym, not sl.get('_rejected',True) if sl else False,
-                            not ss.get('_rejected',True) if ss else False, cs, hs, rv)
+                        log.debug("[SCAN] %s sin señal (regime=%s long=%s short=%s)",
+                            sym, _regime,
+                            not sl.get('_rejected',True) if sl else False,
+                            not ss.get('_rejected',True) if ss else False)
                         continue
                     es_long=sn['es_long']; snn='LARGO' if es_long else 'CORTO'
                     slp=sn['sl_price']; t1p=sn['tp1_price']; t2p=sn['tp2_price']; t3p=sn['tp3_price']
@@ -2266,8 +2296,9 @@ def main():
                         f"RR:{rr:.2f} Score:{sc}/{ms2}")
                 except Exception as e: log.debug("Error %s: %s",sym,e); continue
             scan_dur = time.time() - _LAST_SCAN_TIME
-            log.info("Scan completado en %.0fs: %d símbolos | sin_data=%d sin_vela=%d atr_zero=%d sin_señal=%d tp_guard=%d entradas=%d",
-                scan_dur, len(ts2), _rej['no_data'], _rej['no_new_candle'], _rej['atr_zero'], _rej['no_signal'], _rej['tp_guard'], _rej['entered'])
+            log.info("Scan completado en %.0fs: %d símbolos | regime[bull=%d bear=%d neut=%d] sin_data=%d sin_vela=%d atr_zero=%d sin_señal=%d tp_guard=%d entradas=%d",
+                scan_dur, len(ts2), _regime_cnt.get('bullish',0), _regime_cnt.get('bearish',0), _regime_cnt.get('neutral',0),
+                _rej['no_data'], _rej['no_new_candle'], _rej['atr_zero'], _rej['no_signal'], _rej['tp_guard'], _rej['entered'])
             _shutdown_event.wait(timeout=60)
         except Exception as e: log.error("Error ciclo: %s",e,exc_info=True); _shutdown_event.wait(timeout=60)
     _graceful_shutdown()
