@@ -210,7 +210,7 @@ PARTIAL_ENABLED = True
 TP1_CLOSE_PCT = LOBO_TP1_SIZE; TP2_CLOSE_PCT = LOBO_TP2_SIZE; TP3_CLOSE_PCT = LOBO_TP3_SIZE
 MAX_SL_PCT = float(os.environ.get('LOBO_MAX_SL_PCT', '0.030'))
 SL_LOOKBACK = int(os.environ.get('LOBO_SL_LOOKBACK', '20'))
-TP1_PNL_TARGET = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.15'))
+TP1_PNL_TARGET = float(os.environ.get('LOBO_TP1_PNL_TARGET', '0.25'))
 TP2_PNL_TARGET = float(os.environ.get('LOBO_TP2_PNL_TARGET', '0.30'))
 TP3_PNL_TARGET = float(os.environ.get('LOBO_TP3_PNL_TARGET', '0.50'))
 LOBO_TIMEOUT_HORAS = float(os.environ.get('LOBO_TIMEOUT_HORAS', '96'))
@@ -220,10 +220,10 @@ MIN_ORDER_USDT = float(os.environ.get('LOBO_MIN_ORDER_USDT', '5'))
 PAPER_TRADE = os.environ.get('LOBOBOT_PAPER_TRADE', 'false').lower() == 'true'
 FEE_TAKER = float(os.environ.get('LOBO_FEE_TAKER', '0.0006'))
 LOBO_KILL_MAX_CONSEC_LOSSES = int(os.environ.get('LOBO_KILL_MAX_CONSEC_LOSSES', '4'))
-LOBO_KILL_COOLDOWN_H = float(os.environ.get('LOBO_KILL_COOLDOWN_H', '24'))
+LOBO_KILL_COOLDOWN_H = float(os.environ.get('LOBO_KILL_COOLDOWN_H', '12'))
 KILL_UNTIL: float = 0.0; CONSECUTIVE_LOSSES: int = 0; KILL_STREAK_AT_TRIGGER: int = 0
 _shutdown_event: threading.Event = threading.Event()
-LOBO_SL_ATR = 3.0
+LOBO_SL_ATR = float(os.environ.get('LOBO_SL_ATR', '0.8'))
 LOBO_SL_ATR_SMALL_VOL = float(os.environ.get('LOBO_SL_ATR_SMALL_VOL', '5000000'))
 LOBO_REGIME_FILTER = os.environ.get('LOBO_REGIME_FILTER', '0').lower() == '1'
 LOBO_WHITELIST = {b.strip().upper() for b in os.environ.get('LOBO_WHITELIST', '').split(',') if b.strip()}
@@ -1064,12 +1064,12 @@ def evaluar_senal_bitlobo_v4(sym, dfp, dfc, pa, atr, bt, es_long, dfm=None, va=N
     s['tp1_price']=t1; s['tp2_price']=t2; s['tp3_price']=t3; s['rr']=rr; s['dist_sl']=ds
     if ds > 0:
         t1v,t2v,t3v = abs(t1-pa),abs(t2-pa),abs(t3-pa)
-        rrp = (0.40*t1v+0.30*t2v+0.30*t3v)/ds
+        rrp = (0.50*t1v+0.30*t2v+0.20*t3v)/ds
     else: rrp = rr
     # R:R MINIMO
-    if rrp < 1.0:
+    if rrp < 0.6:
         sr['rr'] = -1
-        log.debug("[EVAL-%s] %s RECHAZO: R:R promedio %.2f < 1.0", side_lbl, sym, rrp)
+        log.debug("[EVAL-%s] %s RECHAZO: R:R promedio %.2f < 0.6", side_lbl, sym, rrp)
         s['score']=sc; s['max_score']=ms; s['detalles']=d; s['score_report']=sr; s['_rejected']=True
         return s
     rr = rrp
