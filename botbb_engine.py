@@ -852,6 +852,16 @@ class BotBBEngine:
             prec = market["precision"]["amount"]
             effective_min_qty = float(self.exchange.amount_to_precision(symbol, effective_min_qty))
 
+            # Verificar notional post-redondeo (puede caer por debajo de 5 USDT)
+            notional = effective_min_qty * price
+            if notional < MIN_NOTIONAL:
+                # Incrementar qty en 1 step de precision hasta cumplir minimo
+                step = 10 ** -prec if prec else min_qty
+                while effective_min_qty * price < MIN_NOTIONAL:
+                    effective_min_qty += step
+                    effective_min_qty = float(self.exchange.amount_to_precision(symbol, effective_min_qty))
+                log.info(f"{symbol} Qty ajustado a {effective_min_qty} para notional >= {MIN_NOTIONAL} USDT")
+
             min_margin = (effective_min_qty * price) / self.cfg["leverage"]
 
             if min_margin > balance:
