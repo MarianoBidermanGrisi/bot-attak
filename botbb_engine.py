@@ -498,6 +498,13 @@ class BotBBEngine:
                         entry_price = df.iloc[entry_idx]["open"]
                         sl = confirm["ha_low"] * (1 - self.cfg["sl_buffer_pct"])
                         tp = entry_price + 2 * (entry_price - sl)
+                        # Validar SL: debe estar por debajo del entry
+                        if sl >= entry_price:
+                            continue
+                        # Validar distancia SL minima (0.1%) y maxima (10%)
+                        sl_dist = (entry_price - sl) / entry_price
+                        if sl_dist < 0.001 or sl_dist > 0.10:
+                            continue
                         return ("long", sl, tp)
 
             else:  # short
@@ -520,6 +527,13 @@ class BotBBEngine:
                         entry_price = df.iloc[entry_idx]["open"]
                         sl = confirm["ha_high"] * (1 + self.cfg["sl_buffer_pct"])
                         tp = entry_price - 2 * (sl - entry_price)
+                        # Validar SL: debe estar por encima del entry
+                        if sl <= entry_price:
+                            continue
+                        # Validar distancia SL minima (0.1%) y maxima (10%)
+                        sl_dist = (sl - entry_price) / entry_price
+                        if sl_dist < 0.001 or sl_dist > 0.10:
+                            continue
                         return ("short", sl, tp)
 
         return None
@@ -621,6 +635,8 @@ class BotBBEngine:
                 return False
 
             # --- Crear orden con SL/TP precargado ---
+            # Bitget requiere "buy"/"sell", no "long"/"short"
+            ccxt_side = "buy" if side == "long" else "sell"
             params = {
                 "marginCoin": "USDT",
                 "marginMode": "isolated",
@@ -628,7 +644,7 @@ class BotBBEngine:
                 "presetStopSurplusPrice": str(self.exchange.price_to_precision(symbol, tp_price)),
                 "presetStopLossPrice": str(self.exchange.price_to_precision(symbol, sl_price)),
             }
-            self.exchange.create_order(symbol, "market", side, qty, params=params)
+            self.exchange.create_order(symbol, "market", ccxt_side, qty, params=params)
 
             fmt_price = self.exchange.price_to_precision(symbol, price)
             fmt_sl = self.exchange.price_to_precision(symbol, sl_price)
