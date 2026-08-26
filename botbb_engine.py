@@ -8,6 +8,7 @@ import os
 import sys
 import csv
 import json
+import math
 import time
 import asyncio
 import logging
@@ -475,14 +476,15 @@ class BotBBEngine:
 
             # --- Marcador ENTRY ---
             if local_entry is not None and 0 <= local_entry < n_w:
-                marker_y = ha_l[local_entry] * (0.995 if side == "long" else 1.005)
+                # Flecha alineada con el precio de entrada (no con HA low/high)
+                marker_y = entry_price * (0.997 if side == "long" else 1.003)
                 marker_color = '#00FF00' if side == 'long' else '#FF4444'
                 marker_symbol = '^' if side == 'long' else 'v'
                 ax.plot(x[local_entry], marker_y, marker=marker_symbol, color=marker_color,
                         markersize=14, zorder=5)
                 ax.axvline(x=x[local_entry], color=marker_color, linestyle=':', linewidth=1.2, alpha=0.7)
                 ax.annotate('ENTRY', xy=(x[local_entry], entry_price),
-                            xytext=(x[local_entry] + 1, entry_price * (1.002 if side == "long" else 0.998)),
+                            xytext=(x[local_entry] + 2, entry_price * (1.003 if side == "long" else 0.997)),
                             fontsize=10, color=marker_color, fontweight='bold',
                             arrowprops=dict(arrowstyle='->', color=marker_color, lw=1.5))
 
@@ -677,6 +679,9 @@ class BotBBEngine:
                         # Confirmacion encontrada
                         confirm = df.iloc[v_idx]
                         entry_idx = v_idx + 1
+                        # ENTRY solo en la siguiente vela a la confirmacion (no mas tarde)
+                        if entry_idx < n - 1:
+                            continue  # ya paso la vela de entrada, senal obsoleta
                         if entry_idx >= n:
                             entry_price = df.iloc[n - 1]["close"]
                         else:
@@ -726,6 +731,9 @@ class BotBBEngine:
                         # Confirmacion encontrada
                         confirm = df.iloc[v_idx]
                         entry_idx = v_idx + 1
+                        # ENTRY solo en la siguiente vela a la confirmacion (no mas tarde)
+                        if entry_idx < n - 1:
+                            continue  # ya paso la vela de entrada, senal obsoleta
                         if entry_idx >= n:
                             entry_price = df.iloc[n - 1]["close"]
                         else:
@@ -787,6 +795,10 @@ class BotBBEngine:
             return signals
 
         for symbol in symbols:
+            # Saltar simbolos con operativa abierta
+            if symbol in self.session_active:
+                continue
+
             data = ohlcv_data.get(symbol)
             if not data or len(data) < 20:
                 continue
@@ -830,6 +842,11 @@ class BotBBEngine:
         df: pd.DataFrame = None,
         entry_idx: int = None,
     ) -> bool:
+        # Doble guard: no abrir si ya hay posicion activa en este symbol
+        if symbol in self.session_active:
+            log.debug(f"{symbol} ya tiene posicion activa. Saltando.")
+            return False
+
         if balance is None:
             balance = self.get_balance()
         if balance <= 0:
@@ -848,19 +865,11 @@ class BotBBEngine:
             # Usar el maximo entre min_qty del mercado y min_qty por notional
             effective_min_qty = max(min_qty, min_qty_from_notional)
 
-            # Redondear hacia arriba a precision del mercado
+            # Redondear hacia ARRIBA a precision del mercado (ceil) para no quedar por debajo de 5 USDT
             prec = market["precision"]["amount"]
+            factor = 10 ** prec
+            effective_min_qty = math.ceil(effective_min_qty * factor) / factor
             effective_min_qty = float(self.exchange.amount_to_precision(symbol, effective_min_qty))
-
-            # Verificar notional post-redondeo (puede caer por debajo de 5 USDT)
-            notional = effective_min_qty * price
-            if notional < MIN_NOTIONAL:
-                # Incrementar qty en 1 step de precision hasta cumplir minimo
-                step = 10 ** -prec if prec else min_qty
-                while effective_min_qty * price < MIN_NOTIONAL:
-                    effective_min_qty += step
-                    effective_min_qty = float(self.exchange.amount_to_precision(symbol, effective_min_qty))
-                log.info(f"{symbol} Qty ajustado a {effective_min_qty} para notional >= {MIN_NOTIONAL} USDT")
 
             min_margin = (effective_min_qty * price) / self.cfg["leverage"]
 
