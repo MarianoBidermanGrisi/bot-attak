@@ -496,14 +496,24 @@ class BotBBEngine:
                         if entry_idx >= n:
                             return None
                         entry_price = df.iloc[entry_idx]["open"]
-                        sl = confirm["ha_low"] * (1 - self.cfg["sl_buffer_pct"])
+                        if entry_price <= 0:
+                            continue
+                        # SL desde la vela de confirmacion con buffer
+                        sl_raw = confirm["ha_low"] * (1 - self.cfg["sl_buffer_pct"])
+                        # Calcular distancia SL real desde entry
+                        sl_dist = (entry_price - sl_raw) / entry_price
+                        # Si SL esta muy lejos o del lado equivocado, usar % fijo del entry
+                        if sl_dist <= 0 or sl_dist > 0.10:
+                            sl_dist = min(max(sl_dist, 0.005), 0.03)  # clamp 0.5%-3%
+                        sl = entry_price * (1 - sl_dist)
                         tp = entry_price + 2 * (entry_price - sl)
-                        # Validar SL: debe estar por debajo del entry
-                        if sl >= entry_price:
+                        # Validar SL: debe estar POR DEBAJO del entry con margen minimo
+                        min_gap = entry_price * 0.0001  # 0.01% min gap
+                        if sl >= entry_price - min_gap:
                             continue
                         # Validar distancia SL minima (0.1%) y maxima (10%)
-                        sl_dist = (entry_price - sl) / entry_price
-                        if sl_dist < 0.001 or sl_dist > 0.10:
+                        sl_dist_final = (entry_price - sl) / entry_price
+                        if sl_dist_final < 0.001 or sl_dist_final > 0.10:
                             continue
                         return ("long", sl, tp)
 
@@ -525,14 +535,24 @@ class BotBBEngine:
                         if entry_idx >= n:
                             return None
                         entry_price = df.iloc[entry_idx]["open"]
-                        sl = confirm["ha_high"] * (1 + self.cfg["sl_buffer_pct"])
+                        if entry_price <= 0:
+                            continue
+                        # SL desde la vela de confirmacion con buffer
+                        sl_raw = confirm["ha_high"] * (1 + self.cfg["sl_buffer_pct"])
+                        # Calcular distancia SL real desde entry
+                        sl_dist = (sl_raw - entry_price) / entry_price
+                        # Si SL esta muy lejos o del lado equivocado, usar % fijo del entry
+                        if sl_dist <= 0 or sl_dist > 0.10:
+                            sl_dist = min(max(sl_dist, 0.005), 0.03)  # clamp 0.5%-3%
+                        sl = entry_price * (1 + sl_dist)
                         tp = entry_price - 2 * (sl - entry_price)
-                        # Validar SL: debe estar por encima del entry
-                        if sl <= entry_price:
+                        # Validar SL: debe estar POR ENCIMA del entry con margen minimo
+                        min_gap = entry_price * 0.0001  # 0.01% min gap
+                        if sl <= entry_price + min_gap:
                             continue
                         # Validar distancia SL minima (0.1%) y maxima (10%)
-                        sl_dist = (sl - entry_price) / entry_price
-                        if sl_dist < 0.001 or sl_dist > 0.10:
+                        sl_dist_final = (sl - entry_price) / entry_price
+                        if sl_dist_final < 0.001 or sl_dist_final > 0.10:
                             continue
                         return ("short", sl, tp)
 
@@ -616,13 +636,24 @@ class BotBBEngine:
             market = self.exchange.market(symbol)
             min_qty = market["limits"]["amount"]["min"] or (10 ** -market["precision"]["amount"])
             price = self.exchange.fetch_ticker(symbol)["last"]
-            min_margin = (min_qty * price) / self.cfg["leverage"]
+
+            # Bitget requiere minimo 5 USDT en valor nominal para futures
+            MIN_NOTIONAL = 5.0
+            min_qty_from_notional = MIN_NOTIONAL / price
+            # Usar el maximo entre min_qty del mercado y min_qty por notional
+            effective_min_qty = max(min_qty, min_qty_from_notional)
+
+            # Redondear hacia arriba a precision del mercado
+            prec = market["precision"]["amount"]
+            effective_min_qty = float(self.exchange.amount_to_precision(symbol, effective_min_qty))
+
+            min_margin = (effective_min_qty * price) / self.cfg["leverage"]
 
             if min_margin > balance:
                 log.warning(f"Margen minimo {min_margin:.2f} > balance {balance:.2f} para {symbol}")
                 return False
 
-            qty = min_qty
+            qty = effective_min_qty
             actual_margin = min_margin
 
             # --- Validacion SL ---
