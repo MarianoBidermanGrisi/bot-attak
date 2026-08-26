@@ -1,190 +1,145 @@
-#!/usr/bin/env python3
 """
-bot_web_service.py — Punto de entrada para Render Web Service (LOBOBOT v4)
-==========================================================================
-Importa lobobot_v3 (BITLOBO v4 con F1-F12 + D2-D9) y ejecuta:
-  1. Servidor Flask (health checks, uptime, config)
-  2. Bot de trading BITLOBO v4 en segundo plano (thread + asyncio)
-
-Uso en Render (Procfile):
-    web: gunicorn bot_web_service:app --timeout 120 --workers 1 --threads 2
-
-Uso local:
-    python bot_web_service.py
-
-Endpoints:
-    GET /         → "LOBOBOT v4 - online"
-    GET /health   → JSON status + config BITLOBO v4
-    GET /status   → JSON bot status + uptime
-    GET /config   → JSON config completa de las 22 reglas
+BotBB — Web service wrapper para Render.com.
+Importa y ejecuta BotBBEngine en un hilo daemon.
+Compatible con Gunicorn.
 """
+
 import os
 import sys
 import time
 import json
 import logging
 import threading
+import requests
+from flask import Flask, request, jsonify
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("web")
-logging.getLogger("werkzeug").setLevel(logging.WARNING)
+# Silenciar logs HTTP de health checks
+logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
+logging.getLogger("gunicorn.access").setLevel(logging.CRITICAL)
+logging.getLogger("gunicorn.error").setLevel(logging.CRITICAL)
 
-# ── Importar lobobot_v3 (v4) ──────────────────────────────────
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lobobot_v3 as lobobot
+# Configuracion de Logging
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-# ── Flask App ──────────────────────────────────────────────────
-try:
-    from flask import Flask, jsonify
-except ImportError:
-    log.error("Flask no instalado. pip install flask gunicorn")
-    raise
-
+# Inicializar Flask
 app = Flask(__name__)
 
-# Estado global del web service
-BOT_ACTIVE = False
-BOT_STARTED_AT = None
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-# ── Endpoints ──────────────────────────────────────────────────
+# ==============================================================
+#  HEARTBEAT (keep-alive contra URL publica de Render)
+# ==============================================================
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+
+
+def _self_heartbeat():
+    if not RENDER_URL:
+        return
+    url = f"{RENDER_URL}/health"
+    while True:
+        time.sleep(240)
+        try:
+            requests.get(url, timeout=10)
+        except Exception:
+            pass
+
+
+# ==============================================================
+#  RUTAS DEL SERVIDOR WEB (FLASK)
+# ==============================================================
 @app.route("/")
 def index():
-    return "LOBOBOT v4 (BITLOBO F1-F12 + D2-D9) - online", 200
+    return "BotBB + Render -- en linea.", 200
 
-@app.route("/health")
-def health():
-    uptime = round(time.time() - BOT_STARTED_AT, 1) if BOT_STARTED_AT else 0
+
+@app.route("/health", methods=["GET"])
+def health_check():
     return jsonify({
         "status": "running",
-        "bot": "lobobot_v4",
-        "strategy": "BITLOBO_22_REGLAS",
-        "active": BOT_ACTIVE,
-        "uptime_seconds": uptime,
-        "paper_mode": lobobot.PAPER_TRADE,
-        "top_n": lobobot.TOP_N,
-        "active_positions": len(lobobot.TRADE_ENTRIES),
-    })
+        "timestamp": time.time(),
+        "bot": "BotBB",
+    }), 200
 
-@app.route("/status")
-def status_handler():
-    uptime = round(time.time() - BOT_STARTED_AT, 1) if BOT_STARTED_AT else 0
-    return jsonify({
-        "bot_active": BOT_ACTIVE,
-        "uptime_seconds": uptime,
-        "started_at": BOT_STARTED_AT,
-        "paper_mode": lobobot.PAPER_TRADE,
-        "active_symbols": list(lobobot.TRADE_ENTRIES.keys()),
-        "active_count": len(lobobot.TRADE_ENTRIES),
-        "cooldown_count": len(lobobot.COOLDOWNS),
-        "hedge_active": list(lobobot.HEDGE_ENTRIES.keys()),
-        "partial_levels": dict(lobobot.PARTIAL_LEVEL),
-    })
 
-@app.route("/config")
-def config_handler():
-    return jsonify({
-        # Escaneo
-        "top_n": lobobot.TOP_N,
-        "timeframes": {
-            "principal_15m": lobobot.TIMEFRAME_PRINCIPAL,
-            "confirmacion_4h": lobobot.TIMEFRAME_CONFIRMACION,
-            "micro_5m": lobobot.TIMEFRAME_MICRO,
-        },
-        # Capital split (F1)
-        "capital_split": {
-            "liquidez_pct": round(lobobot.LOBO_LIQUIDEZ_PCT * 100, 1),
-            "futuros_pct": round(lobobot.LOBO_FUTUROS_PCT * 100, 1),
-        },
-        # Reglas BITLOBO v4 (22 puntos)
-        "rules": {
-            "R1_impulso": {
-                "min_velas": lobobot.LOBO_IMPULSO_MIN_VELAS,
-                "max_velas": lobobot.LOBO_IMPULSO_MAX_VELAS,
-                "pendiente_min_pct": lobobot.LOBO_IMPULSO_PEND_MIN * 100,
-            },
-            "R2_sma100_tolerancia_atr": lobobot.LOBO_SMA100_TOL_ATR,
-            "R3_adx": {
-                "periodo": lobobot.LOBO_ADX_PERIOD,
-                "rango": [lobobot.LOBO_ADX_MIN, lobobot.LOBO_ADX_MAX],
-                "descendente_velas": lobobot.LOBO_ADX_DESC_VELAS,
-            },
-            "R5_rsi": {
-                "periodo": lobobot.LOBO_RSI_PERIOD,
-                "oversold": lobobot.LOBO_RSI_OVERSOLD,
-                "overbought": lobobot.LOBO_RSI_OVERBOUGHT,
-            },
-            "R6_fvg": {
-                "min_gap_atr": lobobot.LOBO_FVG_MIN_GAP_ATR,
-                "max_velas_sin_rellenar": lobobot.LOBO_FVG_MAX_VELAS,
-            },
-            "R7_order_block": {
-                "min_mov_atr": lobobot.LOBO_OB_MIN_MOV_ATR,
-                "lookback": lobobot.LOBO_OB_LOOKBACK,
-            },
-            "R8_sweep": {
-                "lookback": lobobot.LOBO_SWEEP_LOOKBACK,
-                "max_penetracion_atr": lobobot.LOBO_SWEEP_MAX_PEN_ATR,
-            },
-            "R9_absorcion": {
-                "mecha_min_atr": lobobot.LOBO_MECHA_MIN_ATR,
-                "cuerpo_mecha_ratio": lobobot.LOBO_MECHA_CUERPO_RATIO,
-            },
-            "D2_expanded_flat": "+2 pts si encontrado",
-            "D3_choch": "+1 pts Change of Character",
-            "D4_microfractalidad": "+1 pts 5+ ondas en 5m",
-            "D5_flat_continuacion": "+1 pts lateral post-ruptura",
-        },
-        # Riesgo (F8)
-        "risk": {
-            "risk_pct": round(lobobot.LOBO_RISK_PCT * 100, 2),
-            "risk_pct_exceptional": round(lobobot.LOBO_RISK_PCT_EXCEP * 100, 2),
-            "max_positions": lobobot.LOBO_MAX_POSITIONS,
-            "paper_trade": lobobot.PAPER_TRADE,
-        },
-        # TP/SL (F12 PnL-based)
-        "tp_sl": {
-            "tp1_pnl_target": round(lobobot.TP1_PNL_TARGET * 100, 1),
-            "tp2_pnl_target": round(lobobot.TP2_PNL_TARGET * 100, 1),
-            "tp3_pnl_target": round(lobobot.TP3_PNL_TARGET * 100, 1),
-            "tp1_close_pct": round(lobobot.TP1_CLOSE_PCT * 100, 1),
-            "tp2_close_pct": round(lobobot.TP2_CLOSE_PCT * 100, 1),
-            "sl_atr": lobobot.LOBO_SL_ATR,
-        },
-        # F3: Apalancamiento dinámico + F4: Cobertura
-        "leverage_hedge": {
-            "hedge_enabled": lobobot.LOBO_HEDGE_ENABLED,
-            "hedge_margin_pct": round(lobobot.LOBO_HEDGE_MARGIN_PCT * 100, 1),
-            "hedge_trigger_pct": round(lobobot.LOBO_HEDGE_TRIGGER_PCT * 100, 1),
-        },
-        # Scoring
-        "scoring": {
-            "max_score": 22,
-            "min_score": lobobot.LOBO_SCORE_MIN,
-        },
-    })
+@app.route("/webhook", methods=["POST"])
+def telegram_webhook():
+    if request.is_json:
+        update = request.get_json()
+        logger.info(f"Telegram update: {json.dumps(update)}")
+        return jsonify({"status": "ok"}), 200
+    return jsonify({"error": "Request must be JSON"}), 400
 
-# ── Iniciar bot en segundo plano ───────────────────────────────
-def _start_bot():
-    global BOT_ACTIVE, BOT_STARTED_AT
-    BOT_STARTED_AT = time.time()
-    BOT_ACTIVE = True
-    log.info("LOBOBOT v4 worker started in background thread")
+
+# ==============================================================
+#  CONFIGURACION DE WEBHOOK
+# ==============================================================
+def setup_telegram_webhook():
+    if not TELEGRAM_TOKEN:
+        logger.warning("No hay TELEGRAM_TOKEN configurado.")
+        return
+
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    if not webhook_url:
+        render_url = os.environ.get("RENDER_EXTERNAL_URL")
+        if render_url:
+            webhook_url = f"{render_url}/webhook"
+        else:
+            logger.warning("RENDER_EXTERNAL_URL no definida -- webhook omitido.")
+            return
+
     try:
-        if lobobot.exchange is None:
-            lobobot.init_exchange()
-        lobobot.main()
+        logger.info(f"Registrando webhook Telegram: {webhook_url}")
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook", timeout=10)
+        time.sleep(1)
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}",
+            timeout=10,
+        )
+        if r.status_code == 200:
+            logger.info("Webhook de Telegram registrado correctamente")
+        else:
+            logger.error(f"Error al registrar webhook: {r.status_code} -- {r.text}")
     except Exception as e:
-        log.error("LOBOBOT v4 worker error: %s", e, exc_info=True)
-    finally:
-        BOT_ACTIVE = False
-        log.info("LOBOBOT v4 worker stopped")
+        logger.error(f"Excepcion al configurar webhook: {e}")
 
-bot_thread = threading.Thread(target=_start_bot, daemon=True, name="LOBOBOT_v4")
+
+# ==============================================================
+#  LANZADOR DEL BOT (DIRECTO EN THREAD)
+# ==============================================================
+def run_bot():
+    """Importa y ejecuta BotBBEngine con autoreinicio."""
+    from botbb_engine import BotBBEngine
+
+    while True:
+        logger.info("Iniciando BotBBEngine...")
+        try:
+            engine = BotBBEngine()
+            engine.run()  # Loop interno con sleep
+        except Exception as e:
+            logger.error(f"BotBBEngine termino con error: {e}")
+        logger.info("Reiniciando bot en 30 segundos...")
+        time.sleep(30)
+
+
+# Iniciar heartbeat interno
+heartbeat_thread = threading.Thread(target=_self_heartbeat, daemon=True, name="Heartbeat")
+heartbeat_thread.start()
+logger.info("Heartbeat thread started (interval=4min)")
+
+# Iniciar el hilo del bot automaticamente (compatible con Gunicorn)
+bot_thread = threading.Thread(target=run_bot, daemon=True, name="BotRunner")
 bot_thread.start()
-log.info("LOBOBOT v4 thread launched from bot_web_service")
 
-# ── Entry point directo ────────────────────────────────────────
+# ==============================================================
+#  INICIO DEL SISTEMA (LOCAL)
+# ==============================================================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    log.info("Starting Flask on 0.0.0.0:%d", port)
-    app.run(host="0.0.0.0", port=port, debug=False)
+    setup_telegram_webhook()
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Iniciando servidor Flask en el puerto {port}...")
+    app.run(debug=False, host="0.0.0.0", port=port)
