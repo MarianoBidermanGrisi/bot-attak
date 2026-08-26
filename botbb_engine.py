@@ -28,6 +28,10 @@ from ccxt import (
     DDoSProtection,
 )
 from datetime import datetime, timedelta
+from io import BytesIO
+import matplotlib
+matplotlib.use('Agg')  # Backend sin GUI
+import matplotlib.pyplot as plt
 
 # ==========================================================
 # LOGGING
@@ -59,7 +63,7 @@ DEFAULT_CONFIG = {
     "macd_signal":          9,       # MACD signal SMA
     "confirmation_window":  8,       # Max velas para confirmar
     # --- Entrada ---
-    "sl_buffer_pct":        0.003,   # SL buffer 0.3%
+    "sl_buffer_pct":        0.0005,  # SL buffer 0.05%
     "rr_ratio":             2.0,     # Risk:Reward 1:2
     # --- Gestion ---
     "be_trigger_pct":       0.004,   # BE al 0.4%
@@ -345,6 +349,174 @@ class BotBBEngine:
             log.warning(f"[TG] Error enviando mensaje: {e}")
 
     # ==========================================================
+    # TELEGRAM — ENVIAR FOTO
+    # ==========================================================
+    def send_telegram_photo(self, buf: BytesIO, caption: str = "") -> bool:
+        """Envia una imagen PNG a Telegram via sendPhoto."""
+        if not self.telegram_token or not self.telegram_chat_id:
+            return False
+        if not buf:
+            return False
+        try:
+            buf.seek(0)
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
+            files = {"photo": ("chart.png", buf.read(), "image/png")}
+            data = {"chat_id": self.telegram_chat_id}
+            if caption:
+                data["caption"] = caption[:1024]
+                data["parse_mode"] = "Markdown"
+            r = requests.post(url, files=files, data=data, timeout=60)
+            if r.status_code == 200:
+                log.info("[TG] Grafico enviado a Telegram.")
+                return True
+            else:
+                log.warning(f"[TG] Error enviando foto: HTTP {r.status_code}")
+                return False
+        except requests.exceptions.Timeout:
+            log.warning("[TG] Timeout enviando foto a Telegram.")
+            return False
+        except Exception as e:
+            log.warning(f"[TG] Error enviando foto: {e}")
+            return False
+
+    # ==========================================================
+    # GENERAR GRAFICO DE SENAL (BB + Heikin Ashi — 1 panel)
+    # ==========================================================
+    def generar_grafico_signal(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        side: str,
+        entry_price: float,
+        sl_price: float,
+        tp_price: float,
+        entry_idx: int = None,
+    ) -> BytesIO:
+        """
+        Genera grafico Telegram con matplotlib puro (sin compresion):
+          - 1 panel, sin volumen
+          - Velas Heikin Ashi
+          - Bollinger Bands: upper (rojo), lower (verde/teal)
+          - BB Basis dinamica: verde cuando close >= basis, rojo cuando close < basis
+          - Lineas Entry (dorado), SL (rojo), TP (verde)
+          - Marcador ENTRY: flecha + linea vertical punteada
+        Retorna BytesIO con PNG o None si hay error.
+        """
+        try:
+            if df is None or len(df) < 30:
+                log.warning(f"[CHART] Datos insuficientes para graficar {symbol}")
+                return None
+
+            # --- Indicadores en dataset completo ---
+            bb_upper_full, bb_basis_full, bb_lower_full = self.calculate_bb(df["close"])
+            df_ha_full = self.heikin_ashi(df)
+
+            # --- Ventana alrededor de la entrada (40 antes, 15 despues) ---
+            center = entry_idx if entry_idx is not None else len(df) // 2
+            before, after = 40, 15
+            s = max(0, center - before)
+            e = min(len(df), center + after)
+
+            # Recortar arrays
+            ha_o = df_ha_full["ha_open"].values[s:e]
+            ha_h = df_ha_full["ha_high"].values[s:e]
+            ha_l = df_ha_full["ha_low"].values[s:e]
+            ha_c = df_ha_full["ha_close"].values[s:e]
+            bb_u = bb_upper_full.values[s:e]
+            bb_b = bb_basis_full.values[s:e]
+            bb_l = bb_lower_full.values[s:e]
+            c_w = df["close"].values[s:e]
+            n_w = e - s
+            x = np.arange(n_w)
+
+            # Indice local de entrada
+            local_entry = (entry_idx - s) if entry_idx is not None else None
+
+            # --- Figure (1 panel, estilo nightclouds) ---
+            fig, ax = plt.subplots(figsize=(14, 7), facecolor='#1a1a1a')
+            ax.set_facecolor('#1a1a1a')
+            ax.tick_params(colors='white', labelsize=8)
+            ax.grid(True, color='#333333', linewidth=0.3, alpha=0.5)
+            for spine in ax.spines.values():
+                spine.set_color('#333333')
+
+            # --- Velas Heikin Ashi ---
+            for i in range(n_w):
+                color = '#26A69A' if ha_c[i] >= ha_o[i] else '#FF4444'
+                ax.plot([x[i], x[i]], [ha_l[i], ha_h[i]], color=color, linewidth=0.8)
+                body_bottom = min(ha_o[i], ha_c[i])
+                body_height = abs(ha_c[i] - ha_o[i])
+                if body_height < (ha_h[i] - ha_l[i]) * 0.001:
+                    body_height = (ha_h[i] - ha_l[i]) * 0.003
+                rect = plt.Rectangle((x[i] - 0.35, body_bottom), 0.7, body_height,
+                                      facecolor=color, edgecolor=color, linewidth=0.5)
+                ax.add_patch(rect)
+
+            # --- Bollinger Bands ---
+            valid_u = ~np.isnan(bb_u)
+            valid_l = ~np.isnan(bb_l)
+            ax.plot(x[valid_u], bb_u[valid_u], color='#FF0000', linewidth=1.0, label='BB Upper')
+            ax.plot(x[valid_l], bb_l[valid_l], color='#26A69A', linewidth=1.0, label='BB Lower')
+
+            # BB Basis dinamica
+            for i in range(1, n_w):
+                if np.isnan(bb_b[i]) or np.isnan(bb_b[i-1]):
+                    continue
+                color = '#26A69A' if c_w[i] >= bb_b[i] else '#FF4444'
+                ax.plot([x[i-1], x[i]], [bb_b[i-1], bb_b[i]], color=color, linewidth=1.2)
+
+            # --- Entry / SL / TP ---
+            ax.axhline(y=entry_price, color='#FFD700', linestyle='--', linewidth=1.5, alpha=0.8,
+                       label=f'Entry {entry_price:.4f}')
+            ax.axhline(y=sl_price, color='#FF0000', linestyle='--', linewidth=1.5, alpha=0.8,
+                       label=f'SL {sl_price:.4f}')
+            ax.axhline(y=tp_price, color='#00FF00', linestyle='--', linewidth=1.5, alpha=0.8,
+                       label=f'TP {tp_price:.4f}')
+
+            # --- Marcador ENTRY ---
+            if local_entry is not None and 0 <= local_entry < n_w:
+                marker_y = ha_l[local_entry] * (0.995 if side == "long" else 1.005)
+                marker_color = '#00FF00' if side == 'long' else '#FF4444'
+                marker_symbol = '^' if side == 'long' else 'v'
+                ax.plot(x[local_entry], marker_y, marker=marker_symbol, color=marker_color,
+                        markersize=14, zorder=5)
+                ax.axvline(x=x[local_entry], color=marker_color, linestyle=':', linewidth=1.2, alpha=0.7)
+                ax.annotate('ENTRY', xy=(x[local_entry], entry_price),
+                            xytext=(x[local_entry] + 1, entry_price * (1.002 if side == "long" else 0.998)),
+                            fontsize=10, color=marker_color, fontweight='bold',
+                            arrowprops=dict(arrowstyle='->', color=marker_color, lw=1.5))
+
+            # --- Titulo y formato ---
+            side_label = "LONG" if side == "long" else "SHORT"
+            titulo = f"{symbol} | {side_label} | Entry: {entry_price:.6f} | SL: {sl_price:.6f} | TP: {tp_price:.6f}"
+            ax.set_title(titulo, color='white', fontsize=12, fontweight='bold', pad=10)
+            ax.set_ylabel('Precio (USDT)', color='white', fontsize=9)
+            ax.legend(loc='upper left', fontsize=8, facecolor='#1a1a1a', edgecolor='#444',
+                      labelcolor='white')
+            ax.set_xlim(-1, n_w)
+
+            # X-axis labels
+            step = max(1, n_w // 8)
+            ticks = list(range(0, n_w, step))
+            labels = [f'+{i}c' for i in ticks]
+            ax.set_xticks(ticks)
+            ax.set_xticklabels(labels, color='white', fontsize=8)
+
+            plt.tight_layout()
+
+            # --- Guardar en buffer ---
+            buf = BytesIO()
+            plt.savefig(buf, format="png", dpi=100, bbox_inches="tight", facecolor="#1a1a1a")
+            buf.seek(0)
+            plt.close(fig)
+            log.info(f"[CHART] Grafico generado para {symbol}")
+            return buf
+
+        except Exception as e:
+            log.error(f"[CHART] Error generando grafico para {symbol}: {e}")
+            return None
+
+    # ==========================================================
     # UPDATE STOP LOSS EN BITGET
     # ==========================================================
     def _update_stop_loss(self, symbol: str, side: str, new_sl: float) -> bool:
@@ -431,7 +603,7 @@ class BotBBEngine:
     def detect_signal(self, df: pd.DataFrame):
         """
         Detecta senal LONG o SHORT en un DataFrame OHLCV.
-        Retorna: (side, sl_price, tp_price) o None
+        Retorna: (side, sl_price, tp_price, entry_idx) o None
         """
         min_candles = self.cfg["bb_length"] + self.cfg["macd_slow"] + self.cfg["macd_signal"] + self.cfg["confirmation_window"] + 5
         if len(df) < min_candles:
@@ -468,14 +640,23 @@ class BotBBEngine:
     def _check_signal(self, df: pd.DataFrame, side: str):
         """
         Escanea V0 (trigger) y luego V1-V8 (confirmacion).
+        SOLO busca V0 en las ultimas N velas para garantizar senal fresca.
         Retorna (side, sl_price, tp_price) o None.
         """
         window = self.cfg["confirmation_window"]
         n = len(df)
         max_v0 = n - 2  # Necesitamos al menos V0 + confirmacion + 1 vela
 
+        # === RESTRICCION DE FREScura: V0 solo en las ultimas ~10 velas ===
+        # Esto garantiza que la confirmacion y entrada sean recientes
+        freshness = window + 2  # ~10 velas = 50 min en TF 5m
+        min_v0 = max(n - freshness, self.cfg["bb_length"])
+
+        # === BB Basis para verificar color de la signal line ===
+        basis = df["close"].rolling(self.cfg["bb_length"]).mean()
+
         # Escanear de mas reciente a mas antiguo (buscar la senal mas fresca)
-        for v0_idx in range(max_v0, self.cfg["bb_length"], -1):
+        for v0_idx in range(max_v0, min_v0, -1):
             v0 = df.iloc[v0_idx]
 
             if side == "long":
@@ -483,23 +664,33 @@ class BotBBEngine:
                 if pd.isna(v0["bb_lower"]) or v0["ha_low"] > v0["bb_lower"]:
                     continue
 
-                # V1-V8: buscar primera vela verde + MACD verde
+                # V1-V8: buscar vela verde + MACD verde + signal verde (close >= basis)
                 for offset in range(1, window + 1):
                     v_idx = v0_idx + offset
                     if v_idx >= n:
                         break
                     v = df.iloc[v_idx]
-                    if v["ha_close"] > v["ha_open"] and v["macd_green"]:
+                    close_at_v = df["close"].iloc[v_idx]
+                    basis_at_v = basis.iloc[v_idx]
+                    signal_is_green = not pd.isna(basis_at_v) and close_at_v >= basis_at_v
+                    if v["ha_close"] > v["ha_open"] and v["macd_green"] and signal_is_green:
                         # Confirmacion encontrada
                         confirm = df.iloc[v_idx]
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
-                            return None
-                        entry_price = df.iloc[entry_idx]["open"]
+                            entry_price = df.iloc[n - 1]["close"]
+                        else:
+                            entry_price = df.iloc[entry_idx]["open"]
                         if entry_price <= 0:
                             continue
-                        # SL desde la vela de confirmacion con buffer
-                        sl_raw = confirm["ha_low"] * (1 - self.cfg["sl_buffer_pct"])
+                        # Validar signal line VERDE en el punto de entrada (usando close)
+                        idx_entry = entry_idx if entry_idx < n else n - 1
+                        basis_at_entry = basis.iloc[idx_entry]
+                        close_at_entry = df["close"].iloc[idx_entry]
+                        if pd.isna(basis_at_entry) or close_at_entry < basis_at_entry:
+                            continue  # Signal no es verde en entry, saltar
+                        # SL: low de la vela anterior a entry (regular) con buffer
+                        sl_raw = confirm["low"] * (1 - self.cfg["sl_buffer_pct"])
                         # Calcular distancia SL real desde entry
                         sl_dist = (entry_price - sl_raw) / entry_price
                         # Si SL esta muy lejos o del lado equivocado, usar % fijo del entry
@@ -515,30 +706,40 @@ class BotBBEngine:
                         sl_dist_final = (entry_price - sl) / entry_price
                         if sl_dist_final < 0.001 or sl_dist_final > 0.10:
                             continue
-                        return ("long", sl, tp)
+                        return ("long", sl, tp, entry_idx)
 
             else:  # short
                 # V0: vela HA toca banda superior (cuerpo o mecha)
                 if pd.isna(v0["bb_upper"]) or v0["ha_high"] < v0["bb_upper"]:
                     continue
 
-                # V1-V8: buscar primera vela roja + MACD rojo
+                # V1-V8: buscar vela roja + MACD rojo + signal roja (close < basis)
                 for offset in range(1, window + 1):
                     v_idx = v0_idx + offset
                     if v_idx >= n:
                         break
                     v = df.iloc[v_idx]
-                    if v["ha_close"] < v["ha_open"] and not v["macd_green"]:
+                    close_at_v = df["close"].iloc[v_idx]
+                    basis_at_v = basis.iloc[v_idx]
+                    signal_is_red = not pd.isna(basis_at_v) and close_at_v < basis_at_v
+                    if v["ha_close"] < v["ha_open"] and not v["macd_green"] and signal_is_red:
                         # Confirmacion encontrada
                         confirm = df.iloc[v_idx]
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
-                            return None
-                        entry_price = df.iloc[entry_idx]["open"]
+                            entry_price = df.iloc[n - 1]["close"]
+                        else:
+                            entry_price = df.iloc[entry_idx]["open"]
                         if entry_price <= 0:
                             continue
-                        # SL desde la vela de confirmacion con buffer
-                        sl_raw = confirm["ha_high"] * (1 + self.cfg["sl_buffer_pct"])
+                        # Validar signal line ROJA en el punto de entrada (usando close)
+                        idx_entry = entry_idx if entry_idx < n else n - 1
+                        basis_at_entry = basis.iloc[idx_entry]
+                        close_at_entry = df["close"].iloc[idx_entry]
+                        if pd.isna(basis_at_entry) or close_at_entry >= basis_at_entry:
+                            continue  # Signal no es roja en entry, saltar
+                        # SL: high de la vela anterior a entry (regular) con buffer
+                        sl_raw = confirm["high"] * (1 + self.cfg["sl_buffer_pct"])
                         # Calcular distancia SL real desde entry
                         sl_dist = (sl_raw - entry_price) / entry_price
                         # Si SL esta muy lejos o del lado equivocado, usar % fijo del entry
@@ -554,7 +755,7 @@ class BotBBEngine:
                         sl_dist_final = (sl - entry_price) / entry_price
                         if sl_dist_final < 0.001 or sl_dist_final > 0.10:
                             continue
-                        return ("short", sl, tp)
+                        return ("short", sl, tp, entry_idx)
 
         return None
 
@@ -564,7 +765,7 @@ class BotBBEngine:
     def scan_signals(self, symbols: list) -> list:
         """
         Descarga OHLCV para multiples simbolos y busca senales.
-        Retorna lista de dicts: [{symbol, side, sl_price, tp_price}, ...]
+        Retorna lista de dicts: [{symbol, side, sl_price, tp_price, df}, ...]
         """
         signals = []
         if not symbols:
@@ -594,12 +795,14 @@ class BotBBEngine:
                 df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 result = self.detect_signal(df)
                 if result:
-                    side, sl, tp = result
+                    side, sl, tp, entry_idx = result
                     signals.append({
                         "symbol": symbol,
                         "side": side,
                         "sl_price": sl,
                         "tp_price": tp,
+                        "entry_idx": entry_idx,
+                        "df": df,
                     })
                     log.info(f"Senal detectada: {symbol} {side.upper()} | SL={sl:.6f} TP={tp:.6f}")
             except RateLimitExceeded as e:
@@ -624,6 +827,8 @@ class BotBBEngine:
         sl_price: float,
         tp_price: float,
         balance: float = None,
+        df: pd.DataFrame = None,
+        entry_idx: int = None,
     ) -> bool:
         if balance is None:
             balance = self.get_balance()
@@ -706,6 +911,17 @@ class BotBBEngine:
             }
             self._save_trade_entries()
             self.session_active.add(symbol)
+
+            # --- Generar y enviar grafico a Telegram ---
+            try:
+                if df is not None:
+                    buf = self.generar_grafico_signal(symbol, df, side, price, sl_price, tp_price, entry_idx)
+                    if buf:
+                        caption = f"*{symbol} {side.upper()}*\nEntry: {fmt_price} | SL: {fmt_sl} | TP: {fmt_tp}"
+                        self.send_telegram_photo(buf, caption)
+            except Exception as e:
+                log.warning(f"[CHART] Error generando grafico para {symbol}: {e}")
+
             return True
 
         except BadRequest as e:
@@ -1149,6 +1365,8 @@ class BotBBEngine:
                                         sl_price=sig["sl_price"],
                                         tp_price=sig["tp_price"],
                                         balance=balance,
+                                        df=sig.get("df"),
+                                        entry_idx=sig.get("entry_idx"),
                                     )
                             if not signals:
                                 log.info("Sin senales en este escaneo.")
