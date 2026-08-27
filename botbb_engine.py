@@ -188,19 +188,15 @@ class BotBBEngine:
     # CONEXION (async via to_thread)
     # ==========================================================
     async def _connect(self) -> bool:
-        def _sync():
-            exch = ccxt.bitget({
+        try:
+            self.exchange = ccxt.bitget({
                 "apiKey": self.api_key,
                 "secret": self.secret_key,
                 "password": self.passphrase,
                 "enableRateLimit": True,
                 "options": {"defaultType": "swap"},
             })
-            exch.load_markets()
-            return exch
-
-        try:
-            self.exchange = await asyncio.to_thread(_sync)
+            await asyncio.to_thread(self.exchange.load_markets)
             log.info("Conexion exitosa a Bitget.")
             await self._load_trade_entries()
             return True
@@ -225,10 +221,9 @@ class BotBBEngine:
     # WRAPPERS — ccxt sync → async (sin bloquear event loop)
     # ==========================================================
     async def _exch_call(self, method: str, *args, **kwargs):
-        """Ejecuta un metodo ccxt sync en thread pool con semaforo."""
-        async with self.semaphore:
-            fn = getattr(self.exchange, method)
-            return await asyncio.to_thread(fn, *args, **kwargs)
+        """Ejecuta un metodo ccxt sync directamente (sin thread, como el original)."""
+        fn = getattr(self.exchange, method)
+        return fn(*args, **kwargs)
 
     async def _exch_call_await(self, method: str, *args, **kwargs):
         """Ejecuta un metodo ccxt async nativo con semaforo."""
