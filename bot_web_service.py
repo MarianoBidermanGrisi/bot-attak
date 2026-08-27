@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import json
+import asyncio
 import logging
 import threading
 import requests
@@ -119,7 +120,7 @@ def run_bot():
         logger.info("Iniciando BotBBEngine...")
         try:
             engine = BotBBEngine()
-            engine.run()  # Loop interno con sleep
+            asyncio.run(engine.run())  # engine.run() es async
         except Exception as e:
             logger.error(f"BotBBEngine termino con error: {e}")
         logger.info("Reiniciando bot en 30 segundos...")
