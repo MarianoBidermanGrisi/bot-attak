@@ -953,9 +953,11 @@ class BotBBEngine:
             # --- Generar y enviar grafico a Telegram ---
             try:
                 if df is not None:
-                    buf = self.generar_grafico_signal(symbol, df, side, price, sl_price, tp_price, entry_idx)
+                    # Chart: precio de entrada de la estrategia (open de la vela de entrada)
+                    strategy_entry = float(df.iloc[entry_idx]["open"]) if entry_idx is not None and entry_idx < len(df) else price
+                    buf = self.generar_grafico_signal(symbol, df, side, strategy_entry, sl_price, tp_price, entry_idx)
                     if buf:
-                        caption = f"*{symbol} {side.upper()}*\nEntry: {fmt_price} | SL: {fmt_sl} | TP: {fmt_tp}"
+                        caption = f"*{symbol} {side.upper()}*\nEntry: `{fmt_price}` | SL: `{fmt_sl}` | TP: `{fmt_tp}`"
                         self.send_telegram_photo(buf, caption)
             except Exception as e:
                 log.warning(f"[CHART] Error generando grafico para {symbol}: {e}")
