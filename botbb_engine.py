@@ -11,6 +11,7 @@ import sys
 import csv
 import json
 import math
+import decimal
 import time
 import asyncio
 import logging
@@ -865,7 +866,12 @@ class BotBBEngine:
 
         try:
             market = await self._exch_call("market", symbol)
-            min_qty = market["limits"]["amount"]["min"] or (10 ** -market["precision"]["amount"])
+            prec = market["precision"].get("amount")
+            min_limit = market["limits"].get("amount", {}).get("min")
+            if prec is None or min_limit is None:
+                log.warning(f"{symbol} precision/limits no disponibles. Saltando.")
+                return False
+            min_qty = min_limit or (10 ** -prec)
             ticker = await self._exch_call("fetch_ticker", symbol)
             price = float(ticker["last"])
 
@@ -873,10 +879,12 @@ class BotBBEngine:
             min_qty_from_notional = MIN_NOTIONAL / price
             effective_min_qty = max(min_qty, min_qty_from_notional)
 
-            prec = market["precision"]["amount"]
             factor = 10 ** prec
             effective_min_qty = math.ceil(effective_min_qty * factor) / factor
             effective_min_qty = float(await self._exch_call("amount_to_precision", symbol, effective_min_qty))
+            if not math.isfinite(effective_min_qty) or effective_min_qty <= 0:
+                log.warning(f"{symbol} qty invalida ({effective_min_qty}). Saltando.")
+                return False
 
             min_margin = (effective_min_qty * price) / self.cfg["leverage"]
             if min_margin > balance:
@@ -887,6 +895,10 @@ class BotBBEngine:
             actual_margin = min_margin
 
             strategy_entry = float(df.iloc[entry_idx]["open"]) if df is not None and entry_idx is not None and entry_idx < len(df) else price
+
+            if not all(math.isfinite(v) for v in [sl_price, tp_price, strategy_entry]):
+                log.warning(f"{symbol} precio invalido (NaN/Inf). Saltando.")
+                return False
 
             if side == "long":
                 sl_dist = (strategy_entry - sl_price) / strategy_entry
@@ -967,6 +979,9 @@ class BotBBEngine:
             return False
         except ExchangeError as e:
             log.error(f"[500] open_position {symbol}: {e}")
+            return False
+        except (decimal.DecimalException, ValueError) as e:
+            log.warning(f"[DECIMAL] open_position {symbol}: precision incompatible — {e}")
             return False
         except Exception as e:
             log.error(f"Error abriendo {symbol}: {e}")
