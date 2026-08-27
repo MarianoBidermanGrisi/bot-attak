@@ -591,12 +591,28 @@ class BotBBEngine:
     # ==========================================================
     # INDICADORES: MACD OVERLAY (booleano verde/rojo)
     # ==========================================================
+    @staticmethod
+    def _ema_tv(close: pd.Series, period: int) -> pd.Series:
+        """
+        EMA con inicializacion SMA igual que ta.ema de TradingView.
+        """
+        result = pd.Series(np.nan, index=close.index, dtype=float)
+        if len(close) < period:
+            return result
+        # Primera EMA = SMA de los primeros `period` valores
+        result.iloc[period - 1] = close.iloc[:period].mean()
+        alpha = 2.0 / (period + 1)
+        for i in range(period, len(close)):
+            result.iloc[i] = close.iloc[i] * alpha + result.iloc[i - 1] * (1.0 - alpha)
+        return result
+
     def calculate_macd_overlay(self, close: pd.Series) -> pd.Series:
         """
         Retorna Serie booleana: True = MACD >= Signal (verde), False = rojo.
+        EMA inicializada con SMA como en TradingView.
         """
-        fast = close.ewm(span=self.cfg["macd_fast"], adjust=False).mean()
-        slow = close.ewm(span=self.cfg["macd_slow"], adjust=False).mean()
+        fast = self._ema_tv(close, self.cfg["macd_fast"])
+        slow = self._ema_tv(close, self.cfg["macd_slow"])
         macd = fast - slow
         signal = macd.rolling(self.cfg["macd_signal"]).mean()
         return macd >= signal
@@ -882,11 +898,14 @@ class BotBBEngine:
             qty = effective_min_qty
             actual_margin = min_margin
 
-            # --- Validacion SL ---
+            # --- Precio de entrada de la estrategia (open de la vela de confirmacion) ---
+            strategy_entry = float(df.iloc[entry_idx]["open"]) if df is not None and entry_idx is not None and entry_idx < len(df) else price
+
+            # --- Validacion SL (respecto al precio de la estrategia) ---
             if side == "long":
-                sl_dist = (price - sl_price) / price
+                sl_dist = (strategy_entry - sl_price) / strategy_entry
             else:
-                sl_dist = (sl_price - price) / price
+                sl_dist = (sl_price - strategy_entry) / strategy_entry
             if sl_dist <= 0 or sl_dist > 0.10:
                 log.warning(f"{symbol} SL invalido ({sl_dist*100:.1f}%). Saltando.")
                 return False
@@ -936,7 +955,9 @@ class BotBBEngine:
             # --- Generar y enviar grafico a Telegram ---
             try:
                 if df is not None:
-                    buf = self.generar_grafico_signal(symbol, df, side, price, sl_price, tp_price, entry_idx)
+                    # Usar el precio de entrada de la estrategia (open de la vela), no el live ticker
+                    strategy_entry = float(df.iloc[entry_idx]["open"]) if entry_idx is not None and entry_idx < len(df) else price
+                    buf = self.generar_grafico_signal(symbol, df, side, strategy_entry, sl_price, tp_price, entry_idx)
                     if buf:
                         caption = f"*{symbol} {side.upper()}*\nEntry: {fmt_price} | SL: {fmt_sl} | TP: {fmt_tp}"
                         self.send_telegram_photo(buf, caption)
@@ -1359,6 +1380,17 @@ class BotBBEngine:
         """
         if not self.connect():
             return
+
+        # --- Sincronizar session_active con posiciones abiertas en Bitget ---
+        try:
+            open_pos = self.get_open_symbols()
+            self.session_active = open_pos
+            if open_pos:
+                log.info(f"Posiciones abiertas detectadas al arrancar: {open_pos}")
+            else:
+                log.info("Sin posiciones abiertas al arrancar.")
+        except Exception as e:
+            log.warning(f"No se pudieron sincronizar posiciones abiertas: {e}")
 
         self.last_scan_time = 0
         log.info(f"BotBB arrancado | TF={self.cfg['timeframe']} | TOP={self.cfg['top_symbols_count']} | MaxPos={self.cfg['max_open_positions']}")
