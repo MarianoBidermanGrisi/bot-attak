@@ -75,6 +75,7 @@ DEFAULT_CONFIG = {
     "sl_buffer_pct":        0.0005,
     "rr_ratio":             2.0,
     # --- Gestion ---
+    "risk_pct":             0.07,
     "be_trigger_pct":       0.004,
     "be_offset_pct":        0.002,
     "trailing_dist_pct":    0.007,
@@ -865,37 +866,12 @@ class BotBBEngine:
             return False
 
         try:
-            market = await self._exch_call("market", symbol)
-            prec = market["precision"].get("amount")
-            min_limit = market["limits"].get("amount", {}).get("min")
-            if prec is None or min_limit is None:
-                log.warning(f"{symbol} precision/limits no disponibles. Saltando.")
-                return False
-            min_qty = min_limit or (10 ** -prec)
             ticker = await self._exch_call("fetch_ticker", symbol)
             price = float(ticker["last"])
 
-            MIN_NOTIONAL = 5.0
-            min_qty_from_notional = MIN_NOTIONAL / price
-            effective_min_qty = max(min_qty, min_qty_from_notional)
-
-            factor = 10 ** prec
-            effective_min_qty = math.ceil(effective_min_qty * factor) / factor
-            if not math.isfinite(effective_min_qty) or effective_min_qty <= 0:
-                log.warning(f"{symbol} qty invalida ({effective_min_qty}). Saltando.")
-                return False
-
-            min_margin = (effective_min_qty * price) / self.cfg["leverage"]
-            if min_margin > balance:
-                log.warning(f"Margen minimo {min_margin:.2f} > balance {balance:.2f} para {symbol}")
-                return False
-
-            qty = effective_min_qty
-            actual_margin = min_margin
-
             strategy_entry = float(df.iloc[entry_idx]["open"]) if df is not None and entry_idx is not None and entry_idx < len(df) else price
 
-            if not all(math.isfinite(v) for v in [sl_price, tp_price, strategy_entry]):
+            if not all(math.isfinite(v) for v in [sl_price, tp_price, strategy_entry, price]):
                 log.warning(f"{symbol} precio invalido (NaN/Inf). Saltando.")
                 return False
 
@@ -907,26 +883,49 @@ class BotBBEngine:
                 log.warning(f"{symbol} SL invalido ({sl_dist*100:.1f}%). Saltando.")
                 return False
 
+            # --- CALCULO DE QTY (identico al codigo original) ---
+            risk_pct = self.cfg.get("risk_pct", 0.02)
+            leverage = self.cfg["leverage"]
+            target_margin = balance * risk_pct
+            pos_value = target_margin * leverage
+            raw_qty = pos_value / price
+
+            market = await self._exch_call("market", symbol)
+            precision = market["precision"]["amount"]
+            step = market["limits"]["amount"]["min"] or (10 ** -precision)
+
+            # Floor al step mas cercano (como el original)
+            qty = (raw_qty // step) * step
+
+            # Proteccion: si qty=0 usar minimo
+            if qty <= 0:
+                qty = step
+
+            actual_margin = (qty * price) / leverage
+
+            # Si el margen real se pasa del target, bajar un step
+            if actual_margin > target_margin:
+                qty -= step
+                if qty <= 0:
+                    qty = step
+                actual_margin = (qty * price) / leverage
+
+            log.info(f"⚖️ {symbol} | Target: {target_margin:.2f} | Real: {actual_margin:.2f} | Qty: {qty}")
+
+            # --- ENVIO DE ORDER (identico al codigo original) ---
             ccxt_side = "buy" if side == "long" else "sell"
-            try:
-                fmt_tp = str(await self._exch_call("price_to_precision", symbol, tp_price))
-                fmt_sl = str(await self._exch_call("price_to_precision", symbol, sl_price))
-            except Exception:
-                fmt_tp = str(tp_price)
-                fmt_sl = str(sl_price)
             params = {
                 "marginCoin": "USDT",
                 "marginMode": "isolated",
                 "tradeSide": "open",
-                "presetStopSurplusPrice": fmt_tp,
-                "presetStopLossPrice": fmt_sl,
+                "presetStopSurplusPrice": str(exchange.price_to_precision(symbol, tp_price)),
+                "presetStopLossPrice": str(exchange.price_to_precision(symbol, sl_price)),
             }
             await self._exch_call("create_order", symbol, "market", ccxt_side, qty, params)
 
-            try:
-                fmt_price = str(await self._exch_call("price_to_precision", symbol, price))
-            except Exception:
-                fmt_price = str(price)
+            fmt_price = exchange.price_to_precision(symbol, price)
+            fmt_sl = exchange.price_to_precision(symbol, sl_price)
+            fmt_tp = exchange.price_to_precision(symbol, tp_price)
 
             msg = (
                 f"*{symbol} {side.upper()}*\n"
@@ -953,7 +952,7 @@ class BotBBEngine:
             await self._save_trade_entries()
             self.session_active.add(symbol)
 
-            # Grafico async (ejecuta matplotlib en thread para no bloquear)
+            # Grafico async
             if df is not None:
                 try:
                     buf = await asyncio.to_thread(
@@ -985,9 +984,6 @@ class BotBBEngine:
             return False
         except ExchangeError as e:
             log.error(f"[500] open_position {symbol}: {e}")
-            return False
-        except (decimal.DecimalException, ValueError) as e:
-            log.warning(f"[DECIMAL] open_position {symbol}: precision incompatible — {e}")
             return False
         except Exception as e:
             log.error(f"Error abriendo {symbol}: {e}")
