@@ -881,7 +881,10 @@ class BotBBEngine:
 
             factor = 10 ** prec
             effective_min_qty = math.ceil(effective_min_qty * factor) / factor
-            effective_min_qty = float(await self._exch_call("amount_to_precision", symbol, effective_min_qty))
+            try:
+                effective_min_qty = float(await self._exch_call("amount_to_precision", symbol, effective_min_qty))
+            except (decimal.DecimalException, ValueError):
+                pass  # math.ceil ya redondeó correctamente
             if not math.isfinite(effective_min_qty) or effective_min_qty <= 0:
                 log.warning(f"{symbol} qty invalida ({effective_min_qty}). Saltando.")
                 return False
@@ -909,18 +912,29 @@ class BotBBEngine:
                 return False
 
             ccxt_side = "buy" if side == "long" else "sell"
+            try:
+                fmt_tp = str(await self._exch_call("price_to_precision", symbol, tp_price))
+                fmt_sl = str(await self._exch_call("price_to_precision", symbol, sl_price))
+            except (decimal.DecimalException, ValueError):
+                fmt_tp = f"{tp_price:.6f}"
+                fmt_sl = f"{sl_price:.6f}"
             params = {
                 "marginCoin": "USDT",
                 "marginMode": "isolated",
                 "tradeSide": "open",
-                "presetStopSurplusPrice": str(await self._exch_call("price_to_precision", symbol, tp_price)),
-                "presetStopLossPrice": str(await self._exch_call("price_to_precision", symbol, sl_price)),
+                "presetStopSurplusPrice": fmt_tp,
+                "presetStopLossPrice": fmt_sl,
             }
             await self._exch_call("create_order", symbol, "market", ccxt_side, qty, params)
 
-            fmt_price = await self._exch_call("price_to_precision", symbol, price)
-            fmt_sl = await self._exch_call("price_to_precision", symbol, sl_price)
-            fmt_tp = await self._exch_call("price_to_precision", symbol, tp_price)
+            try:
+                fmt_price = str(await self._exch_call("price_to_precision", symbol, price))
+                fmt_sl = str(await self._exch_call("price_to_precision", symbol, sl_price))
+                fmt_tp = str(await self._exch_call("price_to_precision", symbol, tp_price))
+            except (decimal.DecimalException, ValueError):
+                fmt_price = f"{price:.6f}"
+                fmt_sl = f"{sl_price:.6f}"
+                fmt_tp = f"{tp_price:.6f}"
 
             msg = (
                 f"*{symbol} {side.upper()}*\n"
