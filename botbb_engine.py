@@ -476,15 +476,17 @@ class BotBBEngine:
 
             # --- Marcador ENTRY ---
             if local_entry is not None and 0 <= local_entry < n_w:
-                # Flecha alineada con el precio de entrada (no con HA low/high)
-                marker_y = entry_price * (0.997 if side == "long" else 1.003)
+                # Flecha justo debajo (LONG) o encima (SHORT) de la linea Entry
+                rng = ha_h[local_entry] - ha_l[local_entry] if ha_h[local_entry] != ha_l[local_entry] else entry_price * 0.002
+                offset = rng * 0.5
+                marker_y = entry_price - offset if side == "long" else entry_price + offset
                 marker_color = '#00FF00' if side == 'long' else '#FF4444'
                 marker_symbol = '^' if side == 'long' else 'v'
                 ax.plot(x[local_entry], marker_y, marker=marker_symbol, color=marker_color,
                         markersize=14, zorder=5)
                 ax.axvline(x=x[local_entry], color=marker_color, linestyle=':', linewidth=1.2, alpha=0.7)
                 ax.annotate('ENTRY', xy=(x[local_entry], entry_price),
-                            xytext=(x[local_entry] + 2, entry_price * (1.003 if side == "long" else 0.997)),
+                            xytext=(x[local_entry] + 2, entry_price),
                             fontsize=10, color=marker_color, fontweight='bold',
                             arrowprops=dict(arrowstyle='->', color=marker_color, lw=1.5))
 
