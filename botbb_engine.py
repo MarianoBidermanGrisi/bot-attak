@@ -912,20 +912,20 @@ class BotBBEngine:
 
             log.info(f"⚖️ {symbol} | Target: {target_margin:.2f} | Real: {actual_margin:.2f} | Qty: {qty}")
 
-            # --- ENVIO DE ORDER (identico al codigo original) ---
+            # --- ENVIO DE ORDER (sync directo, identico al codigo original) ---
             ccxt_side = "buy" if side == "long" else "sell"
             params = {
                 "marginCoin": "USDT",
                 "marginMode": "isolated",
                 "tradeSide": "open",
-                "presetStopSurplusPrice": str(await self._exch_call("price_to_precision", symbol, tp_price)),
-                "presetStopLossPrice": str(await self._exch_call("price_to_precision", symbol, sl_price)),
+                "presetStopSurplusPrice": str(self.exchange.price_to_precision(symbol, tp_price)),
+                "presetStopLossPrice": str(self.exchange.price_to_precision(symbol, sl_price)),
             }
-            await self._exch_call("create_order", symbol, "market", ccxt_side, qty, params)
+            self.exchange.create_order(symbol, "market", ccxt_side, qty, params)
 
-            fmt_price = await self._exch_call("price_to_precision", symbol, price)
-            fmt_sl = await self._exch_call("price_to_precision", symbol, sl_price)
-            fmt_tp = await self._exch_call("price_to_precision", symbol, tp_price)
+            fmt_price = self.exchange.price_to_precision(symbol, price)
+            fmt_sl = self.exchange.price_to_precision(symbol, sl_price)
+            fmt_tp = self.exchange.price_to_precision(symbol, tp_price)
 
             msg = (
                 f"*{symbol} {side.upper()}*\n"
