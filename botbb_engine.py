@@ -918,14 +918,14 @@ class BotBBEngine:
                 "marginCoin": "USDT",
                 "marginMode": "isolated",
                 "tradeSide": "open",
-                "presetStopSurplusPrice": str(exchange.price_to_precision(symbol, tp_price)),
-                "presetStopLossPrice": str(exchange.price_to_precision(symbol, sl_price)),
+                "presetStopSurplusPrice": str(await self._exch_call("price_to_precision", symbol, tp_price)),
+                "presetStopLossPrice": str(await self._exch_call("price_to_precision", symbol, sl_price)),
             }
             await self._exch_call("create_order", symbol, "market", ccxt_side, qty, params)
 
-            fmt_price = exchange.price_to_precision(symbol, price)
-            fmt_sl = exchange.price_to_precision(symbol, sl_price)
-            fmt_tp = exchange.price_to_precision(symbol, tp_price)
+            fmt_price = await self._exch_call("price_to_precision", symbol, price)
+            fmt_sl = await self._exch_call("price_to_precision", symbol, sl_price)
+            fmt_tp = await self._exch_call("price_to_precision", symbol, tp_price)
 
             msg = (
                 f"*{symbol} {side.upper()}*\n"
