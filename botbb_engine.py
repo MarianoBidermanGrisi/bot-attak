@@ -410,7 +410,6 @@ class BotBBEngine:
 
             # --- Indicadores en dataset completo ---
             bb_upper_full, bb_basis_full, bb_lower_full = self.calculate_bb(df["close"])
-            df_ha_full = self.heikin_ashi(df)
 
             # --- Ventana alrededor de la entrada (40 antes, 15 despues) ---
             center = entry_idx if entry_idx is not None else len(df) // 2
@@ -418,15 +417,14 @@ class BotBBEngine:
             s = max(0, center - before)
             e = min(len(df), center + after)
 
-            # Recortar arrays
-            ha_o = df_ha_full["ha_open"].values[s:e]
-            ha_h = df_ha_full["ha_high"].values[s:e]
-            ha_l = df_ha_full["ha_low"].values[s:e]
-            ha_c = df_ha_full["ha_close"].values[s:e]
+            # Recortar arrays (velas REGULARES, no HA, para que coincida con TradingView)
+            o_w = df["open"].values[s:e]
+            h_w = df["high"].values[s:e]
+            l_w = df["low"].values[s:e]
+            c_w = df["close"].values[s:e]
             bb_u = bb_upper_full.values[s:e]
             bb_b = bb_basis_full.values[s:e]
             bb_l = bb_lower_full.values[s:e]
-            c_w = df["close"].values[s:e]
             n_w = e - s
             x = np.arange(n_w)
 
@@ -441,14 +439,14 @@ class BotBBEngine:
             for spine in ax.spines.values():
                 spine.set_color('#333333')
 
-            # --- Velas Heikin Ashi ---
+            # --- Velas Regulares (mismo estilo que TradingView) ---
             for i in range(n_w):
-                color = '#26A69A' if ha_c[i] >= ha_o[i] else '#FF4444'
-                ax.plot([x[i], x[i]], [ha_l[i], ha_h[i]], color=color, linewidth=0.8)
-                body_bottom = min(ha_o[i], ha_c[i])
-                body_height = abs(ha_c[i] - ha_o[i])
-                if body_height < (ha_h[i] - ha_l[i]) * 0.001:
-                    body_height = (ha_h[i] - ha_l[i]) * 0.003
+                color = '#26A69A' if c_w[i] >= o_w[i] else '#FF4444'
+                ax.plot([x[i], x[i]], [l_w[i], h_w[i]], color=color, linewidth=0.8)
+                body_bottom = min(o_w[i], c_w[i])
+                body_height = abs(c_w[i] - o_w[i])
+                if body_height < (h_w[i] - l_w[i]) * 0.001:
+                    body_height = (h_w[i] - l_w[i]) * 0.003
                 rect = plt.Rectangle((x[i] - 0.35, body_bottom), 0.7, body_height,
                                       facecolor=color, edgecolor=color, linewidth=0.5)
                 ax.add_patch(rect)
@@ -477,7 +475,7 @@ class BotBBEngine:
             # --- Marcador ENTRY ---
             if local_entry is not None and 0 <= local_entry < n_w:
                 # Flecha justo debajo (LONG) o encima (SHORT) de la linea Entry
-                rng = ha_h[local_entry] - ha_l[local_entry] if ha_h[local_entry] != ha_l[local_entry] else entry_price * 0.002
+                rng = h_w[local_entry] - l_w[local_entry] if h_w[local_entry] != l_w[local_entry] else entry_price * 0.002
                 offset = rng * 0.5
                 marker_y = entry_price - offset if side == "long" else entry_price + offset
                 marker_color = '#00FF00' if side == 'long' else '#FF4444'
@@ -955,9 +953,7 @@ class BotBBEngine:
             # --- Generar y enviar grafico a Telegram ---
             try:
                 if df is not None:
-                    # Usar el precio de entrada de la estrategia (open de la vela), no el live ticker
-                    strategy_entry = float(df.iloc[entry_idx]["open"]) if entry_idx is not None and entry_idx < len(df) else price
-                    buf = self.generar_grafico_signal(symbol, df, side, strategy_entry, sl_price, tp_price, entry_idx)
+                    buf = self.generar_grafico_signal(symbol, df, side, price, sl_price, tp_price, entry_idx)
                     if buf:
                         caption = f"*{symbol} {side.upper()}*\nEntry: {fmt_price} | SL: {fmt_sl} | TP: {fmt_tp}"
                         self.send_telegram_photo(buf, caption)
