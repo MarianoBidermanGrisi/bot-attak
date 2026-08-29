@@ -73,10 +73,10 @@ DEFAULT_CONFIG = {
     "confirmation_window":  8,
     # --- Entrada ---
     "sl_buffer_pct":        0.0005,
-    "rr_ratio":             2.0,
+    "rr_ratio":             3.0,
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.004,
+    "be_trigger_pct":       0.006,
     "be_offset_pct":        0.002,
     "trailing_dist_pct":    0.007,
     "leverage":             10.0,
@@ -767,7 +767,7 @@ class BotBBEngine:
                         if sl_dist <= 0 or sl_dist > 0.10:
                             continue
                         sl = entry_price * (1 - sl_dist)
-                        tp = entry_price + 2 * (entry_price - sl)
+                        tp = entry_price + 3 * (entry_price - sl)
                         min_gap = entry_price * 0.0001
                         if sl >= entry_price - min_gap:
                             continue
@@ -800,7 +800,7 @@ class BotBBEngine:
                         if sl_dist <= 0 or sl_dist > 0.10:
                             continue
                         sl = entry_price * (1 + sl_dist)
-                        tp = entry_price - 2 * (sl - entry_price)
+                        tp = entry_price - 3 * (sl - entry_price)
                         min_gap = entry_price * 0.0001
                         if sl <= entry_price + min_gap:
                             continue
@@ -1109,25 +1109,71 @@ class BotBBEngine:
                             log.info(f"{symbol} BE+ activado (offset {self.cfg['be_offset_pct']*100:.1f}%)")
                             await self.send_telegram(f"*{symbol}* BE+ (offset {self.cfg['be_offset_pct']*100:.1f}%)")
 
-                # 4. Trailing Stop (solo despues de BE)
-                if self.alerts_history.get(f"{symbol}_be", False):
-                    peak = self.peak_prices[symbol]
+                # 4. Trailing Stop (activa a 2:1 ratio, sube 0.2% por nuevo max)
+                trail_key = f"{symbol}_trail_active"
+                trail_sl_key = f"{symbol}_trail_sl"
+                trail_peak_key = f"{symbol}_trail_peak"
+
+                if not self.alerts_history.get(trail_key, False):
+                    # Buscar SL original de la posicion
+                    original_sl = None
+                    for entry_data in self.trade_entries.get("entries", []):
+                        if entry_data["symbol"] == symbol:
+                            original_sl = entry_data["sl_price"]
+                            break
+
+                    if original_sl is not None:
+                        # Calcular distancia SL y precio de activacion (2:1)
+                        if side == "long":
+                            sl_dist = entry - original_sl
+                            activation_price = entry + 2 * sl_dist
+                            if mark >= activation_price:
+                                self.alerts_history[trail_key] = True
+                                initial_sl = entry + sl_dist  # 1:1 como base
+                                self.alerts_history[trail_sl_key] = initial_sl
+                                self.alerts_history[trail_peak_key] = mark
+                                if await self._update_stop_loss(symbol, side, initial_sl):
+                                    self.trail_counts[symbol] = 0
+                                    log.info(f"{symbol} Trailing activado 2:1. SL={initial_sl:.6f}")
+                                    await self.send_telegram(f"*{symbol}* Trailing 2:1 activado")
+                        else:
+                            sl_dist = original_sl - entry
+                            activation_price = entry - 2 * sl_dist
+                            if mark <= activation_price:
+                                self.alerts_history[trail_key] = True
+                                initial_sl = entry - sl_dist  # 1:1 como base
+                                self.alerts_history[trail_sl_key] = initial_sl
+                                self.alerts_history[trail_peak_key] = mark
+                                if await self._update_stop_loss(symbol, side, initial_sl):
+                                    self.trail_counts[symbol] = 0
+                                    log.info(f"{symbol} Trailing activado 2:1. SL={initial_sl:.6f}")
+                                    await self.send_telegram(f"*{symbol}* Trailing 2:1 activado")
+
+                # Trailing activo: subir SL 0.2% por nuevo max
+                if self.alerts_history.get(trail_key, False):
+                    current_trail_sl = self.alerts_history.get(trail_sl_key, 0)
+                    prev_peak = self.alerts_history.get(trail_peak_key, mark)
+
                     if side == "long":
-                        nuevo_sl = peak * (1 - self.cfg["trailing_dist_pct"])
-                        ultimo = self.alerts_history.get(f"{symbol}_trail", 0)
-                        if nuevo_sl > ultimo:
-                            if await self._update_stop_loss(symbol, side, nuevo_sl):
-                                self.alerts_history[f"{symbol}_trail"] = nuevo_sl
-                                self.trail_counts[symbol] = self.trail_counts.get(symbol, 0) + 1
-                                log.info(f"{symbol} Trail -> {nuevo_sl:.6f}")
+                        if mark > prev_peak:
+                            # Nuevo maximo: subir SL 0.2%
+                            new_sl = current_trail_sl * (1 + 0.002)
+                            if new_sl < mark:  # SL no puede pasar el precio
+                                if await self._update_stop_loss(symbol, side, new_sl):
+                                    self.alerts_history[trail_sl_key] = new_sl
+                                    self.alerts_history[trail_peak_key] = mark
+                                    self.trail_counts[symbol] = self.trail_counts.get(symbol, 0) + 1
+                                    log.info(f"{symbol} Trail -> {new_sl:.6f} (nuevo max {mark:.6f})")
                     else:
-                        nuevo_sl = peak * (1 + self.cfg["trailing_dist_pct"])
-                        ultimo = self.alerts_history.get(f"{symbol}_trail", 999999)
-                        if nuevo_sl < ultimo:
-                            if await self._update_stop_loss(symbol, side, nuevo_sl):
-                                self.alerts_history[f"{symbol}_trail"] = nuevo_sl
-                                self.trail_counts[symbol] = self.trail_counts.get(symbol, 0) + 1
-                                log.info(f"{symbol} Trail -> {nuevo_sl:.6f}")
+                        if mark < prev_peak:
+                            # Nuevo minimo: bajar SL 0.2%
+                            new_sl = current_trail_sl * (1 - 0.002)
+                            if new_sl > mark:  # SL no puede bajar del precio
+                                if await self._update_stop_loss(symbol, side, new_sl):
+                                    self.alerts_history[trail_sl_key] = new_sl
+                                    self.alerts_history[trail_peak_key] = mark
+                                    self.trail_counts[symbol] = self.trail_counts.get(symbol, 0) + 1
+                                    log.info(f"{symbol} Trail -> {new_sl:.6f} (nuevo min {mark:.6f})")
 
                 # 5. Monitoreo de SL prematuro
                 for mon_sym in list(self.premature_sl_monitor.keys()):
