@@ -738,6 +738,9 @@ class BotBBEngine:
                         continue
                     signal_green = close[v_idx] >= bb_basis[v_idx]
                     if ha_close[v_idx] > ha_open[v_idx] and macd_green[v_idx] and signal_green:
+                        # REGLA: Si la vela CONF toca la banda superior, anular señal LONG
+                        if not np.isnan(bb_upper[v_idx]) and ha_high[v_idx] >= bb_upper[v_idx]:
+                            continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
                             continue
@@ -768,6 +771,9 @@ class BotBBEngine:
                         continue
                     signal_red = close[v_idx] < bb_basis[v_idx]
                     if ha_close[v_idx] < ha_open[v_idx] and not macd_green[v_idx] and signal_red:
+                        # REGLA: Si la vela CONF toca la banda inferior, anular señal SHORT
+                        if not np.isnan(bb_lower[v_idx]) and ha_low[v_idx] <= bb_lower[v_idx]:
+                            continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
                             continue
