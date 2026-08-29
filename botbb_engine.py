@@ -948,6 +948,14 @@ class BotBBEngine:
                 log.warning(f"{symbol} SL invalido ({sl_dist*100:.1f}%). Saltando.")
                 return False
 
+            # --- RECALCULAR SL y TP con el precio real de entrada ---
+            if side == "long":
+                sl_price = price * (1 - sl_dist)
+                tp_price = price + 3 * (price - sl_price)
+            else:
+                sl_price = price * (1 + sl_dist)
+                tp_price = price - 3 * (sl_price - price)
+
             # --- VALIDAR TP vs PRECIO ACTUAL ---
             if side == "long" and tp_price <= price:
                 log.warning(f"{symbol} LONG: TP ({tp_price:.4f}) <= precio actual ({price:.4f}). Saltando.")
@@ -955,6 +963,8 @@ class BotBBEngine:
             if side == "short" and tp_price >= price:
                 log.warning(f"{symbol} SHORT: TP ({tp_price:.4f}) >= precio actual ({price:.4f}). Saltando.")
                 return False
+
+            log.info(f"{symbol} {side.upper()} | Ratio 3:1 garantizado | Entry={price:.4f} SL={sl_price:.4f} TP={tp_price:.4f}")
 
             # --- CALCULO DE QTY (identico al codigo original) ---
             risk_pct = self.cfg.get("risk_pct", 0.02)
