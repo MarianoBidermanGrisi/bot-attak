@@ -322,7 +322,11 @@ class BotBBEngine:
     # TELEGRAM — async con aiohttp
     # ==========================================================
     async def send_telegram(self, message: str):
-        if not self.telegram_token or not self.telegram_chat_id or not self._aio_session:
+        if not self.telegram_token or not self.telegram_chat_id:
+            log.warning("[TG] Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID.")
+            return
+        if not self._aio_session:
+            log.warning("[TG] aiohttp session no inicializada para send_telegram.")
             return
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
         try:
@@ -332,16 +336,22 @@ class BotBBEngine:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
-                    log.warning(f"[TG] HTTP {resp.status}")
+                    body = await resp.text()
+                    log.warning(f"[TG] HTTP {resp.status} enviando mensaje: {body[:200]}")
         except asyncio.TimeoutError:
-            log.warning("[TG] Timeout enviando mensaje.")
+            log.warning("[TG] Timeout enviando mensaje (10s).")
         except Exception as e:
-            log.warning(f"[TG] Error enviando mensaje: {e}")
+            log.warning(f"[TG] Error enviando mensaje: {type(e).__name__}: {e}")
 
     async def send_telegram_photo(self, buf: BytesIO, caption: str = "") -> bool:
-        if not self.telegram_token or not self.telegram_chat_id or not self._aio_session:
+        if not self.telegram_token or not self.telegram_chat_id:
+            log.warning("[TG] Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en variables de entorno.")
+            return False
+        if not self._aio_session:
+            log.warning("[TG] aiohttp session no inicializada. El bot no pudo enviar foto.")
             return False
         if not buf:
+            log.warning("[TG] Buffer de imagen vacío.")
             return False
         try:
             buf.seek(0)
@@ -356,13 +366,14 @@ class BotBBEngine:
                 if resp.status == 200:
                     log.info("[TG] Grafico enviado a Telegram.")
                     return True
-                log.warning(f"[TG] Error enviando foto: HTTP {resp.status}")
+                body = await resp.text()
+                log.warning(f"[TG] Error enviando foto: HTTP {resp.status} | {body[:200]}")
                 return False
         except asyncio.TimeoutError:
-            log.warning("[TG] Timeout enviando foto.")
+            log.warning("[TG] Timeout enviando foto (60s).")
             return False
         except Exception as e:
-            log.warning(f"[TG] Error enviando foto: {e}")
+            log.warning(f"[TG] Error enviando foto: {type(e).__name__}: {e}")
             return False
 
     # ==========================================================
@@ -891,6 +902,14 @@ class BotBBEngine:
                 log.warning(f"{symbol} SL invalido ({sl_dist*100:.1f}%). Saltando.")
                 return False
 
+            # --- VALIDAR TP vs PRECIO ACTUAL ---
+            if side == "long" and tp_price <= price:
+                log.warning(f"{symbol} LONG: TP ({tp_price:.4f}) <= precio actual ({price:.4f}). Saltando.")
+                return False
+            if side == "short" and tp_price >= price:
+                log.warning(f"{symbol} SHORT: TP ({tp_price:.4f}) >= precio actual ({price:.4f}). Saltando.")
+                return False
+
             # --- CALCULO DE QTY (identico al codigo original) ---
             risk_pct = self.cfg.get("risk_pct", 0.02)
             leverage = self.cfg["leverage"]
@@ -968,9 +987,13 @@ class BotBBEngine:
                     )
                     if buf:
                         caption = f"*{symbol} {side.upper()}*\nEntry: `{fmt_price}` | SL: `{fmt_sl}` | TP: `{fmt_tp}`"
-                        await self.send_telegram_photo(buf, caption)
+                        sent = await self.send_telegram_photo(buf, caption)
+                        if not sent:
+                            log.warning(f"[CHART] No se pudo enviar grafico de {symbol} a Telegram.")
+                    else:
+                        log.warning(f"[CHART] grafico_signal retorno None para {symbol}.")
                 except Exception as e:
-                    log.warning(f"[CHART] Error generando grafico para {symbol}: {e}")
+                    log.warning(f"[CHART] Error generando/enviando grafico para {symbol}: {e}")
 
             return True
 
