@@ -169,7 +169,7 @@ class BotBBEngine:
     async def start(self):
         """Inicializa el aiohttp session y conecta al exchange."""
         self._aio_session = aiohttp.ClientSession()
-        await self._connect()
+        return await self._connect()
 
     async def stop(self):
         """Cierra todo de forma ordenada."""
@@ -1386,7 +1386,7 @@ class BotBBEngine:
         - Cada ~15s: gestiona posiciones (BE, trailing, cierres)
         - Cada 5 min: escanea TOP 100 y busca senales
         """
-        if not await self._connect():
+        if not await self.start():
             return
 
         # Sincronizar session_active con posiciones abiertas
