@@ -398,6 +398,7 @@ class BotBBEngine:
                 return None
 
             bb_upper_full, bb_basis_full, bb_lower_full = self.calculate_bb(df["close"])
+            signal_line_full = self.calculate_signal_line(df["close"])
             ha_df = self.heikin_ashi(df)
 
             center = entry_idx if entry_idx is not None else len(df) // 2
@@ -411,7 +412,7 @@ class BotBBEngine:
             l_w = ha_df["ha_low"].values[s:e]
             c_w = ha_df["ha_close"].values[s:e]
             bb_u = bb_upper_full.values[s:e]
-            bb_b = bb_basis_full.values[s:e]
+            signal_line_w = signal_line_full.values[s:e]
             bb_l = bb_lower_full.values[s:e]
             n_w = e - s
             x = np.arange(n_w)
@@ -445,11 +446,19 @@ class BotBBEngine:
             ax.plot(x[valid_u], bb_u[valid_u], color='#FF0000', linewidth=1.0, label='BB Upper')
             ax.plot(x[valid_l], bb_l[valid_l], color='#26A69A', linewidth=1.0, label='BB Lower')
 
+            # Signal Line (close + SMA(MACD, 9)) — color: verde si MACD >= Signal, rojo si no
+            macd_fast = self._ema_tv(df["close"], self.cfg["macd_fast"])
+            macd_slow = self._ema_tv(df["close"], self.cfg["macd_slow"])
+            macd_val = macd_fast - macd_slow
+            signal_val = macd_val.rolling(self.cfg["macd_signal"]).mean()
+            macd_green_full = (macd_val >= signal_val)
+            macd_green_w = macd_green_full.values[s:e]
+            valid_s = ~np.isnan(signal_line_w)
             for i in range(1, n_w):
-                if np.isnan(bb_b[i]) or np.isnan(bb_b[i-1]):
+                if np.isnan(signal_line_w[i]) or np.isnan(signal_line_w[i-1]):
                     continue
-                color = '#26A69A' if c_w[i] >= bb_b[i] else '#FF4444'
-                ax.plot([x[i-1], x[i]], [bb_b[i-1], bb_b[i]], color=color, linewidth=1.2)
+                color = '#26A69A' if macd_green_w[i] else '#FF4444'
+                ax.plot([x[i-1], x[i]], [signal_line_w[i-1], signal_line_w[i]], color=color, linewidth=1.5, label='Signal Line' if i == 1 else '')
 
             # Entry / SL / TP
             ax.axhline(y=entry_price, color='#FFD700', linestyle='--', linewidth=1.5, alpha=0.8,
@@ -659,6 +668,14 @@ class BotBBEngine:
         signal = macd.rolling(self.cfg["macd_signal"]).mean()
         return macd >= signal
 
+    def calculate_signal_line(self, close: pd.Series) -> pd.Series:
+        """Calcula la signal line como close + SMA(MACD, 9) — identico a TradingView."""
+        fast = self._ema_tv(close, self.cfg["macd_fast"])
+        slow = self._ema_tv(close, self.cfg["macd_slow"])
+        macd = fast - slow
+        signal_val = macd.rolling(self.cfg["macd_signal"]).mean()
+        return close + signal_val
+
     # ==========================================================
     # ESTRATEGIA: DETECCION DE SENAL (CPU puro)
     # ==========================================================
@@ -671,6 +688,7 @@ class BotBBEngine:
         # Usar .values para operaciones vectorizadas y evitar copia innecesaria
         bb_upper, bb_basis, bb_lower = self.calculate_bb(df["close"])
         macd_green = self.calculate_macd_overlay(df["close"])
+        signal_line = self.calculate_signal_line(df["close"])
         ha_df = self.heikin_ashi(df)
 
         warmup = max(self.cfg["bb_length"], self.cfg["macd_slow"] + self.cfg["macd_signal"]) + 2
@@ -679,6 +697,7 @@ class BotBBEngine:
         bb_basis_s = bb_basis.iloc[warmup:].reset_index(drop=True)
         bb_lower_s = bb_lower.iloc[warmup:].reset_index(drop=True)
         macd_green_s = macd_green.iloc[warmup:].reset_index(drop=True)
+        signal_line_s = signal_line.iloc[warmup:].reset_index(drop=True)
 
         # Extras del df original (para SL con low/high regular y entry con open)
         reg_low = df["low"].iloc[warmup:].reset_index(drop=True)
@@ -697,6 +716,7 @@ class BotBBEngine:
         bb_lower_arr = bb_lower_s.values
         bb_basis_arr = bb_basis_s.values
         macd_arr = macd_green_s.values
+        signal_line_arr = signal_line_s.values
         close_arr = df["close"].iloc[warmup:].reset_index(drop=True).values
         reg_low_arr = reg_low.values
         reg_high_arr = reg_high.values
@@ -711,7 +731,8 @@ class BotBBEngine:
         result = self._scan_side_arrays(
             "long", ha_low_arr, ha_high_arr, ha_close_arr, ha_open_arr,
             bb_upper_arr, bb_basis_arr, bb_lower_arr, macd_arr,
-            close_arr, reg_low_arr, reg_high_arr, reg_open_arr, n, window, sl_buf, bb_len
+            close_arr, reg_low_arr, reg_high_arr, reg_open_arr, n, window, sl_buf, bb_len,
+            signal_line_arr
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
@@ -720,7 +741,8 @@ class BotBBEngine:
         result = self._scan_side_arrays(
             "short", ha_low_arr, ha_high_arr, ha_close_arr, ha_open_arr,
             bb_upper_arr, bb_basis_arr, bb_lower_arr, macd_arr,
-            close_arr, reg_low_arr, reg_high_arr, reg_open_arr, n, window, sl_buf, bb_len
+            close_arr, reg_low_arr, reg_high_arr, reg_open_arr, n, window, sl_buf, bb_len,
+            signal_line_arr
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
@@ -731,7 +753,8 @@ class BotBBEngine:
     def _scan_side_arrays(
         self, side, ha_low, ha_high, ha_close, ha_open,
         bb_upper, bb_basis, bb_lower, macd_green,
-        close, reg_low, reg_high, reg_open, n, window, sl_buf, bb_len
+        close, reg_low, reg_high, reg_open, n, window, sl_buf, bb_len,
+        signal_line
     ):
         """Escaneo sobre arrays numpy puros (sin pandas)."""
         max_v0 = n - 2
@@ -746,9 +769,9 @@ class BotBBEngine:
                     v_idx = v0_idx + offset
                     if v_idx >= n:
                         break
-                    if np.isnan(bb_basis[v_idx]):
+                    if np.isnan(signal_line[v_idx]):
                         continue
-                    signal_green = close[v_idx] >= bb_basis[v_idx]
+                    signal_green = close[v_idx] >= signal_line[v_idx]
                     if ha_close[v_idx] > ha_open[v_idx] and macd_green[v_idx] and signal_green:
                         # REGLA: Si la vela CONF toca la banda inferior, anular señal LONG
                         if not np.isnan(bb_lower[v_idx]) and ha_low[v_idx] <= bb_lower[v_idx]:
@@ -759,8 +782,8 @@ class BotBBEngine:
                         entry_price = reg_open[entry_idx]
                         if entry_price <= 0:
                             continue
-                        basis_at_entry = bb_basis[entry_idx]
-                        if np.isnan(basis_at_entry) or close[entry_idx] < basis_at_entry:
+                        signal_at_entry = signal_line[entry_idx]
+                        if np.isnan(signal_at_entry) or close[entry_idx] < signal_at_entry:
                             continue
                         sl_raw = reg_low[v_idx] * (1 - sl_buf)
                         sl_dist = (entry_price - sl_raw) / entry_price
@@ -779,9 +802,9 @@ class BotBBEngine:
                     v_idx = v0_idx + offset
                     if v_idx >= n:
                         break
-                    if np.isnan(bb_basis[v_idx]):
+                    if np.isnan(signal_line[v_idx]):
                         continue
-                    signal_red = close[v_idx] < bb_basis[v_idx]
+                    signal_red = close[v_idx] < signal_line[v_idx]
                     if ha_close[v_idx] < ha_open[v_idx] and not macd_green[v_idx] and signal_red:
                         # REGLA: Si la vela CONF toca la banda superior, anular señal SHORT
                         if not np.isnan(bb_upper[v_idx]) and ha_high[v_idx] >= bb_upper[v_idx]:
@@ -792,8 +815,8 @@ class BotBBEngine:
                         entry_price = reg_open[entry_idx]
                         if entry_price <= 0:
                             continue
-                        basis_at_entry = bb_basis[entry_idx]
-                        if np.isnan(basis_at_entry) or close[entry_idx] >= basis_at_entry:
+                        signal_at_entry = signal_line[entry_idx]
+                        if np.isnan(signal_at_entry) or close[entry_idx] >= signal_at_entry:
                             continue
                         sl_raw = reg_high[v_idx] * (1 + sl_buf)
                         sl_dist = (sl_raw - entry_price) / entry_price
