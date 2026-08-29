@@ -387,16 +387,18 @@ class BotBBEngine:
                 return None
 
             bb_upper_full, bb_basis_full, bb_lower_full = self.calculate_bb(df["close"])
+            ha_df = self.heikin_ashi(df)
 
             center = entry_idx if entry_idx is not None else len(df) // 2
             before, after = 40, 15
             s = max(0, center - before)
             e = min(len(df), center + after)
 
-            o_w = df["open"].values[s:e]
-            h_w = df["high"].values[s:e]
-            l_w = df["low"].values[s:e]
-            c_w = df["close"].values[s:e]
+            # Velas Heikin Ashi para el gráfico
+            o_w = ha_df["ha_open"].values[s:e]
+            h_w = ha_df["ha_high"].values[s:e]
+            l_w = ha_df["ha_low"].values[s:e]
+            c_w = ha_df["ha_close"].values[s:e]
             bb_u = bb_upper_full.values[s:e]
             bb_b = bb_basis_full.values[s:e]
             bb_l = bb_lower_full.values[s:e]
@@ -414,7 +416,7 @@ class BotBBEngine:
             for spine in ax.spines.values():
                 spine.set_color('#333333')
 
-            # Velas Regulares
+            # Velas Heikin Ashi
             for i in range(n_w):
                 color = '#26A69A' if c_w[i] >= o_w[i] else '#FF4444'
                 ax.plot([x[i], x[i]], [l_w[i], h_w[i]], color=color, linewidth=0.8)
