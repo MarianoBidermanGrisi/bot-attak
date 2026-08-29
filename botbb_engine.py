@@ -808,6 +808,17 @@ class BotBBEngine:
         return None
 
     # ==========================================================
+    # HELPERS
+    # ==========================================================
+    @staticmethod
+    def _timeframe_to_ms(tf: str) -> int:
+        """Convierte timeframe string ('5m', '1h', '15m') a milisegundos."""
+        units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
+        num = int(tf[:-1])
+        unit = tf[-1]
+        return num * units.get(unit, 60_000)
+
+    # ==========================================================
     # SCAN DE SENALES (async)
     # ==========================================================
     async def scan_signals(self, symbols: list) -> list:
@@ -831,6 +842,9 @@ class BotBBEngine:
             log.error(f"Error descargando OHLCV: {e}")
             return signals
 
+        # Calcular duracion del timeframe en ms
+        tf_ms = self._timeframe_to_ms(self.cfg["timeframe"])
+
         for symbol in symbols:
             if symbol in self.session_active:
                 continue
@@ -842,6 +856,14 @@ class BotBBEngine:
                 result = self.detect_signal(df)
                 if result:
                     side, sl, tp, entry_idx, v0_idx, confirm_idx = result
+
+                    # --- VALIDAR QUE LA VELA ACTUAL ES LA DE ENTRADA ---
+                    entry_ts = df.iloc[entry_idx]["timestamp"]
+                    now_ms = time.time() * 1000
+                    if not (entry_ts <= now_ms < entry_ts + tf_ms):
+                        log.debug(f"{symbol} Señal {side.upper()} descartada: vela de entrada ya pasó (entry_ts={entry_ts}, now={now_ms})")
+                        continue
+
                     signals.append({
                         "symbol": symbol,
                         "side": side,
