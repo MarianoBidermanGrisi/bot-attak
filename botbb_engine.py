@@ -519,7 +519,8 @@ class BotBBEngine:
                             ha='center', va=conf_va)
 
             side_label = "LONG" if side == "long" else "SHORT"
-            titulo = f"{symbol} | {side_label} | Entry: {entry_price:.6f} | SL: {sl_price:.6f} | TP: {tp_price:.6f}"
+            safe_symbol = ''.join(c for c in symbol if ord(c) < 128)  # strip CJK
+            titulo = f"{safe_symbol} | {side_label} | Entry: {entry_price:.6f} | SL: {sl_price:.6f} | TP: {tp_price:.6f}"
             ax.set_title(titulo, color='white', fontsize=12, fontweight='bold', pad=10)
             ax.set_ylabel('Precio (USDT)', color='white', fontsize=9)
             ax.legend(loc='upper left', fontsize=8, facecolor='#1a1a1a', edgecolor='#444',
@@ -960,6 +961,13 @@ class BotBBEngine:
                 actual_margin = (qty * price) / leverage
 
             log.info(f"⚖️ {symbol} | Target: {target_margin:.2f} | Real: {actual_margin:.2f} | Qty: {qty}")
+
+            # --- VALIDAR MONTO MINIMO (Bitget requiere ~5 USDT) ---
+            min_notional = market.get("limits", {}).get("cost", {}).get("min") or 5.0
+            notional = qty * price
+            if notional < min_notional:
+                log.warning(f"{symbol} Notional ({notional:.2f} USDT) < minimo ({min_notional} USDT). Saltando.")
+                return False
 
             # --- ENVIO DE ORDER (sync directo, identico al codigo original) ---
             ccxt_side = "buy" if side == "long" else "sell"
