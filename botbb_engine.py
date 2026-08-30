@@ -109,6 +109,7 @@ DEFAULT_CONFIG = {
     "macd_slow":            26,
     "macd_signal":          9,
     "confirmation_window":  8,
+    "doji_threshold":        0.10,
     # --- Entrada ---
     "sl_buffer_pct":        0.0005,
     "rr_ratio":             3.0,
@@ -818,8 +819,12 @@ class BotBBEngine:
                         continue
                     signal_green = close[v_idx] >= signal_line[v_idx]
                     if ha_close[v_idx] > ha_open[v_idx] and macd_green[v_idx] and signal_green:
-                        # REGLA: Si la vela CONF toca la banda inferior, anular señal LONG
+                        # REGLA: Si la vela CONF toca la banda inferior, anular senial LONG
                         if not np.isnan(bb_lower[v_idx]) and ha_low[v_idx] <= bb_lower[v_idx]:
+                            continue
+                        # REGLA: CONF no puede ser doji (cuerpo < threshold del rango)
+                        candle_range = ha_high[v_idx] - ha_low[v_idx]
+                        if candle_range > 0 and abs(ha_close[v_idx] - ha_open[v_idx]) < candle_range * self.cfg["doji_threshold"]:
                             continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
@@ -851,8 +856,12 @@ class BotBBEngine:
                         continue
                     signal_red = close[v_idx] < signal_line[v_idx]
                     if ha_close[v_idx] < ha_open[v_idx] and not macd_green[v_idx] and signal_red:
-                        # REGLA: Si la vela CONF toca la banda superior, anular señal SHORT
+                        # REGLA: Si la vela CONF toca la banda superior, anular senial SHORT
                         if not np.isnan(bb_upper[v_idx]) and ha_high[v_idx] >= bb_upper[v_idx]:
+                            continue
+                        # REGLA: CONF no puede ser doji (cuerpo < threshold del rango)
+                        candle_range = ha_high[v_idx] - ha_low[v_idx]
+                        if candle_range > 0 and abs(ha_close[v_idx] - ha_open[v_idx]) < candle_range * self.cfg["doji_threshold"]:
                             continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
