@@ -112,6 +112,7 @@ DEFAULT_CONFIG = {
     "doji_threshold":        0.10,
     # --- Entrada ---
     "sl_buffer_pct":        0.0005,
+    "min_sl_dist_pct":      0.003,
     "rr_ratio":             3.0,
     # --- Gestion ---
     "risk_pct":             0.07,
@@ -839,10 +840,14 @@ class BotBBEngine:
                             continue
                         sl_raw = reg_low[v_idx] * (1 - sl_buf)
                         sl_dist = (entry_price - sl_raw) / entry_price
+                        # Si el SL queda demasiado cerca de la entrada, usar distancia minima
+                        min_dist = self.cfg["min_sl_dist_pct"]
+                        if sl_dist < min_dist:
+                            sl_dist = min_dist
                         if sl_dist <= 0 or sl_dist > 0.10:
                             continue
                         sl = entry_price * (1 - sl_dist)
-                        tp = entry_price + 3 * (entry_price - sl)
+                        tp = entry_price + self.cfg["rr_ratio"] * (entry_price - sl)
                         min_gap = entry_price * 0.0001
                         if sl >= entry_price - min_gap:
                             continue
@@ -878,10 +883,14 @@ class BotBBEngine:
                             continue
                         sl_raw = reg_high[v_idx] * (1 + sl_buf)
                         sl_dist = (sl_raw - entry_price) / entry_price
+                        # Si el SL queda demasiado cerca de la entrada, usar distancia minima
+                        min_dist = self.cfg["min_sl_dist_pct"]
+                        if sl_dist < min_dist:
+                            sl_dist = min_dist
                         if sl_dist <= 0 or sl_dist > 0.10:
                             continue
                         sl = entry_price * (1 + sl_dist)
-                        tp = entry_price - 3 * (sl - entry_price)
+                        tp = entry_price - self.cfg["rr_ratio"] * (sl - entry_price)
                         min_gap = entry_price * 0.0001
                         if sl <= entry_price + min_gap:
                             continue
