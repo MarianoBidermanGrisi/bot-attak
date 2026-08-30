@@ -61,6 +61,44 @@ log = logging.getLogger("botbb")
 
 
 # ==========================================================
+# BLACKLIST — Activos NO crypto en Bitget (acciones, ETFs, commodities, indices)
+# ==========================================================
+NON_CRYPTO_BASES: set = {
+    # --- Acciones US ---
+    "AAL","AAOI","AAPL","AAPU","ABNB","ACHR","ADBE","ADI","ADVANTEST","AEHR","ALAB",
+    "AMAT","AMC","AMD","AMGN","AMKR","AMZN","AMZU","ANET","APD","APLD",
+    "APP","APR","ARM","ARQQ","ARX","ASML","ASTS","AVGO","AXTI",
+    "BA","BABA","BAC","BB","BBSTOCK","BEAT","BILL","BITO","BKNG","BMNR",
+    "BREV","BRKB","BSB","BZ",
+    "C","CAT","CBRS","CCL","CGNX","CHIP","CIEN","CL","CMCSA","COHR","CONL",
+    "COIN","COP","COST","CPNG","CRCL","CRDO","CRM","CRWD","CRWV","CSCO","CVX","CXMT",
+    "DASH","DDOG","DE","DELL","DKNG",
+    "F","FDX",
+    "GE","GM","GME","GOOGL","GS",
+    "HD","HIMS","HOOD","HPE","HPQ",
+    "INTC",
+    "JPM",
+    "KO",
+    "LMT","LOW",
+    "MA","MARA","MCD","META","MRNA","MRVL","MSFT","MU",
+    "NFLX","NKE","NOC","NOW","NTNX","NVDA","NVAX","NVO","NXPI",
+    "O","OKTA","ON","ORCL",
+    "PARA","PATH","PDD","PEP","PLTR","PYPL",
+    "QCOM","QQQ",
+    "RBLX","RIVN","ROKU","RTX",
+    "S","SOFI","SPOT","SQ","SPX","SP500",
+    "T","TOST","TSLA","TTD","TTWO","TXN",
+    "UBER","UNH",
+    "V","VIPS","VST",
+    "W","WBA","WFC","WMT",
+    "XPEV","ZS",
+    # --- ETFs ---
+    "IWM",
+    # --- Commodities ---
+    "COPPER","NATGAS",
+}
+
+# ==========================================================
 # CONFIG DEFAULTS
 # ==========================================================
 DEFAULT_CONFIG = {
@@ -266,9 +304,10 @@ class BotBBEngine:
             ranked = [
                 (s, float(t.get("quoteVolume", 0)))
                 for s, t in tickers.items()
-                if s.endswith("/USDT:USDT")
+                if s.endswith("/USDT:USDT") and s.split("/")[0] not in NON_CRYPTO_BASES
             ]
             ranked.sort(key=lambda x: x[1], reverse=True)
+            log.info(f"Top symbols: {len(ranked)} cryptos tras blacklist ({len(NON_CRYPTO_BASES)} excluidos)")
             return [s for s, _ in ranked[:n]]
         except RateLimitExceeded:
             log.warning("[429] get_top_symbols: Rate limit.")
@@ -762,6 +801,12 @@ class BotBBEngine:
         min_v0 = max(n - freshness, bb_len)
 
         for v0_idx in range(max_v0, min_v0, -1):
+            # REGLA: V0 no puede tocar ambas bandas (volatilidad extrema)
+            if (not np.isnan(bb_upper[v0_idx]) and not np.isnan(bb_lower[v0_idx])
+                    and ha_high[v0_idx] >= bb_upper[v0_idx]
+                    and ha_low[v0_idx] <= bb_lower[v0_idx]):
+                continue
+
             if side == "long":
                 if np.isnan(bb_lower[v0_idx]) or ha_low[v0_idx] > bb_lower[v0_idx]:
                     continue
