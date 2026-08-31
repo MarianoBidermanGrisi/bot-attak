@@ -113,10 +113,11 @@ DEFAULT_CONFIG = {
     # --- Entrada ---
     "sl_buffer_pct":        0.0005,
     "min_sl_dist_pct":      0.003,
-    "rr_ratio":             3.0,
+    "sl_max_dist_pct":      0.05,
+    "rr_ratio":             5.0,
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.006,
+    "be_trigger_pct":       0.012,
     "be_offset_pct":        0.002,
     "trailing_dist_pct":    0.007,
     "leverage":             10.0,
@@ -844,7 +845,7 @@ class BotBBEngine:
                         min_dist = self.cfg["min_sl_dist_pct"]
                         if sl_dist < min_dist:
                             sl_dist = min_dist
-                        if sl_dist <= 0 or sl_dist > 0.10:
+                        if sl_dist <= 0 or sl_dist > self.cfg["sl_max_dist_pct"]:
                             continue
                         sl = entry_price * (1 - sl_dist)
                         tp = entry_price + self.cfg["rr_ratio"] * (entry_price - sl)
@@ -887,7 +888,7 @@ class BotBBEngine:
                         min_dist = self.cfg["min_sl_dist_pct"]
                         if sl_dist < min_dist:
                             sl_dist = min_dist
-                        if sl_dist <= 0 or sl_dist > 0.10:
+                        if sl_dist <= 0 or sl_dist > self.cfg["sl_max_dist_pct"]:
                             continue
                         sl = entry_price * (1 + sl_dist)
                         tp = entry_price - self.cfg["rr_ratio"] * (sl - entry_price)
@@ -1018,10 +1019,10 @@ class BotBBEngine:
             # --- RECALCULAR SL y TP con el precio real de entrada ---
             if side == "long":
                 sl_price = price * (1 - sl_dist)
-                tp_price = price + 3 * (price - sl_price)
+                tp_price = price + self.cfg["rr_ratio"] * (price - sl_price)
             else:
                 sl_price = price * (1 + sl_dist)
-                tp_price = price - 3 * (sl_price - price)
+                tp_price = price - self.cfg["rr_ratio"] * (sl_price - price)
 
             # --- VALIDAR TP vs PRECIO ACTUAL ---
             if side == "long" and tp_price <= price:
