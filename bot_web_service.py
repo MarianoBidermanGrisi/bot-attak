@@ -12,7 +12,7 @@ import asyncio
 import logging
 import threading
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 
 # Silenciar logs HTTP de health checks
 logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
@@ -74,6 +74,14 @@ def telegram_webhook():
         logger.info(f"Telegram update: {json.dumps(update)}")
         return jsonify({"status": "ok"}), 200
     return jsonify({"error": "Request must be JSON"}), 400
+
+
+@app.route("/trades")
+def download_trades():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trades.csv")
+    if os.path.exists(path):
+        return send_file(path, as_attachment=True, download_name="trades.csv")
+    return "No hay trades aun", 404
 
 
 # ==============================================================
