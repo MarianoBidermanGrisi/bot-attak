@@ -130,8 +130,6 @@ DEFAULT_CONFIG = {
     "top_symbols_count":    100,
     "ohlcv_limit":          100,
     "timeframe":            "5m",
-    # --- Filtro BB Width ---
-    "bb_width_max":          0.08,
     # --- Concurrencia ---
     "max_concurrent_fetches": 10,
 }
@@ -731,15 +729,6 @@ class BotBBEngine:
 
         # Usar .values para operaciones vectorizadas y evitar copia innecesaria
         bb_upper, bb_basis, bb_lower = self.calculate_bb(df["close"])
-
-        # --- FILTRO BB WIDTH (Squeeze) ---
-        # Si el ancho de las bandas supera el umbral, el mercado tiene tendencia fuerte
-        # y la reversión a la media es menos probable → no operar.
-        bb_width_last = (bb_upper.iloc[-1] - bb_lower.iloc[-1]) / bb_basis.iloc[-1]
-        if bb_width_last > self.cfg["bb_width_max"]:
-            log.debug(f"BB Width {bb_width_last:.4f} > {self.cfg['bb_width_max']} — mercado tendencial, saltando.")
-            return None
-
         macd_green = self.calculate_macd_overlay(df["close"])
         signal_line = self.calculate_signal_line(df["close"])
         ha_df = self.heikin_ashi(df)
@@ -1585,15 +1574,6 @@ class BotBBEngine:
                 log.info(f"Posiciones abiertas detectadas al arrancar: {open_pos}")
             else:
                 log.info("Sin posiciones abiertas al arrancar.")
-
-            # FIX: Procesar trades que cerraron durante downtime
-            stale_syms = [s for s in list(self.trade_entries.keys()) if s not in open_pos]
-            if stale_syms:
-                log.info(f"[RECOVERY] {len(stale_syms)} entradas en JSON cerradas fuera de linea: {stale_syms}")
-                for sym in stale_syms:
-                    await self._process_closed_position(sym)
-                    self._cleanup_symbol(sym)
-                log.info("[RECOVERY] Sincronizacion completada.")
         except Exception as e:
             log.warning(f"No se pudieron sincronizar posiciones: {e}")
 
