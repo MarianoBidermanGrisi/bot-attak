@@ -132,6 +132,7 @@ DEFAULT_CONFIG = {
     "timeframe":            "5m",
     # --- Filtro BB Width ---
     "bb_width_max":          0.08,
+    "bb_width_lookback":     10,
     # --- Concurrencia ---
     "max_concurrent_fetches": 10,
 }
@@ -721,6 +722,26 @@ class BotBBEngine:
         return close + signal_val
 
     # ==========================================================
+    # FILTRO BB WIDTH ANTES DE V0 (vectorizado numpy)
+    # ==========================================================
+    def _check_bb_width_before_v0(self, bb_upper, bb_lower, bb_basis, v0_idx):
+        """Verifica que el BB Width promedio de las N velas antes de V0 este en rango."""
+        lookback = self.cfg["bb_width_lookback"]
+        start = max(0, v0_idx - lookback)
+        if v0_idx <= start:
+            return True
+        u = bb_upper.iloc[start:v0_idx].values
+        l = bb_lower.iloc[start:v0_idx].values
+        b = bb_basis.iloc[start:v0_idx].values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            widths = np.where(b > 0, (u - l) / b, 0.0)
+        mean_w = np.nanmean(widths)
+        if mean_w > self.cfg["bb_width_max"]:
+            log.debug(f"BB Width avg antes de V0 ({lookback} velas): {mean_w:.4f} > {self.cfg['bb_width_max']} — saltando.")
+            return False
+        return True
+
+    # ==========================================================
     # ESTRATEGIA: DETECCION DE SENAL (CPU puro)
     # ==========================================================
     def detect_signal(self, df: pd.DataFrame):
@@ -789,7 +810,9 @@ class BotBBEngine:
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
-            return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup)
+            v0_full = v0_idx + warmup
+            if self._check_bb_width_before_v0(bb_upper, bb_lower, bb_basis, v0_full):
+                return (side, sl, tp, entry_idx + warmup, v0_full, confirm_idx + warmup)
 
         result = self._scan_side_arrays(
             "short", ha_low_arr, ha_high_arr, ha_close_arr, ha_open_arr,
@@ -799,7 +822,9 @@ class BotBBEngine:
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
-            return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup)
+            v0_full = v0_idx + warmup
+            if self._check_bb_width_before_v0(bb_upper, bb_lower, bb_basis, v0_full):
+                return (side, sl, tp, entry_idx + warmup, v0_full, confirm_idx + warmup)
 
         return None
 
