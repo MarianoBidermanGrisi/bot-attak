@@ -112,19 +112,20 @@ DEFAULT_CONFIG = {
     "doji_threshold":        0.10,
     # --- Entrada ---
     "sl_buffer_pct":        0.001,
-    "min_sl_dist_pct":      0.006,
+    "min_sl_dist_pct":      0.009,
     "sl_max_dist_pct":      0.05,
     "rr_ratio":             3.0,
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.012,
+    "be_trigger_pct":       0.019,
     "be_offset_pct":        0.002,
     "trailing_dist_pct":    0.007,
     "leverage":             10.0,
-    "max_open_positions":   5,
+    "max_open_positions":   4,
     # --- Cooldown ---
     "max_consecutive_losses": 4,
     "cooldown_hours":       4,
+    "entry_cooldown_sec":   30,
     # --- Escaneo ---
     "scan_interval_sec":    300,
     "top_symbols_count":    100,
@@ -148,7 +149,7 @@ class BotBBEngine:
         "cfg", "exchange", "semaphore", "_aio_session",
         "alerts_history", "peak_prices", "cooldowns", "session_active",
         "trade_entries", "trail_counts", "premature_sl_monitor", "adverse_prices",
-        "consecutive_losses", "cooldown_until", "last_scan_time",
+        "consecutive_losses", "cooldown_until", "last_scan_time", "last_entry_time",
         "api_key", "secret_key", "passphrase",
         "telegram_token", "telegram_chat_id",
         "trades_csv", "trade_entries_path", "premature_sl_csv", "price_paths_dir",
@@ -175,6 +176,7 @@ class BotBBEngine:
         self.consecutive_losses: int = 0
         self.cooldown_until: Optional[float] = None
         self.last_scan_time: float = 0.0
+        self.last_entry_time: float = 0.0
 
         # Credenciales
         self.api_key = os.environ.get("BITGET_API_KEY", "")
@@ -1165,6 +1167,7 @@ class BotBBEngine:
             }
             await self._save_trade_entries()
             self.session_active.add(symbol)
+            self.last_entry_time = time.time()
 
             # Grafico async
             if df is not None:
@@ -1273,11 +1276,8 @@ class BotBBEngine:
 
                 if not self.alerts_history.get(trail_key, False):
                     # Buscar SL original de la posicion
-                    original_sl = None
-                    for entry_data in self.trade_entries.get("entries", []):
-                        if entry_data["symbol"] == symbol:
-                            original_sl = entry_data["sl_price"]
-                            break
+                    entry_data = self.trade_entries.get(symbol)
+                    original_sl = entry_data["sl_price"] if entry_data else None
 
                     if original_sl is not None:
                         # Calcular distancia SL y precio de activacion (2:1)
@@ -1662,7 +1662,9 @@ class BotBBEngine:
                             if top:
                                 signals = await self.scan_signals(top)
                                 for sig in signals:
-                                    if await self.can_open() and not self.is_on_cooldown():
+                                    if (await self.can_open()
+                                            and not self.is_on_cooldown()
+                                            and (time.time() - self.last_entry_time) >= self.cfg["entry_cooldown_sec"]):
                                         await self.open_position(
                                             symbol=sig["symbol"],
                                             side=sig["side"],
