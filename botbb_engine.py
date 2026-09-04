@@ -111,10 +111,10 @@ DEFAULT_CONFIG = {
     "confirmation_window":  8,
     "doji_threshold":        0.10,
     # --- Entrada ---
-    "sl_buffer_pct":        0.0005,
-    "min_sl_dist_pct":      0.003,
+    "sl_buffer_pct":        0.001,
+    "min_sl_dist_pct":      0.006,
     "sl_max_dist_pct":      0.05,
-    "rr_ratio":             5.0,
+    "rr_ratio":             3.0,
     # --- Gestion ---
     "risk_pct":             0.07,
     "be_trigger_pct":       0.012,
@@ -974,7 +974,7 @@ class BotBBEngine:
         tf_ms = self._timeframe_to_ms(self.cfg["timeframe"])
 
         for symbol in symbols:
-            if symbol in self.session_active:
+            if symbol in self.session_active or self.is_cooling_down(symbol):
                 continue
             data = ohlcv_data.get(symbol)
             if not data or len(data) < 20:
@@ -1070,8 +1070,11 @@ class BotBBEngine:
 
             log.info(f"{symbol} {side.upper()} | Ratio 3:1 garantizado | Entry={price:.4f} SL={sl_price:.4f} TP={tp_price:.4f}")
 
-            # --- CALCULO DE QTY (identico al codigo original) ---
-            risk_pct = self.cfg.get("risk_pct", 0.02)
+            # --- CALCULO DE QTY ---
+            risk_pct_cfg = self.cfg.get("risk_pct", 0.07)
+            risk_pct = min(risk_pct_cfg, 0.10)  # MAX 10% del balance
+            if risk_pct_cfg > 0.10:
+                log.warning(f"{symbol} risk_pct={risk_pct_cfg*100:.1f}% limitado a 10%")
             leverage = self.cfg["leverage"]
             target_margin = balance * risk_pct
             pos_value = target_margin * leverage
@@ -1105,6 +1108,16 @@ class BotBBEngine:
             if notional < min_notional:
                 log.warning(f"{symbol} Notional ({notional:.2f} USDT) < minimo ({min_notional} USDT). Saltando.")
                 return False
+
+            # --- FORZAR LEVERAGE A MAXIMO CONFIGURADO ---
+            try:
+                target_leverage = int(self.cfg["leverage"])
+                current_lev = await self._exch_call("fetch_leverage", symbol)
+                if current_lev != target_leverage:
+                    await self._exch_call("set_leverage", target_leverage, symbol)
+                    log.info(f"{symbol} Leverage cambiado de {current_lev}x a {target_leverage}x")
+            except Exception as e:
+                log.warning(f"{symbol} No se pudo cambiar leverage: {e}. Usando el actual.")
 
             # --- ENVIO DE ORDER (sync directo, identico al codigo original) ---
             ccxt_side = "buy" if side == "long" else "sell"
@@ -1201,8 +1214,8 @@ class BotBBEngine:
             # 1. Detectar posiciones cerradas
             for sym in list(self.session_active):
                 if sym not in active_symbols:
-                    self.cooldowns[sym] = time.time() + 3600
-                    log.info(f"{sym} CERRADA. Cooldown 1h activado.")
+                    self.cooldowns[sym] = time.time() + 14400
+                    log.info(f"{sym} CERRADA. Cooldown 4h activado.")
                     await self._process_closed_position(sym)
                     self._cleanup_symbol(sym)
 
