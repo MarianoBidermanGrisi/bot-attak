@@ -1112,10 +1112,17 @@ class BotBBEngine:
             # --- FORZAR LEVERAGE A MAXIMO CONFIGURADO ---
             try:
                 target_leverage = int(self.cfg["leverage"])
-                current_lev = await self._exch_call("fetch_leverage", symbol)
+                lev_data = await self._exch_call("fetch_leverage", symbol)
+                # Bitget retorna dict: {'longLeverage': 10, 'shortLeverage': 10, ...}
+                if isinstance(lev_data, dict):
+                    current_lev = int(lev_data.get("longLeverage", lev_data.get("info", {}).get("isolatedLongLever", 10)))
+                else:
+                    current_lev = int(lev_data)
                 if current_lev != target_leverage:
                     await self._exch_call("set_leverage", target_leverage, symbol)
                     log.info(f"{symbol} Leverage cambiado de {current_lev}x a {target_leverage}x")
+                else:
+                    log.debug(f"{symbol} Leverage ya en {target_leverage}x")
             except Exception as e:
                 log.warning(f"{symbol} No se pudo cambiar leverage: {e}. Usando el actual.")
 
