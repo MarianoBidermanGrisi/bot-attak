@@ -208,6 +208,7 @@ class BotBBEngine:
             "be_triggered", "be_price", "trail_count", "trail_peak_price", "trail_final_sl",
             "entry_weekday", "entry_hour", "size_usdt", "risk_pct",
             "max_favorable_pct", "max_adverse_pct",
+            "regime", "bb_width",
         ]
         self.PREMATURE_CSV_HEADERS = [
             "entry_time", "sl_time", "symbol", "side", "entry_price", "sl_price",
@@ -1102,6 +1103,7 @@ class BotBBEngine:
         v0_idx: int = None,
         confirm_idx: int = None,
         regime: str = "squeeze",
+        bb_width: float = 0.0,
     ) -> bool:
         if symbol in self.session_active:
             log.debug(f"{symbol} ya tiene posicion activa. Saltando.")
@@ -1247,10 +1249,11 @@ class BotBBEngine:
                 f"Entrada: `{fmt_price}`\n"
                 f"SL: `{fmt_sl}`\n"
                 f"TP: `{fmt_tp}` (1:{int(self.cfg['rr_ratio'])})\n"
-                f"Qty: `{qty}` | Margin: `{actual_margin:.2f}` USDT"
+                f"Qty: `{qty}` | Margin: `{actual_margin:.2f}` USDT\n"
+                f"Regime: `{regime.upper()}` | BB Width: `{bb_width:.4f}`"
             )
             await self.send_telegram(msg)
-            log.info(f"{symbol} {side.upper()} | Entry={fmt_price} SL={fmt_sl} TP={fmt_tp} | Qty={qty} | Margin={actual_margin:.2f}")
+            log.info(f"{symbol} {side.upper()} | Entry={fmt_price} SL={fmt_sl} TP={fmt_tp} | Qty={qty} | Margin={actual_margin:.2f} | Regime={regime.upper()} BBW={bb_width:.4f}")
 
             self.trade_entries[symbol] = {
                 "entry_time": datetime.now().isoformat(),
@@ -1263,6 +1266,8 @@ class BotBBEngine:
                 "balance_before": balance,
                 "size_usdt": round(actual_margin, 2),
                 "risk_pct": round(actual_margin / balance * 100, 2),
+                "regime": regime,
+                "bb_width": round(bb_width, 4),
             }
             await self._save_trade_entries()
             self.session_active.add(symbol)
@@ -1644,6 +1649,8 @@ class BotBBEngine:
             "risk_pct": entry.get("risk_pct", 0),
             "max_favorable_pct": round(abs(self.peak_prices.get(sym, ep) - ep) / ep * 100, 2),
             "max_adverse_pct": round(abs(self.adverse_prices.get(sym, ep) - ep) / ep * 100, 2),
+            "regime": entry.get("regime", ""),
+            "bb_width": entry.get("bb_width", 0),
         }
         write_header = not os.path.exists(self.trades_csv)
         try:
@@ -1775,6 +1782,7 @@ class BotBBEngine:
                                             v0_idx=sig.get("v0_idx"),
                                             confirm_idx=sig.get("confirm_idx"),
                                             regime=sig.get("regime", "squeeze"),
+                                            bb_width=sig.get("bb_width", 0.0),
                                         )
                                 if not signals:
                                     log.info("Sin senales en este escaneo.")
