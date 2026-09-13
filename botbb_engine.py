@@ -111,10 +111,10 @@ DEFAULT_CONFIG = {
     "confirmation_window":  8,
     "doji_threshold":        0.10,
     # --- Entrada ---
-    "sl_buffer_pct":        0.001,
+    "sl_buffer_pct":        0.008,
     "min_sl_dist_pct":      0.009,
     "sl_max_dist_pct":      0.05,
-    "rr_ratio":             3.0,
+    "rr_ratio":             2.0,
     # --- Gestion ---
     "risk_pct":             0.07,
     "be_trigger_pct":       0.019,
@@ -128,7 +128,7 @@ DEFAULT_CONFIG = {
     "entry_cooldown_sec":   30,
     # --- Escaneo ---
     "scan_interval_sec":    300,
-    "top_symbols_count":    100,
+    "top_symbols_count":    50,
     "ohlcv_limit":          100,
     "timeframe":            "5m",
     # --- Filtro BB Width ---
