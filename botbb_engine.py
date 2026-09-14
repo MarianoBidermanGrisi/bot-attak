@@ -111,15 +111,15 @@ DEFAULT_CONFIG = {
     "confirmation_window":  8,
     "doji_threshold":        0.10,
     # --- Entrada ---
-    "sl_buffer_pct":        0.0005,
-    "min_sl_dist_pct":      0.003,
+    "sl_buffer_pct":        0.0070,
+    "min_sl_dist_pct":      0.0070,
     "sl_max_dist_pct":      0.05,
-    "rr_ratio":             5.0,
+    "rr_ratio":             2.2,
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.012,
+    "be_trigger_pct":       0.0132,
     "be_offset_pct":        0.002,
-    "trailing_dist_pct":    0.007,
+    "trailing_dist_pct":    0.0030,
     "leverage":             10.0,
     "max_open_positions":   5,
     # --- Cooldown ---
