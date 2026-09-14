@@ -111,35 +111,25 @@ DEFAULT_CONFIG = {
     "confirmation_window":  8,
     "doji_threshold":        0.10,
     # --- Entrada ---
-    "sl_buffer_pct":        0.008,
-    "min_sl_dist_pct":      0.009,
+    "sl_buffer_pct":        0.0005,
+    "min_sl_dist_pct":      0.003,
     "sl_max_dist_pct":      0.05,
-    "rr_ratio":             2.0,
+    "rr_ratio":             5.0,
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.019,
+    "be_trigger_pct":       0.012,
     "be_offset_pct":        0.002,
     "trailing_dist_pct":    0.007,
     "leverage":             10.0,
-    "max_open_positions":   4,
+    "max_open_positions":   5,
     # --- Cooldown ---
     "max_consecutive_losses": 4,
     "cooldown_hours":       4,
-    "entry_cooldown_sec":   30,
     # --- Escaneo ---
     "scan_interval_sec":    300,
-    "top_symbols_count":    50,
+    "top_symbols_count":    100,
     "ohlcv_limit":          100,
     "timeframe":            "5m",
-    # --- Filtro BB Width ---
-    "bb_width_max":          0.08,
-    "bb_width_lookback":     10,
-    "bb_width_squeeze":      0.04,   # < 0.04 = squeeze (mean-reversion funciona)
-    "bb_width_expansion":    0.07,   # > 0.07 = expansion (mean-reversion falla)
-    # --- Neutral regime (bb_width entre squeeze y expansion) ---
-    "neutral_leverage":      5.0,    # Leverage reducido en neutral
-    "neutral_sl_buffer":     0.002,  # SL buffer ampliado en neutral
-    "neutral_min_sl_dist":   0.012,  # Min SL distance ampliado en neutral
     # --- Concurrencia ---
     "max_concurrent_fetches": 10,
 }
@@ -155,7 +145,7 @@ class BotBBEngine:
         "cfg", "exchange", "semaphore", "_aio_session",
         "alerts_history", "peak_prices", "cooldowns", "session_active",
         "trade_entries", "trail_counts", "premature_sl_monitor", "adverse_prices",
-        "consecutive_losses", "cooldown_until", "last_scan_time", "last_entry_time",
+        "consecutive_losses", "cooldown_until", "last_scan_time",
         "api_key", "secret_key", "passphrase",
         "telegram_token", "telegram_chat_id",
         "trades_csv", "trade_entries_path", "premature_sl_csv", "price_paths_dir",
@@ -182,7 +172,6 @@ class BotBBEngine:
         self.consecutive_losses: int = 0
         self.cooldown_until: Optional[float] = None
         self.last_scan_time: float = 0.0
-        self.last_entry_time: float = 0.0
 
         # Credenciales
         self.api_key = os.environ.get("BITGET_API_KEY", "")
@@ -208,7 +197,6 @@ class BotBBEngine:
             "be_triggered", "be_price", "trail_count", "trail_peak_price", "trail_final_sl",
             "entry_weekday", "entry_hour", "size_usdt", "risk_pct",
             "max_favorable_pct", "max_adverse_pct",
-            "regime", "bb_width",
         ]
         self.PREMATURE_CSV_HEADERS = [
             "entry_time", "sl_time", "symbol", "side", "entry_price", "sl_price",
@@ -453,6 +441,7 @@ class BotBBEngine:
 
             bb_upper_full, bb_basis_full, bb_lower_full = self.calculate_bb(df["close"])
             signal_line_full = self.calculate_signal_line(df["close"])
+            vwap_full = self.calculate_vwap(df)
             ha_df = self.heikin_ashi(df)
 
             center = entry_idx if entry_idx is not None else len(df) // 2
@@ -468,6 +457,7 @@ class BotBBEngine:
             bb_u = bb_upper_full.values[s:e]
             signal_line_w = signal_line_full.values[s:e]
             bb_l = bb_lower_full.values[s:e]
+            vwap_w = vwap_full.values[s:e]
             n_w = e - s
             x = np.arange(n_w)
 
@@ -513,6 +503,10 @@ class BotBBEngine:
                     continue
                 color = '#26A69A' if macd_green_w[i] else '#FF4444'
                 ax.plot([x[i-1], x[i]], [signal_line_w[i-1], signal_line_w[i]], color=color, linewidth=1.5, label='Signal Line' if i == 1 else '')
+
+            # VWAP — línea azul sólida (color #2962FF idéntico a TradingView)
+            valid_vwap = ~np.isnan(vwap_w)
+            ax.plot(x[valid_vwap], vwap_w[valid_vwap], color='#2962FF', linewidth=1.5, label='VWAP')
 
             # Entry / SL / TP
             ax.axhline(y=entry_price, color='#FFD700', linestyle='--', linewidth=1.5, alpha=0.8,
@@ -583,7 +577,9 @@ class BotBBEngine:
 
             side_label = "LONG" if side == "long" else "SHORT"
             safe_symbol = ''.join(c for c in symbol if ord(c) < 128)  # strip CJK
-            titulo = f"{safe_symbol} | {side_label} | Entry: {entry_price:.6f} | SL: {sl_price:.6f} | TP: {tp_price:.6f}"
+            # Valor VWAP actual para el título
+            vwap_current = vwap_w[-1] if len(vwap_w) > 0 and not np.isnan(vwap_w[-1]) else 0
+            titulo = f"{safe_symbol} | {side_label} | Entry: {entry_price:.6f} | SL: {sl_price:.6f} | TP: {tp_price:.6f} | VWAP: {vwap_current:.6f}"
             ax.set_title(titulo, color='white', fontsize=12, fontweight='bold', pad=10)
             ax.set_ylabel('Precio (USDT)', color='white', fontsize=9)
             ax.legend(loc='upper left', fontsize=8, facecolor='#1a1a1a', edgecolor='#444',
@@ -730,87 +726,56 @@ class BotBBEngine:
         signal_val = macd.rolling(self.cfg["macd_signal"]).mean()
         return close + signal_val
 
-    # ==========================================================
-    # FILTRO BB WIDTH ANTES DE V0 (vectorizado numpy)
-    # ==========================================================
-    def _check_bb_width_before_v0(self, bb_upper, bb_lower, bb_basis, v0_idx):
-        """Verifica que el BB Width promedio de las N velas antes de V0 este en rango."""
-        lookback = self.cfg["bb_width_lookback"]
-        start = max(0, v0_idx - lookback)
-        if v0_idx <= start:
-            return True
-        u = bb_upper.iloc[start:v0_idx].values
-        l = bb_lower.iloc[start:v0_idx].values
-        b = bb_basis.iloc[start:v0_idx].values
-        with np.errstate(divide='ignore', invalid='ignore'):
-            widths = np.where(b > 0, (u - l) / b, 0.0)
-        mean_w = np.nanmean(widths)
-        if mean_w > self.cfg["bb_width_max"]:
-            log.debug(f"BB Width avg antes de V0 ({lookback} velas): {mean_w:.4f} > {self.cfg['bb_width_max']} — saltando.")
-            return False
-        return True
+    @staticmethod
+    def calculate_vwap(df: pd.DataFrame) -> pd.Series:
+        """
+        VWAP con anchor Session (diario) — idéntico a TradingView.
+        Formula: cumsum(hlc3 * volume) / cumsum(volume) reiniciando cada día.
+        """
+        high = df["high"].values.astype(np.float64)
+        low = df["low"].values.astype(np.float64)
+        close = df["close"].values.astype(np.float64)
+        volume = df["volume"].values.astype(np.float64)
 
-    # ==========================================================
-    # FILTRO DE VOLATILIDAD: Regime Detection
-    # ==========================================================
-    def calcular_bb_width(self, df: pd.DataFrame) -> float:
-        """Calcula el BB Width actual (ultima vela). Retorna float o NaN si no hay datos suficientes."""
-        if df is None or len(df) < self.cfg["bb_length"]:
-            return float("nan")
-        bb_upper, bb_basis, bb_lower = self.calculate_bb(df["close"])
-        last_upper = bb_upper.iloc[-1]
-        last_basis = bb_basis.iloc[-1]
-        last_lower = bb_lower.iloc[-1]
-        if np.isnan(last_upper) or np.isnan(last_basis) or np.isnan(last_lower) or last_basis <= 0:
-            return float("nan")
-        return (last_upper - last_lower) / last_basis
+        typical_price = (high + low + close) / 3.0
+        tp_vol = typical_price * volume
 
-    def evaluar_regimen(self, bb_width: float) -> str:
-        """Clasifica el regimen de volatilidad. Retorna: 'squeeze', 'neutral' o 'expansion'."""
-        if np.isnan(bb_width):
-            return "neutral"  # Sin datos suficientes, asumir neutral
-        if bb_width < self.cfg["bb_width_squeeze"]:
-            return "squeeze"
-        elif bb_width > self.cfg["bb_width_expansion"]:
-            return "expansion"
-        else:
-            return "neutral"
+        # Detectar cambio de sesión (día) por timestamp en ms
+        timestamps = df["timestamp"].values
+        days = (timestamps // 86_400_000).astype(np.int64)
 
-    def get_config_para_regimen(self, regime: str) -> dict:
-        """Retorna config ajustada segun el regimen. Retorna None si es expansion (no operar)."""
-        if regime == "expansion":
-            return None
-        cfg = self.cfg.copy()
-        if regime == "neutral":
-            cfg["leverage"] = self.cfg["neutral_leverage"]
-            cfg["sl_buffer_pct"] = self.cfg["neutral_sl_buffer"]
-            cfg["min_sl_dist_pct"] = self.cfg["neutral_min_sl_dist"]
-            # risk_pct y max_open_positions se mantienen igual (excepcion del usuario)
-        return cfg
+        n = len(df)
+        vwap = np.empty(n, dtype=np.float64)
+        cum_tp_vol = 0.0
+        cum_vol = 0.0
+
+        for i in range(n):
+            if i == 0 or days[i] != days[i - 1]:
+                # Nuevo día: reiniciar acumuladores
+                cum_tp_vol = tp_vol[i]
+                cum_vol = volume[i]
+            else:
+                cum_tp_vol += tp_vol[i]
+                cum_vol += volume[i]
+
+            vwap[i] = cum_tp_vol / cum_vol if cum_vol > 0 else np.nan
+
+        return pd.Series(vwap, index=df.index)
 
     # ==========================================================
     # ESTRATEGIA: DETECCION DE SENAL (CPU puro)
     # ==========================================================
-    def detect_signal(self, df: pd.DataFrame, regime: str = "squeeze"):
-        """Detecta senal LONG o SHORT. Retorna (side, sl, tp, entry_idx, v0_idx, confirm_idx) o None.
-        regime: 'squeeze' (normal), 'neutral' (SL ampliado), 'expansion' (no buscar, retorna None).
-        """
-        # Si es expansion, no buscar senales (el filtro ya deberia haber saltado, pero por seguridad)
-        if regime == "expansion":
-            return None
-
-        if df is None or not isinstance(df, pd.DataFrame):
-            return None
-
+    def detect_signal(self, df: pd.DataFrame):
+        """Detecta senal LONG o SHORT. Retorna (side, sl, tp, entry_idx, v0_idx, confirm_idx) o None."""
         min_candles = self.cfg["bb_length"] + self.cfg["macd_slow"] + self.cfg["macd_signal"] + self.cfg["confirmation_window"] + 5
         if len(df) < min_candles:
             return None
 
         # Usar .values para operaciones vectorizadas y evitar copia innecesaria
         bb_upper, bb_basis, bb_lower = self.calculate_bb(df["close"])
-
         macd_green = self.calculate_macd_overlay(df["close"])
         signal_line = self.calculate_signal_line(df["close"])
+        vwap_full = self.calculate_vwap(df)
         ha_df = self.heikin_ashi(df)
 
         warmup = max(self.cfg["bb_length"], self.cfg["macd_slow"] + self.cfg["macd_signal"]) + 2
@@ -843,18 +808,11 @@ class BotBBEngine:
         reg_low_arr = reg_low.values
         reg_high_arr = reg_high.values
         reg_open_arr = reg_open.values
+        vwap_arr = vwap_full.iloc[warmup:].reset_index(drop=True).values
 
         n = len(ha_slice)
         window = self.cfg["confirmation_window"]
-
-        # --- PARAMETROS SEGUN REGIMEN ---
-        if regime == "neutral":
-            sl_buf = self.cfg["neutral_sl_buffer"]
-            min_sl_dist = self.cfg["neutral_min_sl_dist"]
-        else:  # squeeze
-            sl_buf = self.cfg["sl_buffer_pct"]
-            min_sl_dist = self.cfg["min_sl_dist_pct"]
-        
+        sl_buf = self.cfg["sl_buffer_pct"]
         bb_len = self.cfg["bb_length"]
 
         # Intentar LONG primero, luego SHORT (mismo orden que original)
@@ -862,25 +820,21 @@ class BotBBEngine:
             "long", ha_low_arr, ha_high_arr, ha_close_arr, ha_open_arr,
             bb_upper_arr, bb_basis_arr, bb_lower_arr, macd_arr,
             close_arr, reg_low_arr, reg_high_arr, reg_open_arr, n, window, sl_buf, bb_len,
-            signal_line_arr, min_sl_dist
+            signal_line_arr, vwap_arr
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
-            v0_full = v0_idx + warmup
-            if self._check_bb_width_before_v0(bb_upper, bb_lower, bb_basis, v0_full):
-                return (side, sl, tp, entry_idx + warmup, v0_full, confirm_idx + warmup)
+            return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup)
 
         result = self._scan_side_arrays(
             "short", ha_low_arr, ha_high_arr, ha_close_arr, ha_open_arr,
             bb_upper_arr, bb_basis_arr, bb_lower_arr, macd_arr,
             close_arr, reg_low_arr, reg_high_arr, reg_open_arr, n, window, sl_buf, bb_len,
-            signal_line_arr, min_sl_dist
+            signal_line_arr, vwap_arr
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
-            v0_full = v0_idx + warmup
-            if self._check_bb_width_before_v0(bb_upper, bb_lower, bb_basis, v0_full):
-                return (side, sl, tp, entry_idx + warmup, v0_full, confirm_idx + warmup)
+            return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup)
 
         return None
 
@@ -888,11 +842,9 @@ class BotBBEngine:
         self, side, ha_low, ha_high, ha_close, ha_open,
         bb_upper, bb_basis, bb_lower, macd_green,
         close, reg_low, reg_high, reg_open, n, window, sl_buf, bb_len,
-        signal_line, min_sl_dist=None
+        signal_line, vwap
     ):
         """Escaneo sobre arrays numpy puros (sin pandas)."""
-        if min_sl_dist is None:
-            min_sl_dist = self.cfg["min_sl_dist_pct"]
         max_v0 = n - 2
         freshness = window + 2
         min_v0 = max(n - freshness, bb_len)
@@ -924,6 +876,9 @@ class BotBBEngine:
                         candle_range = ha_high[v_idx] - ha_low[v_idx]
                         if candle_range > 0 and abs(ha_close[v_idx] - ha_open[v_idx]) < candle_range * self.cfg["doji_threshold"]:
                             continue
+                        # REGLA: CONF LONG debe cerrar por encima del VWAP
+                        if np.isnan(vwap[v_idx]) or close[v_idx] <= vwap[v_idx]:
+                            continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
                             continue
@@ -936,8 +891,9 @@ class BotBBEngine:
                         sl_raw = reg_low[v_idx] * (1 - sl_buf)
                         sl_dist = (entry_price - sl_raw) / entry_price
                         # Si el SL queda demasiado cerca de la entrada, usar distancia minima
-                        if sl_dist < min_sl_dist:
-                            sl_dist = min_sl_dist
+                        min_dist = self.cfg["min_sl_dist_pct"]
+                        if sl_dist < min_dist:
+                            sl_dist = min_dist
                         if sl_dist <= 0 or sl_dist > self.cfg["sl_max_dist_pct"]:
                             continue
                         sl = entry_price * (1 - sl_dist)
@@ -966,6 +922,9 @@ class BotBBEngine:
                         candle_range = ha_high[v_idx] - ha_low[v_idx]
                         if candle_range > 0 and abs(ha_close[v_idx] - ha_open[v_idx]) < candle_range * self.cfg["doji_threshold"]:
                             continue
+                        # REGLA: CONF SHORT debe cerrar por debajo del VWAP
+                        if np.isnan(vwap[v_idx]) or close[v_idx] >= vwap[v_idx]:
+                            continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
                             continue
@@ -978,8 +937,9 @@ class BotBBEngine:
                         sl_raw = reg_high[v_idx] * (1 + sl_buf)
                         sl_dist = (sl_raw - entry_price) / entry_price
                         # Si el SL queda demasiado cerca de la entrada, usar distancia minima
-                        if sl_dist < min_sl_dist:
-                            sl_dist = min_sl_dist
+                        min_dist = self.cfg["min_sl_dist_pct"]
+                        if sl_dist < min_dist:
+                            sl_dist = min_dist
                         if sl_dist <= 0 or sl_dist > self.cfg["sl_max_dist_pct"]:
                             continue
                         sl = entry_price * (1 + sl_dist)
@@ -1006,7 +966,7 @@ class BotBBEngine:
     # SCAN DE SENALES (async)
     # ==========================================================
     async def scan_signals(self, symbols: list) -> list:
-        """Descarga OHLCV async y busca senales con filtro de volatilidad."""
+        """Descarga OHLCV async y busca senales."""
         signals = []
         if not symbols:
             return signals
@@ -1029,35 +989,15 @@ class BotBBEngine:
         # Calcular duracion del timeframe en ms
         tf_ms = self._timeframe_to_ms(self.cfg["timeframe"])
 
-        # Contadores de regimen para log
-        count_squeeze = 0
-        count_neutral = 0
-        count_expansion = 0
-
         for symbol in symbols:
-            if symbol in self.session_active or self.is_cooling_down(symbol):
+            if symbol in self.session_active:
                 continue
             data = ohlcv_data.get(symbol)
             if not data or len(data) < 20:
                 continue
             try:
                 df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-
-                # --- FILTRO DE VOLATILIDAD ---
-                bb_width = self.calcular_bb_width(df)
-                regime = self.evaluar_regimen(bb_width)
-
-                if regime == "expansion":
-                    count_expansion += 1
-                    log.debug(f"{symbol} EXPANSION (BB Width={bb_width:.4f}) — saltando.")
-                    continue
-                elif regime == "squeeze":
-                    count_squeeze += 1
-                else:
-                    count_neutral += 1
-
-                # Detectar senal con el regimen
-                result = self.detect_signal(df, regime=regime)
+                result = self.detect_signal(df)
                 if result:
                     side, sl, tp, entry_idx, v0_idx, confirm_idx = result
 
@@ -1065,7 +1005,7 @@ class BotBBEngine:
                     entry_ts = df.iloc[entry_idx]["timestamp"]
                     now_ms = time.time() * 1000
                     if not (entry_ts <= now_ms < entry_ts + tf_ms):
-                        log.debug(f"{symbol} Senal {side.upper()} descartada: vela de entrada ya paso (entry_ts={entry_ts}, now={now_ms})")
+                        log.debug(f"{symbol} Señal {side.upper()} descartada: vela de entrada ya pasó (entry_ts={entry_ts}, now={now_ms})")
                         continue
 
                     signals.append({
@@ -1077,15 +1017,12 @@ class BotBBEngine:
                         "v0_idx": v0_idx,
                         "confirm_idx": confirm_idx,
                         "df": df,
-                        "regime": regime,
-                        "bb_width": bb_width,
                     })
-                    log.info(f"[{regime.upper()}] Senal: {symbol} {side.upper()} | BB Width={bb_width:.4f} | SL={sl:.6f} TP={tp:.6f}")
+                    log.info(f"Senal detectada: {symbol} {side.upper()} | SL={sl:.6f} TP={tp:.6f}")
             except Exception as e:
                 log.error(f"Error detectando senal en {symbol}: {e}")
                 continue
 
-        log.info(f"[FILTRO] squeeze={count_squeeze} | neutral={count_neutral} | expansion={count_expansion} (skip)")
         return signals
 
     # ==========================================================
@@ -1102,8 +1039,6 @@ class BotBBEngine:
         entry_idx: int = None,
         v0_idx: int = None,
         confirm_idx: int = None,
-        regime: str = "squeeze",
-        bb_width: float = 0.0,
     ) -> bool:
         if symbol in self.session_active:
             log.debug(f"{symbol} ya tiene posicion activa. Saltando.")
@@ -1151,19 +1086,9 @@ class BotBBEngine:
 
             log.info(f"{symbol} {side.upper()} | Ratio 3:1 garantizado | Entry={price:.4f} SL={sl_price:.4f} TP={tp_price:.4f}")
 
-            # --- CALCULO DE QTY ---
-            risk_pct_cfg = self.cfg.get("risk_pct", 0.07)
-            risk_pct = min(risk_pct_cfg, 0.10)  # MAX 10% del balance
-            if risk_pct_cfg > 0.10:
-                log.warning(f"{symbol} risk_pct={risk_pct_cfg*100:.1f}% limitado a 10%")
-            
-            # --- LEVERAGE SEGUN REGIMEN ---
-            if regime == "neutral":
-                leverage = self.cfg["neutral_leverage"]
-                log.info(f"{symbol} [NEUTRAL] Leverage reducido: {leverage}x")
-            else:
-                leverage = self.cfg["leverage"]
-            
+            # --- CALCULO DE QTY (identico al codigo original) ---
+            risk_pct = self.cfg.get("risk_pct", 0.02)
+            leverage = self.cfg["leverage"]
             target_margin = balance * risk_pct
             pos_value = target_margin * leverage
             raw_qty = pos_value / price
@@ -1172,38 +1097,23 @@ class BotBBEngine:
             precision = market["precision"]["amount"]
             step = market["limits"]["amount"]["min"] or (10 ** -precision)
 
-            # --- VALIDACION PREVIA: step minimo no debe exceder risk cap ---
-            # Si el minimo de la exchange ya genera margen > 10%, skip trade
-            min_margin_from_step = (step * price) / leverage
-            max_margin = balance * 0.10  # Hard cap absoluto
-            if min_margin_from_step > max_margin:
-                log.warning(f"{symbol} Step minimo ({step}) genera margen {min_margin_from_step:.2f} > max {max_margin:.2f}. Saltando.")
-                return False
-
-            # Floor al step mas cercano
+            # Floor al step mas cercano (como el original)
             qty = (raw_qty // step) * step
 
-            # Si qty=0 (raw_qty < step), usar step minimo
+            # Proteccion: si qty=0 usar minimo
             if qty <= 0:
                 qty = step
 
             actual_margin = (qty * price) / leverage
 
-            # Si el margen real excede el hard cap (10%), reducir qty
-            if actual_margin > max_margin:
-                qty = (max_margin * leverage // price) * step  # Floor a step
-                if qty <= 0:
-                    qty = step
-                actual_margin = (qty * price) / leverage
-
-            # Si aun asi excede el target original, bajar un step
+            # Si el margen real se pasa del target, bajar un step
             if actual_margin > target_margin:
                 qty -= step
                 if qty <= 0:
                     qty = step
                 actual_margin = (qty * price) / leverage
 
-            log.info(f"[QTY] {symbol} | Target: {target_margin:.2f} | Real: {actual_margin:.2f} | Qty: {qty}")
+            log.info(f"⚖️ {symbol} | Target: {target_margin:.2f} | Real: {actual_margin:.2f} | Qty: {qty}")
 
             # --- VALIDAR MONTO MINIMO (Bitget requiere ~5 USDT) ---
             min_notional = market.get("limits", {}).get("cost", {}).get("min") or 5.0
@@ -1211,23 +1121,6 @@ class BotBBEngine:
             if notional < min_notional:
                 log.warning(f"{symbol} Notional ({notional:.2f} USDT) < minimo ({min_notional} USDT). Saltando.")
                 return False
-
-            # --- FORZAR LEVERAGE A MAXIMO CONFIGURADO ---
-            try:
-                target_leverage = int(leverage)  # Usa el leverage ya ajustado por regimen
-                lev_data = await self._exch_call("fetch_leverage", symbol)
-                # Bitget retorna dict: {'longLeverage': 10, 'shortLeverage': 10, ...}
-                if isinstance(lev_data, dict):
-                    current_lev = int(lev_data.get("longLeverage", lev_data.get("info", {}).get("isolatedLongLever", 10)))
-                else:
-                    current_lev = int(lev_data)
-                if current_lev != target_leverage:
-                    await self._exch_call("set_leverage", target_leverage, symbol)
-                    log.info(f"{symbol} Leverage cambiado de {current_lev}x a {target_leverage}x")
-                else:
-                    log.debug(f"{symbol} Leverage ya en {target_leverage}x")
-            except Exception as e:
-                log.warning(f"{symbol} No se pudo cambiar leverage: {e}. Usando el actual.")
 
             # --- ENVIO DE ORDER (sync directo, identico al codigo original) ---
             ccxt_side = "buy" if side == "long" else "sell"
@@ -1249,11 +1142,10 @@ class BotBBEngine:
                 f"Entrada: `{fmt_price}`\n"
                 f"SL: `{fmt_sl}`\n"
                 f"TP: `{fmt_tp}` (1:{int(self.cfg['rr_ratio'])})\n"
-                f"Qty: `{qty}` | Margin: `{actual_margin:.2f}` USDT\n"
-                f"Regime: `{regime.upper()}` | BB Width: `{bb_width:.4f}`"
+                f"Qty: `{qty}` | Margin: `{actual_margin:.2f}` USDT"
             )
             await self.send_telegram(msg)
-            log.info(f"{symbol} {side.upper()} | Entry={fmt_price} SL={fmt_sl} TP={fmt_tp} | Qty={qty} | Margin={actual_margin:.2f} | Regime={regime.upper()} BBW={bb_width:.4f}")
+            log.info(f"{symbol} {side.upper()} | Entry={fmt_price} SL={fmt_sl} TP={fmt_tp} | Qty={qty} | Margin={actual_margin:.2f}")
 
             self.trade_entries[symbol] = {
                 "entry_time": datetime.now().isoformat(),
@@ -1266,12 +1158,9 @@ class BotBBEngine:
                 "balance_before": balance,
                 "size_usdt": round(actual_margin, 2),
                 "risk_pct": round(actual_margin / balance * 100, 2),
-                "regime": regime,
-                "bb_width": round(bb_width, 4),
             }
             await self._save_trade_entries()
             self.session_active.add(symbol)
-            self.last_entry_time = time.time()
 
             # Grafico async
             if df is not None:
@@ -1280,7 +1169,10 @@ class BotBBEngine:
                         self.generar_grafico_signal, symbol, df, side, strategy_entry, sl_price, tp_price, entry_idx, v0_idx, confirm_idx
                     )
                     if buf:
-                        caption = f"*{symbol} {side.upper()}*\nEntry: `{fmt_price}` | SL: `{fmt_sl}` | TP: `{fmt_tp}`"
+                        # Calcular VWAP actual para el caption
+                        vwap_val = self.calculate_vwap(df)
+                        vwap_now = vwap_val.iloc[-1] if len(vwap_val) > 0 and not np.isnan(vwap_val.iloc[-1]) else 0
+                        caption = f"*{symbol} {side.upper()}*\nEntry: `{fmt_price}` | SL: `{fmt_sl}` | TP: `{fmt_tp}`\nVWAP: `{vwap_now:.6f}`"
                         sent = await self.send_telegram_photo(buf, caption)
                         if not sent:
                             log.warning(f"[CHART] No se pudo enviar grafico de {symbol} a Telegram.")
@@ -1328,8 +1220,8 @@ class BotBBEngine:
             # 1. Detectar posiciones cerradas
             for sym in list(self.session_active):
                 if sym not in active_symbols:
-                    self.cooldowns[sym] = time.time() + 14400
-                    log.info(f"{sym} CERRADA. Cooldown 4h activado.")
+                    self.cooldowns[sym] = time.time() + 3600
+                    log.info(f"{sym} CERRADA. Cooldown 1h activado.")
                     await self._process_closed_position(sym)
                     self._cleanup_symbol(sym)
 
@@ -1380,8 +1272,11 @@ class BotBBEngine:
 
                 if not self.alerts_history.get(trail_key, False):
                     # Buscar SL original de la posicion
-                    entry_data = self.trade_entries.get(symbol)
-                    original_sl = entry_data["sl_price"] if entry_data else None
+                    original_sl = None
+                    for entry_data in self.trade_entries.get("entries", []):
+                        if entry_data["symbol"] == symbol:
+                            original_sl = entry_data["sl_price"]
+                            break
 
                     if original_sl is not None:
                         # Calcular distancia SL y precio de activacion (2:1)
@@ -1649,8 +1544,6 @@ class BotBBEngine:
             "risk_pct": entry.get("risk_pct", 0),
             "max_favorable_pct": round(abs(self.peak_prices.get(sym, ep) - ep) / ep * 100, 2),
             "max_adverse_pct": round(abs(self.adverse_prices.get(sym, ep) - ep) / ep * 100, 2),
-            "regime": entry.get("regime", ""),
-            "bb_width": entry.get("bb_width", 0),
         }
         write_header = not os.path.exists(self.trades_csv)
         try:
@@ -1736,15 +1629,6 @@ class BotBBEngine:
                 log.info(f"Posiciones abiertas detectadas al arrancar: {open_pos}")
             else:
                 log.info("Sin posiciones abiertas al arrancar.")
-
-            # FIX: Procesar trades que cerraron durante downtime
-            stale_syms = [s for s in list(self.trade_entries.keys()) if s not in open_pos]
-            if stale_syms:
-                log.info(f"[RECOVERY] {len(stale_syms)} entradas en JSON cerradas fuera de linea: {stale_syms}")
-                for sym in stale_syms:
-                    await self._process_closed_position(sym)
-                    self._cleanup_symbol(sym)
-                log.info("[RECOVERY] Sincronizacion completada.")
         except Exception as e:
             log.warning(f"No se pudieron sincronizar posiciones: {e}")
 
@@ -1768,9 +1652,7 @@ class BotBBEngine:
                             if top:
                                 signals = await self.scan_signals(top)
                                 for sig in signals:
-                                    if (await self.can_open()
-                                            and not self.is_on_cooldown()
-                                            and (time.time() - self.last_entry_time) >= self.cfg["entry_cooldown_sec"]):
+                                    if await self.can_open() and not self.is_on_cooldown():
                                         await self.open_position(
                                             symbol=sig["symbol"],
                                             side=sig["side"],
@@ -1781,8 +1663,6 @@ class BotBBEngine:
                                             entry_idx=sig.get("entry_idx"),
                                             v0_idx=sig.get("v0_idx"),
                                             confirm_idx=sig.get("confirm_idx"),
-                                            regime=sig.get("regime", "squeeze"),
-                                            bb_width=sig.get("bb_width", 0.0),
                                         )
                                 if not signals:
                                     log.info("Sin senales en este escaneo.")
