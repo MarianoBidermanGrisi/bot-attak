@@ -114,10 +114,10 @@ DEFAULT_CONFIG = {
     "sl_buffer_pct":        0.0070,
     "min_sl_dist_pct":      0.0070,
     "sl_max_dist_pct":      0.05,
-    "rr_ratio":             2.2,
+    "rr_ratio":             1.9,
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.0132,
+    "be_trigger_pct":       0.009,
     "be_offset_pct":        0.002,
     "trailing_dist_pct":    0.0030,
     "leverage":             10.0,
@@ -128,7 +128,7 @@ DEFAULT_CONFIG = {
     # --- Escaneo ---
     "scan_interval_sec":    300,
     "top_symbols_count":    100,
-    "ohlcv_limit":          100,
+    "ohlcv_limit":          1500,
     "timeframe":            "5m",
     # --- Concurrencia ---
     "max_concurrent_fetches": 10,
@@ -729,8 +729,8 @@ class BotBBEngine:
     @staticmethod
     def calculate_vwap(df: pd.DataFrame) -> pd.Series:
         """
-        VWAP con anchor Session (diario) — idéntico a TradingView.
-        Formula: cumsum(hlc3 * volume) / cumsum(volume) reiniciando cada día.
+        VWAP con anchor Week (semanal) — reinicia cada lunes 00:00 UTC.
+        Formula: cumsum(hlc3 * volume) / cumsum(volume) por semana ISO.
         """
         high = df["high"].values.astype(np.float64)
         low = df["low"].values.astype(np.float64)
@@ -740,9 +740,11 @@ class BotBBEngine:
         typical_price = (high + low + close) / 3.0
         tp_vol = typical_price * volume
 
-        # Detectar cambio de sesión (día) por timestamp en ms
-        timestamps = df["timestamp"].values
-        days = (timestamps // 86_400_000).astype(np.int64)
+        # Detectar cambio de semana ISO por timestamp en ms
+        dates = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        iso = dates.dt.isocalendar()
+        # Clave: año + número de semana ISO (ej: "202637")
+        week_keys = (iso.year.astype(str) + iso.week.astype(str)).values
 
         n = len(df)
         vwap = np.empty(n, dtype=np.float64)
@@ -750,8 +752,8 @@ class BotBBEngine:
         cum_vol = 0.0
 
         for i in range(n):
-            if i == 0 or days[i] != days[i - 1]:
-                # Nuevo día: reiniciar acumuladores
+            if i == 0 or week_keys[i] != week_keys[i - 1]:
+                # Nueva semana: reiniciar acumuladores
                 cum_tp_vol = tp_vol[i]
                 cum_vol = volume[i]
             else:
@@ -1279,10 +1281,10 @@ class BotBBEngine:
                             break
 
                     if original_sl is not None:
-                        # Calcular distancia SL y precio de activacion (2:1)
+                        # Calcular distancia SL y precio de activacion (1:1)
                         if side == "long":
                             sl_dist = entry - original_sl
-                            activation_price = entry + 2 * sl_dist
+                            activation_price = entry + sl_dist
                             if mark >= activation_price:
                                 self.alerts_history[trail_key] = True
                                 initial_sl = entry + sl_dist  # 1:1 como base
@@ -1290,11 +1292,11 @@ class BotBBEngine:
                                 self.alerts_history[trail_peak_key] = mark
                                 if await self._update_stop_loss(symbol, side, initial_sl):
                                     self.trail_counts[symbol] = 0
-                                    log.info(f"{symbol} Trailing activado 2:1. SL={initial_sl:.6f}")
-                                    await self.send_telegram(f"*{symbol}* Trailing 2:1 activado")
+                                    log.info(f"{symbol} Trailing activado 1:1. SL={initial_sl:.6f}")
+                                    await self.send_telegram(f"*{symbol}* Trailing 1:1 activado")
                         else:
                             sl_dist = original_sl - entry
-                            activation_price = entry - 2 * sl_dist
+                            activation_price = entry - sl_dist
                             if mark <= activation_price:
                                 self.alerts_history[trail_key] = True
                                 initial_sl = entry - sl_dist  # 1:1 como base
@@ -1302,8 +1304,8 @@ class BotBBEngine:
                                 self.alerts_history[trail_peak_key] = mark
                                 if await self._update_stop_loss(symbol, side, initial_sl):
                                     self.trail_counts[symbol] = 0
-                                    log.info(f"{symbol} Trailing activado 2:1. SL={initial_sl:.6f}")
-                                    await self.send_telegram(f"*{symbol}* Trailing 2:1 activado")
+                                    log.info(f"{symbol} Trailing activado 1:1. SL={initial_sl:.6f}")
+                                    await self.send_telegram(f"*{symbol}* Trailing 1:1 activado")
 
                 # Trailing activo: subir SL 0.2% por nuevo max
                 if self.alerts_history.get(trail_key, False):
