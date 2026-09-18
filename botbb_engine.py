@@ -132,6 +132,16 @@ DEFAULT_CONFIG = {
     "timeframe":            "5m",
     # --- Concurrencia ---
     "max_concurrent_fetches": 10,
+    # --- RSI ---
+    "rsi_length":             14,
+    # --- StochRSI ---
+    "stoch_length":           14,
+    "smooth_k":               3,
+    "smooth_d":               3,
+    # --- Divergencia ---
+    "divergence_lookback":    30,
+    "rsi_overbought":         70,
+    "rsi_oversold":           30,
 }
 
 
@@ -432,8 +442,9 @@ class BotBBEngine:
         entry_idx: int = None,
         v0_idx: int = None,
         confirm_idx: int = None,
+        div_info: dict = None,
     ) -> Optional[BytesIO]:
-        """Genera grafico PNG dark-theme con BB, entrada, SL, TP, V0 y Confirmacion."""
+        """Genera grafico PNG dark-theme con 2 paneles: Precio (BB+HA+Signal+VWAP) + RSI/StochRSI."""
         try:
             if df is None or len(df) < 30:
                 log.warning(f"[CHART] Datos insuficientes para graficar {symbol}")
@@ -443,6 +454,8 @@ class BotBBEngine:
             signal_line_full = self.calculate_signal_line(df["close"])
             vwap_full = self.calculate_vwap(df)
             ha_df = self.heikin_ashi(df)
+            rsi_full = self.calculate_rsi(df["close"])
+            k_full, d_full = self.calculate_stochrsi(df["close"])
 
             center = entry_idx if entry_idx is not None else len(df) // 2
             before, after = 40, 15
@@ -458,6 +471,9 @@ class BotBBEngine:
             signal_line_w = signal_line_full.values[s:e]
             bb_l = bb_lower_full.values[s:e]
             vwap_w = vwap_full.values[s:e]
+            rsi_w = rsi_full.values[s:e]
+            k_w = k_full.values[s:e]
+            d_w = d_full.values[s:e]
             n_w = e - s
             x = np.arange(n_w)
 
@@ -465,7 +481,12 @@ class BotBBEngine:
             local_v0 = (v0_idx - s) if v0_idx is not None else None
             local_confirm = (confirm_idx - s) if confirm_idx is not None else None
 
-            fig, ax = plt.subplots(figsize=(14, 7), facecolor='#1a1a1a')
+            # === FIGURA CON 2 PANELES ===
+            fig, (ax, ax2) = plt.subplots(2, 1, figsize=(14, 9), facecolor='#1a1a1a',
+                                          gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
+            fig.subplots_adjust(hspace=0.05)
+
+            # ── PANEL 1: PRECIO ──
             ax.set_facecolor('#1a1a1a')
             ax.tick_params(colors='white', labelsize=8)
             ax.grid(True, color='#333333', linewidth=0.3, alpha=0.5)
@@ -497,14 +518,13 @@ class BotBBEngine:
             signal_val = macd_val.rolling(self.cfg["macd_signal"]).mean()
             macd_green_full = (macd_val >= signal_val)
             macd_green_w = macd_green_full.values[s:e]
-            valid_s = ~np.isnan(signal_line_w)
             for i in range(1, n_w):
                 if np.isnan(signal_line_w[i]) or np.isnan(signal_line_w[i-1]):
                     continue
                 color = '#26A69A' if macd_green_w[i] else '#FF4444'
                 ax.plot([x[i-1], x[i]], [signal_line_w[i-1], signal_line_w[i]], color=color, linewidth=1.5, label='Signal Line' if i == 1 else '')
 
-            # VWAP — línea azul sólida (color #2962FF idéntico a TradingView)
+            # VWAP
             valid_vwap = ~np.isnan(vwap_w)
             ax.plot(x[valid_vwap], vwap_w[valid_vwap], color='#2962FF', linewidth=1.5, label='VWAP')
 
@@ -531,13 +551,12 @@ class BotBBEngine:
                             fontsize=10, color=marker_color, fontweight='bold',
                             arrowprops=dict(arrowstyle='->', color=marker_color, lw=1.5))
 
-            # Marcador V0 (vela que toca la banda)
+            # Marcador V0
             if local_v0 is not None and 0 <= local_v0 < n_w:
-                v0_color = '#FF6600'  # naranja para V0
+                v0_color = '#FF6600'
                 candle_range = h_w[local_v0] - l_w[local_v0]
                 if candle_range < entry_price * 0.001:
                     candle_range = entry_price * 0.003
-                # V0: LONG toca lower (marcador abajo), SHORT toca upper (marcador arriba)
                 if side == "long":
                     v0_y = l_w[local_v0] - candle_range * 0.3
                     v0_symbol = 'v'
@@ -553,13 +572,12 @@ class BotBBEngine:
                             fontsize=8, color=v0_color, fontweight='bold',
                             ha='center', va=v0_va)
 
-            # Marcador CONF (vela de confirmacion)
+            # Marcador CONF
             if local_confirm is not None and 0 <= local_confirm < n_w:
-                conf_color = '#00BFFF'  # azul celeste para confirmacion
+                conf_color = '#00BFFF'
                 candle_range_c = h_w[local_confirm] - l_w[local_confirm]
                 if candle_range_c < entry_price * 0.001:
                     candle_range_c = entry_price * 0.003
-                # CONF: misma logica direccional que V0
                 if side == "long":
                     conf_y = l_w[local_confirm] - candle_range_c * 0.3
                     conf_symbol = 'v'
@@ -576,21 +594,117 @@ class BotBBEngine:
                             ha='center', va=conf_va)
 
             side_label = "LONG" if side == "long" else "SHORT"
-            safe_symbol = ''.join(c for c in symbol if ord(c) < 128)  # strip CJK
-            # Valor VWAP actual para el título
+            safe_symbol = ''.join(c for c in symbol if ord(c) < 128)
             vwap_current = vwap_w[-1] if len(vwap_w) > 0 and not np.isnan(vwap_w[-1]) else 0
-            titulo = f"{safe_symbol} | {side_label} | Entry: {entry_price:.6f} | SL: {sl_price:.6f} | TP: {tp_price:.6f} | VWAP: {vwap_current:.6f}"
-            ax.set_title(titulo, color='white', fontsize=12, fontweight='bold', pad=10)
+
+            # Divergencia label en título
+            div_label = ""
+            if div_info:
+                div_type = div_info.get("rsi_div") or div_info.get("stochrsi_div") or "?"
+                div_src = "RSI" if div_info.get("rsi_div") else "StochRSI"
+                div_label = f" | Div: {div_src} {div_type.upper()}"
+
+            titulo = f"{safe_symbol} | {side_label} | Entry: {entry_price:.6f} | SL: {sl_price:.6f} | TP: {tp_price:.6f} | VWAP: {vwap_current:.6f}{div_label}"
+            ax.set_title(titulo, color='white', fontsize=10, fontweight='bold', pad=10)
             ax.set_ylabel('Precio (USDT)', color='white', fontsize=9)
-            ax.legend(loc='upper left', fontsize=8, facecolor='#1a1a1a', edgecolor='#444',
+            ax.legend(loc='upper left', fontsize=7, facecolor='#1a1a1a', edgecolor='#444',
                       labelcolor='white')
             ax.set_xlim(-1, n_w)
 
+            # ── PANEL 2: RSI + STOCHRSI ──
+            ax2.set_facecolor('#1a1a1a')
+            ax2.tick_params(colors='white', labelsize=8)
+            ax2.grid(True, color='#333333', linewidth=0.3, alpha=0.5)
+            for spine in ax2.spines.values():
+                spine.set_color('#333333')
+
+            # Bandas RSI
+            ax2.axhline(y=70, color='#787B86', linewidth=0.8, linestyle='--')
+            ax2.axhline(y=50, color='#787B86', linewidth=0.5, linestyle=':', alpha=0.5)
+            ax2.axhline(y=30, color='#787B86', linewidth=0.8, linestyle='--')
+            ax2.axhline(y=100, color='#787B86', linewidth=0.5, alpha=0.3)
+            ax2.axhline(y=0, color='#787B86', linewidth=0.5, alpha=0.3)
+
+            # RSI — púrpura (idéntico a TradingView)
+            valid_rsi = ~np.isnan(rsi_w)
+            ax2.plot(x[valid_rsi], rsi_w[valid_rsi], color='#7E57C2', linewidth=1.5, label='RSI', zorder=3)
+
+            # Zona degradada sobreventa/sobrecompra
+            ax2.fill_between(x, 70, 100, where=(rsi_w > 70) & ~np.isnan(rsi_w),
+                             color='#26A69A', alpha=0.15, interpolate=True)
+            ax2.fill_between(x, 0, 30, where=(rsi_w < 30) & ~np.isnan(rsi_w),
+                             color='#FF4444', alpha=0.15, interpolate=True)
+
+            # %K — azul (Stoch K)
+            valid_k = ~np.isnan(k_w)
+            ax2.plot(x[valid_k], k_w[valid_k], color='#2962FF', linewidth=1.5, label='%K', zorder=4)
+
+            # %D — naranja (Stoch D)
+            valid_d = ~np.isnan(d_w)
+            ax2.plot(x[valid_d], d_w[valid_d], color='#FF6D00', linewidth=1.5, label='%D', zorder=4)
+
+            ax2.set_ylabel('RSI + Stoch', color='white', fontsize=9)
+            ax2.set_ylim(-5, 105)
+            ax2.legend(loc='upper left', fontsize=7, facecolor='#1a1a1a', edgecolor='#444',
+                       labelcolor='white')
+
+            # Línea vertical punteada en la entrada (conectar paneles)
+            if local_entry is not None and 0 <= local_entry < n_w:
+                ax.axvline(x=x[local_entry], color='#FFD700', linestyle=':', linewidth=0.8, alpha=0.4)
+                ax2.axvline(x=x[local_entry], color='#FFD700', linestyle=':', linewidth=0.8, alpha=0.4)
+
+            # ── LÍNEAS DE DIVERGENCIA (amarillas) ──
+            if div_info and local_v0 is not None and 0 <= local_v0 < n_w:
+                div_type = div_info.get("rsi_div") or div_info.get("stochrsi_div")
+                close_slice = div_info.get("close_slice")
+                indicator_slice = div_info.get("k_slice") if div_info.get("stochrsi_div") else div_info.get("rsi_slice")
+                div_start = div_info.get("div_start", 0)
+
+                if div_type and close_slice is not None and indicator_slice is not None:
+                    # Recalcular pivotes para obtener índices en el espacio del gráfico
+                    price_np = np.array(close_slice, dtype=np.float64)
+                    indic_np = np.array(indicator_slice, dtype=np.float64)
+                    pivots = self.detect_divergence(price_np, indic_np, pivot_left=1, pivot_right=1)
+
+                    if pivots is not None:
+                        _, p1_idx, p1_price, p1_indic, p2_idx, p2_price, p2_indic = pivots
+                        # Convertir índices del slice al espacio del gráfico
+                        g1 = p1_idx + div_start - s
+                        g2 = p2_idx + div_start - s
+
+                        if 0 <= g1 < n_w and 0 <= g2 < n_w:
+                            # Línea amarilla en PANEL 1 (precio)
+                            ax.plot([g1, g2], [p1_price, p2_price],
+                                    color='#FFD700', linewidth=2.0, linestyle='-', zorder=6)
+                            # Línea amarilla en PANEL 2 (indicador)
+                            ax2.plot([g1, g2], [p1_indic, p2_indic],
+                                     color='#FFD700', linewidth=2.0, linestyle='-', zorder=6)
+                            # Etiqueta
+                            mid_x = (g1 + g2) / 2
+                            if div_type == "bull":
+                                mid_y = min(p1_price, p2_price) * 0.998
+                                ax.annotate('BULL DIV', xy=(mid_x, mid_y),
+                                            fontsize=8, color='#FFD700', fontweight='bold',
+                                            ha='center', va='top')
+                                ax2.annotate('BULL DIV', xy=(mid_x, min(p1_indic, p2_indic) - 3),
+                                             fontsize=8, color='#FFD700', fontweight='bold',
+                                             ha='center', va='top')
+                            else:
+                                mid_y = max(p1_price, p2_price) * 1.002
+                                ax.annotate('BEAR DIV', xy=(mid_x, mid_y),
+                                            fontsize=8, color='#FFD700', fontweight='bold',
+                                            ha='center', va='bottom')
+                                ax2.annotate('BEAR DIV', xy=(mid_x, max(p1_indic, p2_indic) + 3),
+                                             fontsize=8, color='#FFD700', fontweight='bold',
+                                             ha='center', va='bottom')
+
+            # X-axis labels solo en panel inferior
             step = max(1, n_w // 8)
             ticks = list(range(0, n_w, step))
             labels = [f'+{i}c' for i in ticks]
-            ax.set_xticks(ticks)
-            ax.set_xticklabels(labels, color='white', fontsize=8)
+            ax2.set_xticks(ticks)
+            ax2.set_xticklabels(labels, color='white', fontsize=8)
+            ax.set_xticklabels([])  # Ocultar labels del panel superior
 
             plt.tight_layout()
 
@@ -765,10 +879,157 @@ class BotBBEngine:
         return pd.Series(vwap, index=df.index)
 
     # ==========================================================
+    # RSI — Wilder's RMA (idéntico a TradingView)
+    # ==========================================================
+    def calculate_rsi(self, close: pd.Series) -> pd.Series:
+        """RSI con Wilder's RMA, idéntico a ta.rsi de TradingView."""
+        length = self.cfg["rsi_length"]
+        src = close.values.astype(np.float64)
+        n = len(src)
+        rsi = np.full(n, np.nan, dtype=np.float64)
+
+        if n < length + 1:
+            return pd.Series(rsi, index=close.index)
+
+        diff = np.diff(src, prepend=src[0])
+        diff[0] = 0.0
+
+        up_raw = np.where(diff > 0, diff, 0.0)
+        down_raw = np.where(diff < 0, -diff, 0.0)
+
+        # Wilder's RMA: equivalente a EMA con alpha = 1/length
+        alpha = 1.0 / length
+        up = np.empty(n, dtype=np.float64)
+        down = np.empty(n, dtype=np.float64)
+
+        up[length] = np.mean(up_raw[1:length + 1])
+        down[length] = np.mean(down_raw[1:length + 1])
+
+        for i in range(length + 1, n):
+            up[i] = up[i - 1] * (1.0 - alpha) + up_raw[i] * alpha
+            down[i] = down[i - 1] * (1.0 - alpha) + down_raw[i] * alpha
+
+        for i in range(length, n):
+            u = up[i] if np.isfinite(up[i]) else 0.0
+            d = down[i] if np.isfinite(down[i]) else 0.0
+            if d == 0.0:
+                rsi[i] = 100.0 if u != 0.0 else 50.0
+            elif u == 0.0:
+                rsi[i] = 0.0
+            else:
+                rsi[i] = 100.0 - (100.0 / (1.0 + u / d))
+
+        return pd.Series(rsi, index=close.index)
+
+    # ==========================================================
+    # STOCHRSI — idéntico a TradingView
+    # ==========================================================
+    def calculate_stochrsi(self, close: pd.Series):
+        """
+        StochRSI idéntico a TradingView:
+        rsi1 = ta.rsi(source, rsiLength)
+        stoch = ta.stoch(rsi1, rsi1, rsi1, stochLength) * 100
+        K = sma(stoch, smoothK)
+        D = sma(K, smoothD)
+        Retorna: (K_series, D_series)
+        """
+        rsi_vals = self.calculate_rsi(close).values.astype(np.float64)
+        stoch_len = self.cfg["stoch_length"]
+        sk = self.cfg["smooth_k"]
+        sd = self.cfg["smooth_d"]
+        n = len(rsi_vals)
+
+        stoch_raw = np.full(n, np.nan, dtype=np.float64)
+        for i in range(stoch_len - 1, n):
+            window = rsi_vals[i - stoch_len + 1: i + 1]
+            valid = window[~np.isnan(window)]
+            if len(valid) < 2:
+                continue
+            lo = np.min(valid)
+            hi = np.max(valid)
+            if hi - lo > 1e-10:
+                stoch_raw[i] = (rsi_vals[i] - lo) / (hi - lo) * 100.0
+            else:
+                stoch_raw[i] = 50.0
+
+        # SMA suavizado para K y D
+        k = pd.Series(stoch_raw, index=close.index).rolling(sk).mean().values
+        d = pd.Series(k, index=close.index).rolling(sd).mean().values
+
+        return pd.Series(k, index=close.index), pd.Series(d, index=close.index)
+
+    # ==========================================================
+    # DIVERGENCIA REGULAR — con pivotes
+    # ==========================================================
+    @staticmethod
+    def detect_divergence(price: np.ndarray, indicator: np.ndarray,
+                          pivot_left: int = 2, pivot_right: int = 2):
+        """
+        Detecta divergencia regular (bullish/bearish) usando pivotes.
+        Retorna: ('bull', idx, price_pivot, indic_pivot) o
+                 ('bear', idx, price_pivot, indic_pivot) o None
+        """
+        n = len(price)
+
+        # --- Encontrar pivotes ---
+        ph = []  # (indice_en_slice, precio, indicador)
+        pl = []
+
+        for i in range(pivot_left, n - pivot_right):
+            if np.isnan(price[i]) or np.isnan(indicator[i]):
+                continue
+
+            # Pivot High: precio es máximo local
+            is_high = True
+            for j in range(i - pivot_left, i + pivot_right + 1):
+                if j == i or np.isnan(price[j]):
+                    continue
+                if price[j] >= price[i]:
+                    is_high = False
+                    break
+            if is_high:
+                ph.append((i, price[i], indicator[i]))
+
+            # Pivot Low: precio es mínimo local
+            is_low = True
+            for j in range(i - pivot_left, i + pivot_right + 1):
+                if j == i or np.isnan(price[j]):
+                    continue
+                if price[j] <= price[i]:
+                    is_low = False
+                    break
+            if is_low:
+                pl.append((i, price[i], indicator[i]))
+
+        # --- Detectar BEARISH: precio higher high, indicador lower high ---
+        if len(ph) >= 2:
+            newest_idx, newest_p, newest_i = ph[-1]
+            for k in range(len(ph) - 2, -1, -1):
+                _, older_p, older_i = ph[k]
+                if newest_p > older_p and newest_i < older_i:
+                    return ('bear', newest_idx, newest_p, newest_i,
+                            k, older_p, older_i)
+
+        # --- Detectar BULLISH: precio lower low, indicador higher low ---
+        if len(pl) >= 2:
+            newest_idx, newest_p, newest_i = pl[-1]
+            for k in range(len(pl) - 2, -1, -1):
+                _, older_p, older_i = pl[k]
+                if newest_p < older_p and newest_i > older_i:
+                    return ('bull', newest_idx, newest_p, newest_i,
+                            k, older_p, older_i)
+
+        return None
+
+    # ==========================================================
     # ESTRATEGIA: DETECCION DE SENAL (CPU puro)
     # ==========================================================
     def detect_signal(self, df: pd.DataFrame):
-        """Detecta senal LONG o SHORT. Retorna (side, sl, tp, entry_idx, v0_idx, confirm_idx) o None."""
+        """
+        Detecta senal LONG o SHORT con filtro de divergencia RSI/StochRSI.
+        Retorna (side, sl, tp, entry_idx, v0_idx, confirm_idx, div_info) o None.
+        div_info: dict con 'rsi_div', 'stochrsi_div', 'close_slice', 'rsi_slice', 'k_slice', 'd_slice', 'div_start', 'div_end'
+        """
         min_candles = self.cfg["bb_length"] + self.cfg["macd_slow"] + self.cfg["macd_signal"] + self.cfg["confirmation_window"] + 5
         if len(df) < min_candles:
             return None
@@ -779,6 +1040,10 @@ class BotBBEngine:
         signal_line = self.calculate_signal_line(df["close"])
         vwap_full = self.calculate_vwap(df)
         ha_df = self.heikin_ashi(df)
+
+        # --- RSI y StochRSI completos ---
+        rsi_full = self.calculate_rsi(df["close"])
+        k_full, d_full = self.calculate_stochrsi(df["close"])
 
         warmup = max(self.cfg["bb_length"], self.cfg["macd_slow"] + self.cfg["macd_signal"]) + 2
         ha_slice = ha_df.iloc[warmup:].reset_index(drop=True)
@@ -826,7 +1091,15 @@ class BotBBEngine:
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
-            return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup)
+            # --- FILTRO DE DIVERGENCIA ---
+            rsi_arr = rsi_full.iloc[warmup:].reset_index(drop=True).values
+            k_arr = k_full.iloc[warmup:].reset_index(drop=True).values
+            d_arr = d_full.iloc[warmup:].reset_index(drop=True).values
+            div_info = self._check_divergence(side, v0_idx, close_arr, rsi_arr, k_arr, d_arr)
+            if div_info is None:
+                log.debug(f"LONG en {warmup + v0_idx} descartada: sin divergencia RSI/StochRSI")
+            else:
+                return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup, div_info)
 
         result = self._scan_side_arrays(
             "short", ha_low_arr, ha_high_arr, ha_close_arr, ha_open_arr,
@@ -836,7 +1109,77 @@ class BotBBEngine:
         )
         if result:
             side, sl, tp, entry_idx, v0_idx, confirm_idx = result
-            return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup)
+            # --- FILTRO DE DIVERGENCIA ---
+            rsi_arr = rsi_full.iloc[warmup:].reset_index(drop=True).values
+            k_arr = k_full.iloc[warmup:].reset_index(drop=True).values
+            d_arr = d_full.iloc[warmup:].reset_index(drop=True).values
+            div_info = self._check_divergence(side, v0_idx, close_arr, rsi_arr, k_arr, d_arr)
+            if div_info is None:
+                log.debug(f"SHORT en {warmup + v0_idx} descartada: sin divergencia RSI/StochRSI")
+            else:
+                return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup, div_info)
+
+        return None
+
+    def _check_divergence(self, side: str, v0_idx: int,
+                          close_arr: np.ndarray, rsi_arr: np.ndarray,
+                          k_arr: np.ndarray, d_arr: np.ndarray):
+        """
+        Busca divergencia regular en RSI y luego en StochRSI.
+        Ventana: desde V0 hacia atrás hasta divergence_lookback.
+        Retorna dict con info de divergencia o None.
+        """
+        lookback = self.cfg["divergence_lookback"]
+        v0_global = v0_idx
+        v0_start = max(0, v0_global - lookback)
+        v0_end = v0_global + 1
+
+        price_window = close_arr[v0_start:v0_end]
+        rsi_window = rsi_arr[v0_start:v0_end]
+        k_window = k_arr[v0_start:v0_end]
+
+        # 1. Buscar divergencia en RSI
+        if side == "long":
+            div_rsi = self.detect_divergence(price_window, rsi_window, pivot_left=1, pivot_right=1)
+        else:
+            div_rsi = self.detect_divergence(price_window, rsi_window, pivot_left=1, pivot_right=1)
+
+        if div_rsi is not None:
+            div_type = div_rsi[0]
+            # Verificar que la divergencia es compatible con la dirección
+            if (side == "long" and div_type == "bull") or (side == "short" and div_type == "bear"):
+                log.info(f"Divergencia RSI {div_type.upper()} detectada en ventana [{v0_start}:{v0_end}]")
+                return {
+                    'rsi_div': div_type,
+                    'stochrsi_div': None,
+                    'close_slice': price_window,
+                    'rsi_slice': rsi_window,
+                    'k_slice': k_window,
+                    'd_slice': d_arr[v0_start:v0_end],
+                    'div_start': v0_start,
+                    'div_end': v0_end,
+                }
+
+        # 2. Buscar divergencia en StochRSI (%K vs precio)
+        if side == "long":
+            div_stoch = self.detect_divergence(price_window, k_window, pivot_left=1, pivot_right=1)
+        else:
+            div_stoch = self.detect_divergence(price_window, k_window, pivot_left=1, pivot_right=1)
+
+        if div_stoch is not None:
+            div_type = div_stoch[0]
+            if (side == "long" and div_type == "bull") or (side == "short" and div_type == "bear"):
+                log.info(f"Divergencia StochRSI {div_type.upper()} detectada en ventana [{v0_start}:{v0_end}]")
+                return {
+                    'rsi_div': None,
+                    'stochrsi_div': div_type,
+                    'close_slice': price_window,
+                    'rsi_slice': rsi_window,
+                    'k_slice': k_window,
+                    'd_slice': d_arr[v0_start:v0_end],
+                    'div_start': v0_start,
+                    'div_end': v0_end,
+                }
 
         return None
 
@@ -1040,7 +1383,7 @@ class BotBBEngine:
                 df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 result = self.detect_signal(df)
                 if result:
-                    side, sl, tp, entry_idx, v0_idx, confirm_idx = result
+                    side, sl, tp, entry_idx, v0_idx, confirm_idx, div_info = result
 
                     # --- VALIDAR QUE LA VELA ACTUAL ES LA DE ENTRADA ---
                     entry_ts = df.iloc[entry_idx]["timestamp"]
@@ -1048,6 +1391,12 @@ class BotBBEngine:
                     if not (entry_ts <= now_ms < entry_ts + tf_ms):
                         log.debug(f"{symbol} Señal {side.upper()} descartada: vela de entrada ya pasó (entry_ts={entry_ts}, now={now_ms})")
                         continue
+
+                    div_label = ""
+                    if div_info.get("rsi_div"):
+                        div_label = f"RSI:{div_info['rsi_div'].upper()}"
+                    elif div_info.get("stochrsi_div"):
+                        div_label = f"Stoch:{div_info['stochrsi_div'].upper()}"
 
                     signals.append({
                         "symbol": symbol,
@@ -1058,8 +1407,9 @@ class BotBBEngine:
                         "v0_idx": v0_idx,
                         "confirm_idx": confirm_idx,
                         "df": df,
+                        "div_info": div_info,
                     })
-                    log.info(f"Senal detectada: {symbol} {side.upper()} | SL={sl:.6f} TP={tp:.6f}")
+                    log.info(f"Senal detectada: {symbol} {side.upper()} | SL={sl:.6f} TP={tp:.6f} | Div={div_label}")
             except Exception as e:
                 log.error(f"Error detectando senal en {symbol}: {e}")
                 continue
@@ -1080,6 +1430,7 @@ class BotBBEngine:
         entry_idx: int = None,
         v0_idx: int = None,
         confirm_idx: int = None,
+        div_info: dict = None,
     ) -> bool:
         if symbol in self.session_active:
             log.debug(f"{symbol} ya tiene posicion activa. Saltando.")
@@ -1185,6 +1536,10 @@ class BotBBEngine:
                 f"TP: `{fmt_tp}` (1:{int(self.cfg['rr_ratio'])})\n"
                 f"Qty: `{qty}` | Margin: `{actual_margin:.2f}` USDT"
             )
+            if div_info:
+                div_type = div_info.get("rsi_div") or div_info.get("stochrsi_div") or "?"
+                div_src = "RSI" if div_info.get("rsi_div") else "StochRSI"
+                msg += f"\n*Divergencia:* {div_src} {div_type.upper()}"
             await self.send_telegram(msg)
             log.info(f"{symbol} {side.upper()} | Entry={fmt_price} SL={fmt_sl} TP={fmt_tp} | Qty={qty} | Margin={actual_margin:.2f}")
 
@@ -1207,13 +1562,17 @@ class BotBBEngine:
             if df is not None:
                 try:
                     buf = await asyncio.to_thread(
-                        self.generar_grafico_signal, symbol, df, side, strategy_entry, sl_price, tp_price, entry_idx, v0_idx, confirm_idx
+                        self.generar_grafico_signal, symbol, df, side, strategy_entry, sl_price, tp_price, entry_idx, v0_idx, confirm_idx, div_info
                     )
                     if buf:
                         # Calcular VWAP actual para el caption
                         vwap_val = self.calculate_vwap(df)
                         vwap_now = vwap_val.iloc[-1] if len(vwap_val) > 0 and not np.isnan(vwap_val.iloc[-1]) else 0
                         caption = f"*{symbol} {side.upper()}*\nEntry: `{fmt_price}` | SL: `{fmt_sl}` | TP: `{fmt_tp}`\nVWAP: `{vwap_now:.6f}`"
+                        if div_info:
+                            div_type = div_info.get("rsi_div") or div_info.get("stochrsi_div") or "?"
+                            div_src = "RSI" if div_info.get("rsi_div") else "StochRSI"
+                            caption += f"\nDiv: {div_src} {div_type.upper()}"
                         sent = await self.send_telegram_photo(buf, caption)
                         if not sent:
                             log.warning(f"[CHART] No se pudo enviar grafico de {symbol} a Telegram.")
@@ -1728,6 +2087,7 @@ class BotBBEngine:
                                             entry_idx=sig.get("entry_idx"),
                                             v0_idx=sig.get("v0_idx"),
                                             confirm_idx=sig.get("confirm_idx"),
+                                            div_info=sig.get("div_info"),
                                         )
                                 if not signals:
                                     log.info("Sin senales en este escaneo.")
