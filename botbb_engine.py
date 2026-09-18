@@ -1306,18 +1306,16 @@ class BotBBEngine:
                             log.info(f"{symbol} BE+ activado (offset {self.cfg['be_offset_pct']*100:.1f}%)")
                             await self.send_telegram(f"*{symbol}* BE+ (offset {self.cfg['be_offset_pct']*100:.1f}%)")
 
-                # 4. Trailing Stop (activa a 2:1 ratio, sube 0.2% por nuevo max)
+                # 4. Trailing Stop (activa a 1:1 ratio, sube 0.2% por nuevo max)
                 trail_key = f"{symbol}_trail_active"
                 trail_sl_key = f"{symbol}_trail_sl"
                 trail_peak_key = f"{symbol}_trail_peak"
+                trail_activated_tick = f"{symbol}_trail_just_activated"
 
                 if not self.alerts_history.get(trail_key, False):
-                    # Buscar SL original de la posicion
-                    original_sl = None
-                    for entry_data in self.trade_entries.get("entries", []):
-                        if entry_data["symbol"] == symbol:
-                            original_sl = entry_data["sl_price"]
-                            break
+                    # BUG FIX #2: acceso directo por symbol, no .get("entries", [])
+                    entry_data = self.trade_entries.get(symbol, {})
+                    original_sl = entry_data.get("sl_price") if entry_data else None
 
                     if original_sl is not None:
                         # Calcular distancia SL y precio de activacion (1:1)
@@ -1325,31 +1323,57 @@ class BotBBEngine:
                             sl_dist = entry - original_sl
                             activation_price = entry + sl_dist
                             if mark >= activation_price:
-                                self.alerts_history[trail_key] = True
                                 initial_sl = entry + sl_dist  # 1:1 como base
-                                self.alerts_history[trail_sl_key] = initial_sl
-                                self.alerts_history[trail_peak_key] = mark
-                                if await self._update_stop_loss(symbol, side, initial_sl):
+                                # BUG FIX #1: si initial_sl >= mark, el exchange cierra
+                                # inmediatamente. Dejar SL original y actualizar en proximo tick.
+                                if initial_sl < mark:
+                                    self.alerts_history[trail_key] = True
+                                    self.alerts_history[trail_sl_key] = initial_sl
+                                    self.alerts_history[trail_peak_key] = mark
+                                    self.alerts_history[trail_activated_tick] = True
+                                    if await self._update_stop_loss(symbol, side, initial_sl):
+                                        self.trail_counts[symbol] = 0
+                                        log.info(f"{symbol} Trailing activado 1:1. SL={initial_sl:.6f}")
+                                        await self.send_telegram(f"*{symbol}* Trailing 1:1 activado")
+                                else:
+                                    # Activar trailing pero no mover SL aun
+                                    # El trail update lo ajustara en el proximo tick
+                                    self.alerts_history[trail_key] = True
+                                    self.alerts_history[trail_sl_key] = entry - sl_dist  # mantener SL original
+                                    self.alerts_history[trail_peak_key] = mark
+                                    self.alerts_history[trail_activated_tick] = True
                                     self.trail_counts[symbol] = 0
-                                    log.info(f"{symbol} Trailing activado 1:1. SL={initial_sl:.6f}")
+                                    log.info(f"{symbol} Trailing activado 1:1 (SL ajustara en proximo tick, mark==activation)")
                                     await self.send_telegram(f"*{symbol}* Trailing 1:1 activado")
                         else:
                             sl_dist = original_sl - entry
                             activation_price = entry - sl_dist
                             if mark <= activation_price:
-                                self.alerts_history[trail_key] = True
                                 initial_sl = entry - sl_dist  # 1:1 como base
-                                self.alerts_history[trail_sl_key] = initial_sl
-                                self.alerts_history[trail_peak_key] = mark
-                                if await self._update_stop_loss(symbol, side, initial_sl):
+                                # BUG FIX #1: si initial_sl <= mark, el exchange cierra
+                                if initial_sl > mark:
+                                    self.alerts_history[trail_key] = True
+                                    self.alerts_history[trail_sl_key] = initial_sl
+                                    self.alerts_history[trail_peak_key] = mark
+                                    self.alerts_history[trail_activated_tick] = True
+                                    if await self._update_stop_loss(symbol, side, initial_sl):
+                                        self.trail_counts[symbol] = 0
+                                        log.info(f"{symbol} Trailing activado 1:1. SL={initial_sl:.6f}")
+                                        await self.send_telegram(f"*{symbol}* Trailing 1:1 activado")
+                                else:
+                                    self.alerts_history[trail_key] = True
+                                    self.alerts_history[trail_sl_key] = entry + sl_dist  # mantener SL original
+                                    self.alerts_history[trail_peak_key] = mark
+                                    self.alerts_history[trail_activated_tick] = True
                                     self.trail_counts[symbol] = 0
-                                    log.info(f"{symbol} Trailing activado 1:1. SL={initial_sl:.6f}")
+                                    log.info(f"{symbol} Trailing activado 1:1 (SL ajustara en proximo tick, mark==activation)")
                                     await self.send_telegram(f"*{symbol}* Trailing 1:1 activado")
 
                 # Trailing activo: subir SL 0.2% por nuevo max
                 if self.alerts_history.get(trail_key, False):
                     current_trail_sl = self.alerts_history.get(trail_sl_key, 0)
                     prev_peak = self.alerts_history.get(trail_peak_key, mark)
+                    just_activated = self.alerts_history.pop(trail_activated_tick, False)
 
                     if side == "long":
                         if mark > prev_peak:
