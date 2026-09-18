@@ -139,7 +139,7 @@ DEFAULT_CONFIG = {
     "smooth_k":               3,
     "smooth_d":               3,
     # --- Divergencia ---
-    "divergence_lookback":    20,
+    "divergence_lookback":    15,
     "rsi_overbought":         70,
     "rsi_oversold":           30,
 }
@@ -1112,6 +1112,9 @@ class BotBBEngine:
             if div_info is None:
                 log.debug(f"LONG en {warmup + v0_idx} descartada: sin divergencia RSI/StochRSI")
             else:
+                # Ajustar div_start/div_end al espacio con warmup para que coincidan con entry_idx/v0_idx
+                div_info['div_start'] += warmup
+                div_info['div_end'] += warmup
                 return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup, div_info)
 
         result = self._scan_side_arrays(
@@ -1130,6 +1133,9 @@ class BotBBEngine:
             if div_info is None:
                 log.debug(f"SHORT en {warmup + v0_idx} descartada: sin divergencia RSI/StochRSI")
             else:
+                # Ajustar div_start/div_end al espacio con warmup para que coincidan con entry_idx/v0_idx
+                div_info['div_start'] += warmup
+                div_info['div_end'] += warmup
                 return (side, sl, tp, entry_idx + warmup, v0_idx + warmup, confirm_idx + warmup, div_info)
 
         return None
