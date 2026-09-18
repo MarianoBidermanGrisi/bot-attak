@@ -1108,7 +1108,8 @@ class BotBBEngine:
             rsi_arr = rsi_full.iloc[warmup:].reset_index(drop=True).values
             k_arr = k_full.iloc[warmup:].reset_index(drop=True).values
             d_arr = d_full.iloc[warmup:].reset_index(drop=True).values
-            div_info = self._check_divergence(side, v0_idx, close_arr, rsi_arr, k_arr, d_arr)
+            div_info = self._check_divergence(side, v0_idx, close_arr, rsi_arr, k_arr, d_arr,
+                                               ha_high_arr=ha_high_arr, ha_low_arr=ha_low_arr)
             if div_info is None:
                 log.debug(f"LONG en {warmup + v0_idx} descartada: sin divergencia RSI/StochRSI")
             else:
@@ -1129,7 +1130,8 @@ class BotBBEngine:
             rsi_arr = rsi_full.iloc[warmup:].reset_index(drop=True).values
             k_arr = k_full.iloc[warmup:].reset_index(drop=True).values
             d_arr = d_full.iloc[warmup:].reset_index(drop=True).values
-            div_info = self._check_divergence(side, v0_idx, close_arr, rsi_arr, k_arr, d_arr)
+            div_info = self._check_divergence(side, v0_idx, close_arr, rsi_arr, k_arr, d_arr,
+                                               ha_high_arr=ha_high_arr, ha_low_arr=ha_low_arr)
             if div_info is None:
                 log.debug(f"SHORT en {warmup + v0_idx} descartada: sin divergencia RSI/StochRSI")
             else:
@@ -1142,10 +1144,13 @@ class BotBBEngine:
 
     def _check_divergence(self, side: str, v0_idx: int,
                           close_arr: np.ndarray, rsi_arr: np.ndarray,
-                          k_arr: np.ndarray, d_arr: np.ndarray):
+                          k_arr: np.ndarray, d_arr: np.ndarray,
+                          ha_high_arr: np.ndarray = None,
+                          ha_low_arr: np.ndarray = None):
         """
         Busca divergencia regular en RSI y luego en StochRSI.
         Ventana: desde V0 hacia atrás hasta divergence_lookback.
+        Usa ha_high/ha_low para coordenadas Y de la linea de divergencia.
         Retorna dict con info de divergencia o None.
         """
         lookback = self.cfg["divergence_lookback"]
@@ -1168,6 +1173,16 @@ class BotBBEngine:
             # Verificar que la divergencia es compatible con la dirección
             if (side == "long" and div_type == "bull") or (side == "short" and div_type == "bear"):
                 log.info(f"Divergencia RSI {div_type.upper()} detectada en ventana [{v0_start}:{v0_end}]")
+                # Usar HA high/low para coordenadas Y del gráfico
+                if div_type == "bull" and ha_low_arr is not None:
+                    p1_y = ha_low_arr[v0_start + div_rsi[1]]
+                    p2_y = ha_low_arr[v0_start + div_rsi[4]]
+                elif div_type == "bear" and ha_high_arr is not None:
+                    p1_y = ha_high_arr[v0_start + div_rsi[1]]
+                    p2_y = ha_high_arr[v0_start + div_rsi[4]]
+                else:
+                    p1_y = div_rsi[2]
+                    p2_y = div_rsi[5]
                 return {
                     'rsi_div': div_type,
                     'stochrsi_div': None,
@@ -1179,8 +1194,8 @@ class BotBBEngine:
                     'div_end': v0_end,
                     # Pivotes pre-computados para el gráfico
                     'pivot_source': 'rsi',
-                    'p1_idx': div_rsi[1], 'p1_price': div_rsi[2], 'p1_indic': div_rsi[3],
-                    'p2_idx': div_rsi[4], 'p2_price': div_rsi[5], 'p2_indic': div_rsi[6],
+                    'p1_idx': div_rsi[1], 'p1_price': p1_y, 'p1_indic': div_rsi[3],
+                    'p2_idx': div_rsi[4], 'p2_price': p2_y, 'p2_indic': div_rsi[6],
                 }
 
         # 2. Buscar divergencia en StochRSI (%K vs precio)
@@ -1193,6 +1208,16 @@ class BotBBEngine:
             div_type = div_stoch[0]
             if (side == "long" and div_type == "bull") or (side == "short" and div_type == "bear"):
                 log.info(f"Divergencia StochRSI {div_type.upper()} detectada en ventana [{v0_start}:{v0_end}]")
+                # Usar HA high/low para coordenadas Y del gráfico
+                if div_type == "bull" and ha_low_arr is not None:
+                    p1_y = ha_low_arr[v0_start + div_stoch[1]]
+                    p2_y = ha_low_arr[v0_start + div_stoch[4]]
+                elif div_type == "bear" and ha_high_arr is not None:
+                    p1_y = ha_high_arr[v0_start + div_stoch[1]]
+                    p2_y = ha_high_arr[v0_start + div_stoch[4]]
+                else:
+                    p1_y = div_stoch[2]
+                    p2_y = div_stoch[5]
                 return {
                     'rsi_div': None,
                     'stochrsi_div': div_type,
@@ -1204,8 +1229,8 @@ class BotBBEngine:
                     'div_end': v0_end,
                     # Pivotes pre-computados para el gráfico
                     'pivot_source': 'stochrsi',
-                    'p1_idx': div_stoch[1], 'p1_price': div_stoch[2], 'p1_indic': div_stoch[3],
-                    'p2_idx': div_stoch[4], 'p2_price': div_stoch[5], 'p2_indic': div_stoch[6],
+                    'p1_idx': div_stoch[1], 'p1_price': p1_y, 'p1_indic': div_stoch[3],
+                    'p2_idx': div_stoch[4], 'p2_price': p2_y, 'p2_indic': div_stoch[6],
                 }
 
         return None
