@@ -139,7 +139,7 @@ DEFAULT_CONFIG = {
     "smooth_k":               3,
     "smooth_d":               3,
     # --- Divergencia ---
-    "divergence_lookback":    30,
+    "divergence_lookback":    20,
     "rsi_overbought":         70,
     "rsi_oversold":           30,
 }
@@ -902,8 +902,10 @@ class BotBBEngine:
         if n < length + 1:
             return pd.Series(rsi, index=close.index)
 
-        diff = np.diff(src, prepend=src[0])
-        diff[0] = 0.0
+        diff = np.zeros(n, dtype=np.float64)
+        for i in range(1, n):
+            if np.isfinite(src[i]) and np.isfinite(src[i - 1]):
+                diff[i] = src[i] - src[i - 1]
 
         up_raw = np.where(diff > 0, diff, 0.0)
         down_raw = np.where(diff < 0, -diff, 0.0)
@@ -1016,19 +1018,19 @@ class BotBBEngine:
         if len(ph) >= 2:
             newest_idx, newest_p, newest_i = ph[-1]
             for k in range(len(ph) - 2, -1, -1):
-                _, older_p, older_i = ph[k]
+                older_idx, older_p, older_i = ph[k]
                 if newest_p > older_p and newest_i < older_i:
                     return ('bear', newest_idx, newest_p, newest_i,
-                            k, older_p, older_i)
+                            older_idx, older_p, older_i)
 
         # --- Detectar BULLISH: precio lower low, indicador higher low ---
         if len(pl) >= 2:
             newest_idx, newest_p, newest_i = pl[-1]
             for k in range(len(pl) - 2, -1, -1):
-                _, older_p, older_i = pl[k]
+                older_idx, older_p, older_i = pl[k]
                 if newest_p < older_p and newest_i > older_i:
                     return ('bull', newest_idx, newest_p, newest_i,
-                            k, older_p, older_i)
+                            older_idx, older_p, older_i)
 
         return None
 
