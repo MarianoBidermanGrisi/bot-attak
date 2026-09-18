@@ -459,6 +459,13 @@ class BotBBEngine:
 
             center = entry_idx if entry_idx is not None else len(df) // 2
             before, after = 40, 15
+
+            # Si hay divergencia, expandir ventana hacia atrás para incluir pivotes
+            if div_info and div_info.get("p1_idx") is not None and div_info.get("div_start") is not None:
+                earliest_pivot = min(div_info["p1_idx"], div_info["p2_idx"]) + div_info["div_start"]
+                needed_before = center - earliest_pivot + 5  # +5 margen visual
+                before = max(before, needed_before)
+
             s = max(0, center - before)
             e = min(len(df), center + after)
 
@@ -656,47 +663,51 @@ class BotBBEngine:
             # ── LÍNEAS DE DIVERGENCIA (amarillas) ──
             if div_info and local_v0 is not None and 0 <= local_v0 < n_w:
                 div_type = div_info.get("rsi_div") or div_info.get("stochrsi_div")
-                close_slice = div_info.get("close_slice")
-                indicator_slice = div_info.get("k_slice") if div_info.get("stochrsi_div") else div_info.get("rsi_slice")
                 div_start = div_info.get("div_start", 0)
 
-                if div_type and close_slice is not None and indicator_slice is not None:
-                    # Recalcular pivotes para obtener índices en el espacio del gráfico
-                    price_np = np.array(close_slice, dtype=np.float64)
-                    indic_np = np.array(indicator_slice, dtype=np.float64)
-                    pivots = self.detect_divergence(price_np, indic_np, pivot_left=1, pivot_right=1)
+                # Usar pivotes pre-computados de div_info (no re-detectar)
+                p1_idx_raw = div_info.get("p1_idx")
+                p1_price = div_info.get("p1_price")
+                p1_indic = div_info.get("p1_indic")
+                p2_idx_raw = div_info.get("p2_idx")
+                p2_price = div_info.get("p2_price")
+                p2_indic = div_info.get("p2_indic")
 
-                    if pivots is not None:
-                        _, p1_idx, p1_price, p1_indic, p2_idx, p2_price, p2_indic = pivots
-                        # Convertir índices del slice al espacio del gráfico
-                        g1 = p1_idx + div_start - s
-                        g2 = p2_idx + div_start - s
+                if (div_type and p1_idx_raw is not None and p2_idx_raw is not None
+                        and p1_price is not None and p2_price is not None):
+                    # Convertir índices del slice al espacio del gráfico
+                    g1 = p1_idx_raw + div_start - s
+                    g2 = p2_idx_raw + div_start - s
 
-                        if 0 <= g1 < n_w and 0 <= g2 < n_w:
-                            # Línea amarilla en PANEL 1 (precio)
-                            ax.plot([g1, g2], [p1_price, p2_price],
-                                    color='#FFD700', linewidth=2.0, linestyle='-', zorder=6)
-                            # Línea amarilla en PANEL 2 (indicador)
-                            ax2.plot([g1, g2], [p1_indic, p2_indic],
-                                     color='#FFD700', linewidth=2.0, linestyle='-', zorder=6)
-                            # Etiqueta
-                            mid_x = (g1 + g2) / 2
-                            if div_type == "bull":
-                                mid_y = min(p1_price, p2_price) * 0.998
-                                ax.annotate('BULL DIV', xy=(mid_x, mid_y),
-                                            fontsize=8, color='#FFD700', fontweight='bold',
-                                            ha='center', va='top')
-                                ax2.annotate('BULL DIV', xy=(mid_x, min(p1_indic, p2_indic) - 3),
-                                             fontsize=8, color='#FFD700', fontweight='bold',
-                                             ha='center', va='top')
-                            else:
-                                mid_y = max(p1_price, p2_price) * 1.002
-                                ax.annotate('BEAR DIV', xy=(mid_x, mid_y),
-                                            fontsize=8, color='#FFD700', fontweight='bold',
-                                            ha='center', va='bottom')
-                                ax2.annotate('BEAR DIV', xy=(mid_x, max(p1_indic, p2_indic) + 3),
-                                             fontsize=8, color='#FFD700', fontweight='bold',
-                                             ha='center', va='bottom')
+                    if 0 <= g1 < n_w and 0 <= g2 < n_w:
+                        # Línea amarilla en PANEL 1 (precio)
+                        ax.plot([g1, g2], [p1_price, p2_price],
+                                color='#FFD700', linewidth=2.0, linestyle='-', zorder=6)
+                        # Línea amarilla en PANEL 2 (indicador)
+                        ax2.plot([g1, g2], [p1_indic, p2_indic],
+                                 color='#FFD700', linewidth=2.0, linestyle='-', zorder=6)
+                        # Etiqueta
+                        mid_x = (g1 + g2) / 2
+                        if div_type == "bull":
+                            mid_y = min(p1_price, p2_price) * 0.998
+                            ax.annotate('BULL DIV', xy=(mid_x, mid_y),
+                                        fontsize=8, color='#FFD700', fontweight='bold',
+                                        ha='center', va='top')
+                            ax2.annotate('BULL DIV', xy=(mid_x, min(p1_indic, p2_indic) - 3),
+                                         fontsize=8, color='#FFD700', fontweight='bold',
+                                         ha='center', va='top')
+                        else:
+                            mid_y = max(p1_price, p2_price) * 1.002
+                            ax.annotate('BEAR DIV', xy=(mid_x, mid_y),
+                                        fontsize=8, color='#FFD700', fontweight='bold',
+                                        ha='center', va='bottom')
+                            ax2.annotate('BEAR DIV', xy=(mid_x, max(p1_indic, p2_indic) + 3),
+                                         fontsize=8, color='#FFD700', fontweight='bold',
+                                         ha='center', va='bottom')
+                    else:
+                        log.debug(f"[CHART] Div pivots fuera de ventana: g1={g1}, g2={g2}, n_w={n_w}")
+                else:
+                    log.debug(f"[CHART] div_info sin pivotes válidos: {div_type}, p1={p1_idx_raw}, p2={p2_idx_raw}")
 
             # X-axis labels solo en panel inferior
             step = max(1, n_w // 8)
@@ -1158,6 +1169,10 @@ class BotBBEngine:
                     'd_slice': d_arr[v0_start:v0_end],
                     'div_start': v0_start,
                     'div_end': v0_end,
+                    # Pivotes pre-computados para el gráfico
+                    'pivot_source': 'rsi',
+                    'p1_idx': div_rsi[1], 'p1_price': div_rsi[2], 'p1_indic': div_rsi[3],
+                    'p2_idx': div_rsi[4], 'p2_price': div_rsi[5], 'p2_indic': div_rsi[6],
                 }
 
         # 2. Buscar divergencia en StochRSI (%K vs precio)
@@ -1179,6 +1194,10 @@ class BotBBEngine:
                     'd_slice': d_arr[v0_start:v0_end],
                     'div_start': v0_start,
                     'div_end': v0_end,
+                    # Pivotes pre-computados para el gráfico
+                    'pivot_source': 'stochrsi',
+                    'p1_idx': div_stoch[1], 'p1_price': div_stoch[2], 'p1_indic': div_stoch[3],
+                    'p2_idx': div_stoch[4], 'p2_price': div_stoch[5], 'p2_indic': div_stoch[6],
                 }
 
         return None
