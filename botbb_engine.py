@@ -858,9 +858,28 @@ class BotBBEngine:
                     and ha_low[v0_idx] <= bb_lower[v0_idx]):
                 continue
 
+            # REGLA V0: No puede ser doji
+            v0_range = ha_high[v0_idx] - ha_low[v0_idx]
+            if v0_range > 0 and abs(ha_close[v0_idx] - ha_open[v0_idx]) < v0_range * self.cfg["doji_threshold"]:
+                continue
+
             if side == "long":
-                if np.isnan(bb_lower[v0_idx]) or ha_low[v0_idx] > bb_lower[v0_idx]:
+                # REGLA LONG V0: No puede tocar la upper band
+                if np.isnan(bb_upper[v0_idx]) or np.isnan(ha_high[v0_idx]) or ha_high[v0_idx] >= bb_upper[v0_idx]:
                     continue
+                # REGLA LONG V0: Debe tocar la lower band
+                if np.isnan(bb_lower[v0_idx]) or np.isnan(ha_low[v0_idx]) or ha_low[v0_idx] > bb_lower[v0_idx]:
+                    continue
+
+                # REGLA INTERMEDIA: Ninguna vela entre V0 y CONF puede tocar upper band
+                upper_band_touched = False
+                for check_idx in range(v0_idx, min(v0_idx + window + 1, n)):
+                    if not np.isnan(bb_upper[check_idx]) and ha_high[check_idx] >= bb_upper[check_idx]:
+                        upper_band_touched = True
+                        break
+                if upper_band_touched:
+                    continue
+
                 for offset in range(1, window + 1):
                     v_idx = v0_idx + offset
                     if v_idx >= n:
@@ -892,6 +911,9 @@ class BotBBEngine:
                             continue
                         sl_raw = reg_low[v_idx] * (1 - sl_buf)
                         sl_dist = (entry_price - sl_raw) / entry_price
+                        # Si el SL queda detras de la entrada, descartar
+                        if sl_dist <= 0:
+                            continue
                         # Si el SL queda demasiado cerca de la entrada, usar distancia minima
                         min_dist = self.cfg["min_sl_dist_pct"]
                         if sl_dist < min_dist:
@@ -905,8 +927,22 @@ class BotBBEngine:
                             continue
                         return ("long", sl, tp, entry_idx, v0_idx, v_idx)
             else:
-                if np.isnan(bb_upper[v0_idx]) or ha_high[v0_idx] < bb_upper[v0_idx]:
+                # REGLA SHORT V0: No puede tocar la lower band
+                if np.isnan(bb_lower[v0_idx]) or np.isnan(ha_low[v0_idx]) or ha_low[v0_idx] <= bb_lower[v0_idx]:
                     continue
+                # REGLA SHORT V0: Debe tocar la upper band
+                if np.isnan(bb_upper[v0_idx]) or np.isnan(ha_high[v0_idx]) or ha_high[v0_idx] < bb_upper[v0_idx]:
+                    continue
+
+                # REGLA INTERMEDIA: Ninguna vela entre V0 y CONF puede tocar lower band
+                lower_band_touched = False
+                for check_idx in range(v0_idx, min(v0_idx + window + 1, n)):
+                    if not np.isnan(bb_lower[check_idx]) and ha_low[check_idx] <= bb_lower[check_idx]:
+                        lower_band_touched = True
+                        break
+                if lower_band_touched:
+                    continue
+
                 for offset in range(1, window + 1):
                     v_idx = v0_idx + offset
                     if v_idx >= n:
@@ -938,6 +974,9 @@ class BotBBEngine:
                             continue
                         sl_raw = reg_high[v_idx] * (1 + sl_buf)
                         sl_dist = (sl_raw - entry_price) / entry_price
+                        # Si el SL queda detras de la entrada, descartar
+                        if sl_dist <= 0:
+                            continue
                         # Si el SL queda demasiado cerca de la entrada, usar distancia minima
                         min_dist = self.cfg["min_sl_dist_pct"]
                         if sl_dist < min_dist:
