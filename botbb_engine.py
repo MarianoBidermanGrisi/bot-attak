@@ -111,20 +111,23 @@ DEFAULT_CONFIG = {
     "confirmation_window":  8,
     "doji_threshold":        0.10,
     # --- Entrada ---
-    "sl_buffer_pct":        0.0070,
-    "min_sl_dist_pct":      0.0070,
+    "sl_buffer_pct":        0.0050,       # FIX1: 0.7% -> 0.5% (SL mas ajustado, menor avg loss)
+    "min_sl_dist_pct":      0.0050,       # FIX1: consistencia con buffer
     "sl_max_dist_pct":      0.05,
     "rr_ratio":             1.9,
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.009,
+    "be_trigger_pct":       0.007,        # FIX1: 0.9% -> 0.7% (BE mas rapido, protege ganancia)
     "be_offset_pct":        0.002,
-    "trailing_dist_pct":    0.0030,
+    "trailing_dist_pct":    0.0035,       # FIX1: 0.3% -> 0.35% (trailing mas agresivo, captura mas ganancia)
+    "trailing_step_pct":    0.003,        # FIX1: paso del trailing (0.2% -> 0.3%, sube SL mas rapido)
     "leverage":             10.0,
     "max_open_positions":   5,
     # --- Cooldown ---
     "max_consecutive_losses": 4,
     "cooldown_hours":       4,
+    "cooldown_rolling_window": 6,         # FIX4: ventana de ultimos N trades para cooldown rolling
+    "cooldown_loss_threshold": -0.30,     # FIX4: si el PnL rolling de la ventana < este umbral, pausar
     # --- Escaneo ---
     "scan_interval_sec":    300,
     "top_symbols_count":    100,
@@ -142,6 +145,8 @@ DEFAULT_CONFIG = {
     "divergence_lookback":    15,
     "rsi_overbought":         70,
     "rsi_oversold":           30,
+    # --- FIX2: Volatilidad minima ---
+    "min_atr_pct":            0.004,      # FIX2: ATR minimo 0.4% del precio (filtra mercados planos)
 }
 
 
@@ -155,7 +160,7 @@ class BotBBEngine:
         "cfg", "exchange", "semaphore", "_aio_session",
         "alerts_history", "peak_prices", "cooldowns", "session_active",
         "trade_entries", "trail_counts", "premature_sl_monitor", "adverse_prices",
-        "consecutive_losses", "cooldown_until", "last_scan_time",
+        "consecutive_losses", "cooldown_until", "last_scan_time", "rolling_pnl",
         "api_key", "secret_key", "passphrase",
         "telegram_token", "telegram_chat_id",
         "trades_csv", "trade_entries_path", "premature_sl_csv", "price_paths_dir",
@@ -182,6 +187,7 @@ class BotBBEngine:
         self.consecutive_losses: int = 0
         self.cooldown_until: Optional[float] = None
         self.last_scan_time: float = 0.0
+        self.rolling_pnl: list = []          # FIX4: historial de PnL de ultimos N trades
 
         # Credenciales
         self.api_key = os.environ.get("BITGET_API_KEY", "")
@@ -1047,6 +1053,25 @@ class BotBBEngine:
         if len(df) < min_candles:
             return None
 
+        # FIX2: Filtro de volatilidad minima (ATR 14 periodos)
+        # Si la volatilidad es muy baja, el precio no se mueve lo suficiente para TP
+        highs = df["high"].values.astype(np.float64)
+        lows = df["low"].values.astype(np.float64)
+        closes = df["close"].values.astype(np.float64)
+        if len(closes) >= 15:
+            tr_arr = np.maximum(
+                highs[1:] - lows[1:],
+                np.maximum(
+                    np.abs(highs[1:] - closes[:-1]),
+                    np.abs(lows[1:] - closes[:-1])
+                )
+            )
+            atr_14 = np.mean(tr_arr[-14:])
+            current_price = closes[-1]
+            if current_price > 0 and (atr_14 / current_price) < self.cfg["min_atr_pct"]:
+                log.debug(f"ATR filter: {atr_14/current_price*100:.3f}% < {self.cfg['min_atr_pct']*100:.1f}% min. Saltando.")
+                return None
+
         # Usar .values para operaciones vectorizadas y evitar copia innecesaria
         bb_upper, bb_basis, bb_lower = self.calculate_bb(df["close"])
         macd_green = self.calculate_macd_overlay(df["close"])
@@ -1355,8 +1380,13 @@ class BotBBEngine:
                         candle_range = ha_high[v_idx] - ha_low[v_idx]
                         if candle_range > 0 and abs(ha_close[v_idx] - ha_open[v_idx]) < candle_range * self.cfg["doji_threshold"]:
                             continue
-                        # REGLA: CONF SHORT debe cerrar por debajo del VWAP
-                        if np.isnan(vwap[v_idx]) or close[v_idx] >= vwap[v_idx]:
+                        # FIX3: CONF SHORT debe cerrar POR ENCIMA del VWAP (mean-reversion: precio alto -> revertir abajo)
+                        # El filtro original pedia close < VWAP, eso es direccion trend, no mean-reversion
+                        # Ademas, debe estar al menos 0.5% arriba para tener espacio de caida
+                        if np.isnan(vwap[v_idx]) or close[v_idx] <= vwap[v_idx]:
+                            continue
+                        vwap_gap = (close[v_idx] - vwap[v_idx]) / vwap[v_idx]
+                        if vwap_gap < 0.005:  # FIX3: min 0.5% arriba del VWAP
                             continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
@@ -1780,16 +1810,17 @@ class BotBBEngine:
                                     log.info(f"{symbol} Trailing activado 1:1 (SL ajustara en proximo tick, mark==activation)")
                                     await self.send_telegram(f"*{symbol}* Trailing 1:1 activado")
 
-                # Trailing activo: subir SL 0.2% por nuevo max
+                # Trailing activo: subir SL porcentaje por nuevo max (configurable)
                 if self.alerts_history.get(trail_key, False):
                     current_trail_sl = self.alerts_history.get(trail_sl_key, 0)
                     prev_peak = self.alerts_history.get(trail_peak_key, mark)
                     just_activated = self.alerts_history.pop(trail_activated_tick, False)
+                    trail_step = self.cfg["trailing_step_pct"]  # FIX1: paso configurable (default 0.3%)
 
                     if side == "long":
                         if mark > prev_peak:
-                            # Nuevo maximo: subir SL 0.2%
-                            new_sl = current_trail_sl * (1 + 0.002)
+                            # Nuevo maximo: subir SL trail_step%
+                            new_sl = current_trail_sl * (1 + trail_step)
                             if new_sl < mark:  # SL no puede pasar el precio
                                 if await self._update_stop_loss(symbol, side, new_sl):
                                     self.alerts_history[trail_sl_key] = new_sl
@@ -1798,8 +1829,8 @@ class BotBBEngine:
                                     log.info(f"{symbol} Trail -> {new_sl:.6f} (nuevo max {mark:.6f})")
                     else:
                         if mark < prev_peak:
-                            # Nuevo minimo: bajar SL 0.2%
-                            new_sl = current_trail_sl * (1 - 0.002)
+                            # Nuevo minimo: bajar SL trail_step%
+                            new_sl = current_trail_sl * (1 - trail_step)
                             if new_sl > mark:  # SL no puede bajar del precio
                                 if await self._update_stop_loss(symbol, side, new_sl):
                                     self.alerts_history[trail_sl_key] = new_sl
@@ -1935,6 +1966,8 @@ class BotBBEngine:
     # COOLDOWN POR PERDIDAS CONSECUTIVAS
     # ==========================================================
     def record_trade_result(self, net_pnl: float):
+        """FIX4: Cooldown rolling basado en PnL de los ultimos N trades."""
+        # Mantener cooldown clasico como fallback
         if net_pnl >= 0:
             if self.consecutive_losses > 0:
                 log.info(f"Trade ganador. Perdidas reseteadas ({self.consecutive_losses} -> 0)")
@@ -1944,8 +1977,22 @@ class BotBBEngine:
             log.info(f"Perdida consecutiva #{self.consecutive_losses}")
             if self.consecutive_losses >= self.cfg["max_consecutive_losses"]:
                 self.cooldown_until = time.time() + self.cfg["cooldown_hours"] * 3600
-                log.warning(f"{self.cfg['max_consecutive_losses']} perdidas. Pausa {self.cfg['cooldown_hours']}h.")
-                # Telegram se envia desde manage_positions (async)
+                log.warning(f"{self.cfg['max_consecutive_losses']} perdidas consecutivas. Pausa {self.cfg['cooldown_hours']}h.")
+
+        # FIX4: Cooldown rolling por PnL negativo acumulado
+        window = self.cfg["cooldown_rolling_window"]
+        self.rolling_pnl.append(net_pnl)
+        if len(self.rolling_pnl) > window:
+            self.rolling_pnl = self.rolling_pnl[-window:]
+        if len(self.rolling_pnl) >= window:
+            rolling_sum = sum(self.rolling_pnl)
+            threshold = self.cfg["cooldown_loss_threshold"]
+            if rolling_sum < threshold and self.cooldown_until is None:
+                self.cooldown_until = time.time() + self.cfg["cooldown_hours"] * 3600
+                log.warning(
+                    f"Cooldown ROLLING activado: PnL ultimos {window} trades = {rolling_sum:+.4f} "
+                    f"(umbral: {threshold}). Pausa {self.cfg['cooldown_hours']}h."
+                )
 
     def is_on_cooldown(self) -> bool:
         if self.cooldown_until is None:
