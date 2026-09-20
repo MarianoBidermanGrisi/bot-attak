@@ -685,7 +685,16 @@ class BotBBEngine:
                     g1 = p1_idx_raw + div_start - s
                     g2 = p2_idx_raw + div_start - s
 
-                    if 0 <= g1 < n_w and 0 <= g2 < n_w:
+                    # FIX CAPA 3: Validar calidad de pivotes antes de dibujar
+                    # 1. Distancia mínima entre pivotes (6 velas)
+                    # 2. Swing mínimo del precio (0.3%)
+                    min_div_distance = 6
+                    min_price_swing = 0.003
+                    if abs(g2 - g1) < min_div_distance:
+                        log.debug(f"[CHART] Div descartada para {symbol}: pivotes muy cercanos ({abs(g2-g1)} < {min_div_distance})")
+                    elif p1_price > 0 and abs(p2_price - p1_price) / p1_price < min_price_swing:
+                        log.debug(f"[CHART] Div descartada para {symbol}: swing precio demasiado pequeño")
+                    elif 0 <= g1 < n_w and 0 <= g2 < n_w:
                         # Línea amarilla en PANEL 1 (precio)
                         ax.plot([g1, g2], [p1_price, p2_price],
                                 color='#FFD700', linewidth=2.0, linestyle='-', zorder=6)
@@ -982,9 +991,18 @@ class BotBBEngine:
     # ==========================================================
     @staticmethod
     def detect_divergence(price: np.ndarray, indicator: np.ndarray,
-                          pivot_left: int = 2, pivot_right: int = 2):
+                          pivot_left: int = 2, pivot_right: int = 2,
+                          min_swing_pct: float = 0.003,
+                          min_pivot_distance: int = 3,
+                          min_indicator_diff: float = 4.0):
         """
         Detecta divergencia regular (bullish/bearish) usando pivotes.
+        
+        Filtros de calidad:
+        - min_swing_pct: swing mínimo del precio (% del promedio) para considerar un pivot significativo.
+        - min_pivot_distance: distancia mínima en velas entre los dos pivotes comparados.
+        - min_indicator_diff: diferencia mínima del indicador (RSI/StochRSI) entre pivotes.
+        
         Retorna: ('bull', idx, price_pivot, indic_pivot) o
                  ('bear', idx, price_pivot, indic_pivot) o None
         """
@@ -1025,6 +1043,20 @@ class BotBBEngine:
             newest_idx, newest_p, newest_i = ph[-1]
             for k in range(len(ph) - 2, -1, -1):
                 older_idx, older_p, older_i = ph[k]
+                # Filtro 1: distancia mínima entre pivotes
+                if abs(newest_idx - older_idx) < min_pivot_distance:
+                    continue
+                # Filtro 2: swing mínimo del precio (evita mini-fluctuaciones)
+                avg_price = (newest_p + older_p) / 2.0
+                if avg_price <= 0:
+                    continue
+                swing_pct = abs(newest_p - older_p) / avg_price
+                if swing_pct < min_swing_pct:
+                    continue
+                # Filtro 3: diferencia mínima del indicador
+                if abs(newest_i - older_i) < min_indicator_diff:
+                    continue
+                # Condición original de divergencia bearish
                 if newest_p > older_p and newest_i < older_i:
                     return ('bear', newest_idx, newest_p, newest_i,
                             older_idx, older_p, older_i)
@@ -1034,6 +1066,20 @@ class BotBBEngine:
             newest_idx, newest_p, newest_i = pl[-1]
             for k in range(len(pl) - 2, -1, -1):
                 older_idx, older_p, older_i = pl[k]
+                # Filtro 1: distancia mínima entre pivotes
+                if abs(newest_idx - older_idx) < min_pivot_distance:
+                    continue
+                # Filtro 2: swing mínimo del precio
+                avg_price = (newest_p + older_p) / 2.0
+                if avg_price <= 0:
+                    continue
+                swing_pct = abs(newest_p - older_p) / avg_price
+                if swing_pct < min_swing_pct:
+                    continue
+                # Filtro 3: diferencia mínima del indicador
+                if abs(newest_i - older_i) < min_indicator_diff:
+                    continue
+                # Condición original de divergencia bullish
                 if newest_p < older_p and newest_i > older_i:
                     return ('bull', newest_idx, newest_p, newest_i,
                             older_idx, older_p, older_i)
@@ -1188,10 +1234,13 @@ class BotBBEngine:
         k_window = k_arr[v0_start:v0_end]
 
         # 1. Buscar divergencia en RSI
-        if side == "long":
-            div_rsi = self.detect_divergence(price_window, rsi_window, pivot_left=1, pivot_right=1)
-        else:
-            div_rsi = self.detect_divergence(price_window, rsi_window, pivot_left=1, pivot_right=1)
+        # FIX: pivot_left/right=2 exige que el pivot sea máx/mín local de 3+ velas
+        # Filtros: min_swing_pct=0.3%, min_pivot_distance=6 velas, min_indicator_diff=4 puntos RSI
+        div_rsi = self.detect_divergence(
+            price_window, rsi_window,
+            pivot_left=2, pivot_right=2,
+            min_swing_pct=0.003, min_pivot_distance=6, min_indicator_diff=4.0,
+        )
 
         if div_rsi is not None:
             div_type = div_rsi[0]
@@ -1224,10 +1273,12 @@ class BotBBEngine:
                 }
 
         # 2. Buscar divergencia en StochRSI (%K vs precio)
-        if side == "long":
-            div_stoch = self.detect_divergence(price_window, k_window, pivot_left=1, pivot_right=1)
-        else:
-            div_stoch = self.detect_divergence(price_window, k_window, pivot_left=1, pivot_right=1)
+        # FIX: mismos params estrictos que RSI
+        div_stoch = self.detect_divergence(
+            price_window, k_window,
+            pivot_left=2, pivot_right=2,
+            min_swing_pct=0.003, min_pivot_distance=6, min_indicator_diff=4.0,
+        )
 
         if div_stoch is not None:
             div_type = div_stoch[0]
