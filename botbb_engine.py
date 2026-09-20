@@ -686,14 +686,14 @@ class BotBBEngine:
                     g2 = p2_idx_raw + div_start - s
 
                     # FIX CAPA 3: Validar calidad de pivotes antes de dibujar
-                    # 1. Distancia mínima entre pivotes (6 velas)
-                    # 2. Swing mínimo del precio (0.3%)
+                    # Solo distancia mínima entre pivotes (6 velas).
+                    # NOTA: min_price_swing se eliminó porque la detección ya validó
+                    # el swing con precios close raw en detect_divergence(). Re-validar
+                    # aquí con precios Heikin Ashi (suavizados) causaba falsos negativos
+                    # en activos con alta volatilidad de StochRSI (ej: EPIC/USDT).
                     min_div_distance = 6
-                    min_price_swing = 0.003
                     if abs(g2 - g1) < min_div_distance:
                         log.debug(f"[CHART] Div descartada para {symbol}: pivotes muy cercanos ({abs(g2-g1)} < {min_div_distance})")
-                    elif p1_price > 0 and abs(p2_price - p1_price) / p1_price < min_price_swing:
-                        log.debug(f"[CHART] Div descartada para {symbol}: swing precio demasiado pequeño")
                     elif 0 <= g1 < n_w and 0 <= g2 < n_w:
                         # Línea amarilla en PANEL 1 (precio)
                         ax.plot([g1, g2], [p1_price, p2_price],
