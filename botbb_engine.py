@@ -1431,13 +1431,12 @@ class BotBBEngine:
                         candle_range = ha_high[v_idx] - ha_low[v_idx]
                         if candle_range > 0 and abs(ha_close[v_idx] - ha_open[v_idx]) < candle_range * self.cfg["doji_threshold"]:
                             continue
-                        # FIX3: CONF SHORT debe cerrar POR ENCIMA del VWAP (mean-reversion: precio alto -> revertir abajo)
-                        # El filtro original pedia close < VWAP, eso es direccion trend, no mean-reversion
-                        # Ademas, debe estar al menos 0.5% arriba para tener espacio de caida
-                        if np.isnan(vwap[v_idx]) or close[v_idx] <= vwap[v_idx]:
+                        # FIX3: CONF SHORT debe cerrar POR DEBAJO del VWAP (trend confirmation: 
+                        # precio bajo VWAP = presion bajista confirmada, espacio para seguir cayendo)
+                        if np.isnan(vwap[v_idx]) or close[v_idx] >= vwap[v_idx]:
                             continue
-                        vwap_gap = (close[v_idx] - vwap[v_idx]) / vwap[v_idx]
-                        if vwap_gap < 0.005:  # FIX3: min 0.5% arriba del VWAP
+                        vwap_gap = (vwap[v_idx] - close[v_idx]) / vwap[v_idx]
+                        if vwap_gap < 0.005:  # FIX3: min 0.5% debajo del VWAP
                             continue
                         entry_idx = v_idx + 1
                         if entry_idx >= n:
