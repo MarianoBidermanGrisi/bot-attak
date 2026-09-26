@@ -111,20 +111,20 @@ DEFAULT_CONFIG = {
     "confirmation_window":  8,
     "doji_threshold":        0.10,
     # --- Entrada ---
-    "sl_buffer_pct":        0.0050,       # FIX1: 0.7% -> 0.5% (SL mas ajustado, menor avg loss)
-    "min_sl_dist_pct":      0.0050,       # FIX1: consistencia con buffer
+    "sl_buffer_pct":        0.0070,       # OPTIMIZADO: 0.7% buffer SL (evita salidas prematuras)
+    "min_sl_dist_pct":      0.0070,       # OPTIMIZADO: SL minimo 0.7% del precio
     "sl_max_dist_pct":      0.05,
-    "rr_ratio":             1.9,
+    "rr_ratio":             2.2,          # OPTIMIZADO: R:R 2.2:1 (realista segun backtest)
     # --- Gestion ---
     "risk_pct":             0.07,
-    "be_trigger_pct":       0.007,        # FIX1: 0.9% -> 0.7% (BE mas rapido, protege ganancia)
+    "be_trigger_pct":       0.0132,       # OPTIMIZADO: BE activa a 1.32% (evita whipsaw)
     "be_offset_pct":        0.002,
     "trailing_dist_pct":    0.0035,       # FIX1: 0.3% -> 0.35% (trailing mas agresivo, captura mas ganancia)
-    "trailing_step_pct":    0.003,        # FIX1: paso del trailing (0.2% -> 0.3%, sube SL mas rapido)
+    "trailing_step_pct":    0.003,        # OPTIMIZADO: paso del trailing 0.3%
     "leverage":             10.0,
     "max_open_positions":   5,
     # --- Cooldown ---
-    "max_consecutive_losses": 4,
+    "max_consecutive_losses": 3,          # OPTIMIZADO: pausa a 3 perdidas (era 4)
     "cooldown_hours":       4,
     "cooldown_rolling_window": 6,         # FIX4: ventana de ultimos N trades para cooldown rolling
     "cooldown_loss_threshold": -0.30,     # FIX4: si el PnL rolling de la ventana < este umbral, pausar
