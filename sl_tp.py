@@ -11,6 +11,9 @@ SECCIONES (logica PURA: solo numeros, sin I/O):
                            validar_entrada() : validacion + reescala al
                                        precio REAL de entrada de Bitget
   [1b] TP1/TP2 - tp_accion()        : ¿cierro 50% (TP1) o todo (TP2)?
+                    split_tp_qty()   : parte la posicion en cantidades
+                                       TP1/TP2 para colocar las ordenes
+                                       profit_plan EN Bitget [TPO-3]
   [2] BREAK EVEN - be_debe_evaluar() / be_objetivo() / be_mejora()
   [3] TRAILING   - trail_activacion() / trail_objetivo() / trail_debe_mover()
                    (logica CONSERVADA; se activa con trailing_enabled=True)
@@ -33,6 +36,7 @@ CONTRATO DE ENTRADA/SALIDA (los wrappers de canalBot.py dependen de esto):
                              (PRICE-NAN, SL-INVALID, TP-INVALID) y el
                              llamador NO debe abrir posicion.
   * tp_accion(profit, tp1_done, cfg) -> "tp2" | "tp1" | None (decision pura)
+  * split_tp_qty(qty, frac, step)    -> (tp1_qty, tp2_qty) pura [TPO-3]
   * be_debe_evaluar(profit, cfg, tp1_done) -> bool
   * be_mejora(...) / trail_debe_mover(...) -> bool (decision pura)
   * trail_activacion(...) -> {"api": bool, "sl": float} | None
@@ -186,6 +190,33 @@ def tp_accion(profit_pct: float, tp1_done: bool, cfg: dict) -> Optional[str]:
     if not tp1_done and profit_pct >= cfg["tp1_pct"]:
         return "tp1"
     return None
+
+
+def split_tp_qty(qty: float, frac: float, step: float):
+    """
+    [TPO-3] Parte la posicion en (tp1_qty, tp2_qty) para colocar las DOS
+    ordenes profit_plan en Bitget (TP1 cierra `frac`, TP2 cierra el resto).
+
+      * tp1 = floor(qty*frac/step)*step  -> alineado al step, <= frac
+      * tp2 = qty - tp1                  -> SUMA EXACTA = qty (cumple la
+        regla de Bitget: la suma de los TP no puede superar el volumen
+        de la posicion)
+      * qty no divisible en 2 pasos (qty < step), o entradas no finitas
+        -> (0.0, qty): el llamador NO coloca TP1 y usa fallback completo
+        (canalBot._place_exchange_tps es all-or-nothing).
+      * frac fuera de rango se recorta a [0, 1] (nunca tp2 negativo).
+    """
+    if not all(math.isfinite(v) for v in (qty, frac, step)) \
+            or not (step > 0) or not (qty > 0):
+        return 0.0, 0.0
+    frac_c = max(0.0, min(frac, 1.0))
+    steps = int(math.floor((qty * frac_c) / step + 1e-9))   # tol fp
+    tp1 = min(max(steps, 0) * step, qty)
+    tp1 = round(tp1, 12)
+    tp2 = round(qty - tp1, 12)
+    if tp1 < step:                       # no se puede partir (o frac=0)
+        return 0.0, round(qty, 12)
+    return tp1, tp2
 
 
 def validar_entrada(symbol: str, side: str, strategy_entry: float,
