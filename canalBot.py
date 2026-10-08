@@ -209,6 +209,15 @@ CONFIG = {
                                     # acepta los TP (notional < minimo).
     "tp_reconcile_sec": 600,        # [TPO-3] cada cuantos segundos manage
                                     # verifica que los TP sigan en Bitget
+    "tp_retry_sec": 3,              # [FIX-H7] espera tras un intento de carga
+                                    # de TP fallido por error TRANSITORIO
+                                    # (429/500/red); 0 = reintento inmediato.
+                                    # Los fallos DEFINITIVOS (notional/step)
+                                    # NO duermen: van directo a bot-side.
+    "tp_single_fallback": True,     # [H8] si NO cargan TP1+TP2 -> 1 sola TP
+                                    # en Bitget que cierra el 100% en
+                                    # tp1_pct (+2% = +20% PnL a 10x).
+                                    # False = sin TP unico (bot-side).
 
     # -- [3.6c] Gate del Break Even --
     "be_after_tp1": True,           # [BE-TP1] el BE SOLO se evalua DESPUES
@@ -1158,7 +1167,9 @@ class CanalBot:
             min_notional = market.get("limits", {}).get("cost", {}).get("min") or 5.0
             if qty <= 0 or not math.isfinite(qty * trigger_price) \
                     or qty * trigger_price < min_notional:
-                flag("TP-NOTIONAL-MIN", ORIGEN_BIBLIOTECA,
+                # [H6] ORIGEN_CODIGO: la causa raiz es NUESTRO sizing
+                # (margen/step -> qty demasiado pequena), no la libreria.
+                flag("TP-NOTIONAL-MIN", ORIGEN_CODIGO,
                      f"{symbol} {tag}: qty={qty} notional="
                      f"{qty * trigger_price:.2f} < min {min_notional} USDT; "
                      f"orden TP omitida.", logging.WARNING)
@@ -1245,7 +1256,25 @@ class CanalBot:
                                   tp1_price: float, tp2_price: float) -> bool:
         """[TPO-3c] Coloca TP1+TP2 en Bitget. ALL-OR-NOTHING: si cualquiera
         falla se cancela todo y devuelve False -> el llamador marca
-        exchange_tps=False y el TP lo ejecuta el bot (sin doble TP)."""
+        exchange_tps=False y el TP lo ejecuta el bot (sin doble TP).
+
+        [FIX-H7] GARANTIA DE CARGA DE LOS DOS TP:
+          (a) Ningun estado MIXTO: si falla UN TP se cancela el otro (si el
+              cancel a su vez falla -> flag TP-CANCEL-STUCK y el reconcile
+              de 600s lo retira en modo bot).
+          (b) Reclasifica el fallo ANTES de rendirse:
+              DEFINITIVO (notional < minimo o step no divisible) -> sin
+              reintento: cae a bot-side al instante (no se gastan APIs ni
+              segundos; es el caso habitual con balances pequenos).
+              TRANSITORIO (429/500/red/400 puntual) -> UN reintento tras
+              cfg[tp_retry_sec]; si vuelve a fallar -> flag TP-RETRY-FAIL
+              + bot-side.
+          (c) Red de seguridad final (existe desde TPO-2): el bot ejecuta
+              TP1/TP2 cada 15s via sl_tp.tp_accion y el SL SIEMPRE esta
+              precargado en la orden de Bitget -> nunca quedas sin salida.
+        """
+        tp1_qty = tp2_qty = 0.0
+        fallo_definitivo = False
         try:
             await self._cancel_exchange_tps(symbol)      # limpia previas
             market = await self._exch_call("market", symbol)
@@ -1254,26 +1283,128 @@ class CanalBot:
             tp1_qty, tp2_qty = sl_tp.split_tp_qty(
                 qty, self.cfg["tp1_close_frac"], step)
             if tp1_qty <= 0:
-                flag("TP-SPLIT", ORIGEN_BIBLIOTECA,
+                # [H6] ORIGEN_CODIGO: tp1_qty sale de NUESTRO split_tp_qty
+                # contra el step del mercado; la division es de esta logica.
+                flag("TP-SPLIT", ORIGEN_CODIGO,
                      f"{symbol}: qty={qty} no divisible para TP1/TP2 "
                      f"(step={step}) -> fallback bot-side.", logging.WARNING)
                 return False
-            if not await self._place_tp_order(symbol, side, tp1_price,
-                                              tp1_qty, "tp1"):
-                await self._cancel_exchange_tps(symbol)
-                return False
-            if not await self._place_tp_order(symbol, side, tp2_price,
-                                              tp2_qty, "tp2"):
-                await self._cancel_exchange_tps(symbol)
-                return False
-            log.info(f"{symbol} TP1+TP2 cargados en Bitget (visibles): "
-                     f"{tp1_qty}/{tp2_qty}")
-            return True
+
+            # --- [H7a] ¿el fallo seria DEFINITIVO o TRANSITORIO? ---
+            min_notional = (market.get("limits", {}).get("cost", {})
+                            .get("min") or 5.0)
+            fallo_definitivo = any(
+                not (math.isfinite(q * p) and q * p >= min_notional)
+                for q, p in ((tp1_qty, tp1_price), (tp2_qty, tp2_price)))
+
+            for intento in (1, 2):
+                if intento == 2:
+                    # [H7b] reintento SOLO ante fallo transitorio
+                    await asyncio.sleep(
+                        max(0.0, float(self.cfg.get("tp_retry_sec", 3))))
+                    await self._cancel_exchange_tps(symbol)  # limpia tp1 huérfano
+                ok1 = await self._place_tp_order(symbol, side, tp1_price,
+                                                 tp1_qty, "tp1")
+                ok2 = ok1 and await self._place_tp_order(
+                    symbol, side, tp2_price, tp2_qty, "tp2")
+                if ok1 and ok2:
+                    log.info(f"{symbol} TP1+TP2 cargados en Bitget "
+                             f"{'(tras reintento)' if intento == 2 else ''}: "
+                             f"{tp1_qty}/{tp2_qty}")
+                    return True
+                if fallo_definitivo:
+                    break                       # no hay nada que reintentar
+                if intento == 1:
+                    log.warning(f"{symbol}: carga de TP fallo (intento 1, "
+                                f"posible 429/500/red). Reintento en "
+                                f"{self.cfg.get('tp_retry_sec', 3)}s.")
+
+            # --- llega aqui: fallo definitivo o 2 intentos agotados ---
+            if not fallo_definitivo:
+                # transitorio y agotado (el definitivo ya emitio
+                # TP-NOTIONAL-MIN / TP-SPLIT dentro de _place_tp_order)
+                flag("TP-RETRY-FAIL", ORIGEN_CODIGO,
+                     f"{symbol}: TP1/TP2 no colocados tras 2 intentos "
+                     f"(429/500/red); TP pasa a bot-side "
+                     f"(sl_tp.tp_accion cada 15s).", logging.WARNING)
+            if not await self._cancel_exchange_tps(symbol):
+                flag("TP-CANCEL-STUCK", ORIGEN_CODIGO,
+                     f"{symbol}: limpieza de TP residual fallo; el reconcile "
+                     f"de {self.cfg.get('tp_reconcile_sec', 600)}s lo retirara "
+                     f"en modo bot.", logging.ERROR)
+            return False
         except Exception as e:
             flag("TPSET-UNEXPECTED", origen_de_excepcion(e),
                  f"_place_exchange_tps {symbol}: {e}", logging.ERROR)
             await self._cancel_exchange_tps(symbol)
             return False
+
+    async def _place_single_tp(self, symbol: str, side: str, qty: float,
+                               trigger_price: float) -> bool:
+        """[H8] Fallback de 2do nivel: si NO se pudieron cargar TP1+TP2
+        (all-or-nothing), coloca UNA sola profit_plan que cierra el 100%
+        de la posicion en tp1_pct (ej: +2% de precio = +20% PnL a 10x).
+        Si esa tampoco cabe (notional < minimo de Bitget) -> False y el
+        TP lo ejecuta el bot (red final, sl_tp.tp_accion)."""
+        if not await self._place_tp_order(symbol, side, trigger_price, qty,
+                                          "tp1"):
+            # el flag (TP-NOTIONAL-MIN / 429 / etc.) ya lo emitio
+            # _place_tp_order; aqui solo reportamos la desviacion.
+            log.warning(f"{symbol}: TP unico 100% tampoco pudo cargarse "
+                        f"(qty={qty} @ {trigger_price}).")
+            return False
+        log.info(f"{symbol} TP UNICO cargado en Bitget: 100% de la posicion "
+                 f"en {trigger_price} (+{self.cfg['tp1_pct']*100:.0f}% precio "
+                 f"= +{self.cfg['tp1_pct']*self.cfg['leverage']*100:.0f}% PnL "
+                 f"a {self.cfg['leverage']:.0f}x).")
+        return True
+
+    @staticmethod
+    def _es_tp_single(te: dict, plans: Optional[list],
+                      contracts: float) -> bool:
+        """[H8] ¿El estado/dato es modo TP UNICO (1 orden = 100%)?
+        True/False declarado en te, o (te reconstruido / JSON viejo sin la
+        clave: tp_single ausente o None) se DEDUCE del tamano del plan
+        pendiente: size == contracts (100%) -> es el TP unico."""
+        v = te.get("tp_single", None)
+        if v is True:
+            return True
+        if v is False:
+            return False
+        for o in plans or []:
+            try:
+                sz = float(o.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if contracts > 0 and \
+                    abs(sz - contracts) <= max(abs(contracts) * 1e-3, 1e-12):
+                return True
+        return False
+
+    async def _reportar_tps_visibles(self, symbol: str) -> None:
+        """[H8] Confirmacion CONTRA Bitget de los planes realmente
+        pendientes (lo que veras en el panel) -> log + Telegram.
+        Nunca lanza excepcion."""
+        try:
+            planes = await self._pending_profit_plans(symbol)
+            if planes is None:
+                return                       # error ya flageado
+            if not planes:
+                flag("TP-VISIBLE", ORIGEN_CODIGO,
+                     f"{symbol}: 0 profit_plan pendientes en Bitget "
+                     f"(usar verificar_tp.py para inspeccionar).",
+                     logging.WARNING)
+                return
+            resumen = ", ".join(
+                f"{o.get('triggerPrice')} x{o.get('size')}" for o in planes)
+            log.info(f"{symbol} planes PENDIENTES visibles en Bitget "
+                     f"({len(planes)}): {resumen}")
+            await self.send_telegram(
+                f"*{symbol}* TP visible en Bitget ({len(planes)}): "
+                f"`{resumen}`")
+        except Exception as e:
+            flag("TP-VISIBLE", origen_de_excepcion(e),
+                 f"_reportar_tps_visibles {symbol}: {e}", logging.WARNING)
 
     async def _pending_profit_plans(self, symbol: str) -> Optional[list]:
         """[TPO-3d] profit_plan PENDIENTES del simbolo.
@@ -1396,6 +1527,44 @@ class CanalBot:
             except (TypeError, ValueError):
                 return False
 
+        # --- [H8] Modo TP UNICO: 1 sola orden = 100% en tp1_pct ---
+        if self._es_tp_single(te, plans, contracts):
+            def _full(o):
+                try:
+                    return abs(float(o.get("size") or 0) - contracts) \
+                        <= max(abs(contracts) * 1e-3, 1e-12)
+                except (TypeError, ValueError):
+                    return False
+            if any(_match(o, f1) and _full(o) for o in plans):
+                return                          # el TP unico sigue ahi
+            if not te.get("tp1_done", False) and \
+                    await self._tp1_executed_en_bitget(symbol, f1):
+                # el TP unico (100%) ya ejecuto -> cierre completo
+                te["tp1_done"] = True
+                te["tp2_done"] = True
+                await self._save_trade_entries()
+                log.info(f"{symbol} TP unico ejecutado por Bitget (100%).")
+                await self.send_telegram(
+                    f"*{symbol}* TP unico ejecutado (100%)")
+                return
+            # reparar: limpia restos y re-coloca 1 TP = 100% de contracts
+            await self._cancel_exchange_tps(symbol)
+            if await self._place_single_tp(symbol, side, contracts,
+                                           float(te["tp1_price"])):
+                te["tp_single"] = True
+                await self._save_trade_entries()
+                log.info(f"{symbol} TP unico reparado en Bitget (100%).")
+                await self.send_telegram(
+                    f"*{symbol}* TP unico en Bitget reparado (100%)")
+                return
+            te["exchange_tps"] = False
+            te["tp_single"] = False
+            await self._save_trade_entries()
+            flag("TP-FALLBACK", ORIGEN_CODIGO,
+                 f"{symbol}: TP unico no pudo re-colocarse -> bot-side.",
+                 logging.WARNING)
+            return
+
         p1 = any(_match(o, f1) for o in plans)
         p2 = any(_match(o, f2) for o in plans)
 
@@ -1475,6 +1644,9 @@ class CanalBot:
             "size_usdt": 0.0,
             "risk_pct": 0.0,
             "exchange_tps": True,   # optimista: lo refina el reconcile
+            # [H8] None = desconocido tras rebuild; el reconcile lo DEDUCE
+            # del tamano del plan pendiente (size == contracts -> unico).
+            "tp_single": None,
         }
         flag("TE-REBUILD", ORIGEN_CODIGO,
              f"{symbol}: trade_entries reconstruido tras restart "
@@ -1570,6 +1742,23 @@ class CanalBot:
                     qty = step
                 actual_margin = (qty * price) / leverage
 
+            # [FIX-H1] El step MINIMO del mercado puede FORZAR un margen mayor
+            # que el objetivo: una vez qty=step ya no puede bajar mas y el
+            # clamp de arriba es un no-op -> risk_pct quedaria IGNORADO.
+            # Ejemplo real (XAUT step=0.01, balance 18.4): objetivo 1.29 USDT,
+            # real 4.11 USDT (3.2x -> perdida en el 5% de SL = 11.2% del
+            # balance en vez de 3.5%). En ese caso el par es INOPERABLE con
+            # este balance: se RECHAZA la orden en vez de arriesgar de mas.
+            if target_margin > 0 and actual_margin > target_margin * 1.05:
+                flag("RISK-MINSTEP", ORIGEN_CODIGO,
+                     f"{symbol}: step={step} obliga a margen "
+                     f"{actual_margin:.2f} USDT > objetivo "
+                     f"{target_margin:.2f} USDT "
+                     f"(x{actual_margin / target_margin:.1f}). Par "
+                     f"inoperable con este balance; orden omitida.",
+                     logging.WARNING)
+                return False
+
             log.info(f"[SIZING] {symbol} | Objetivo: {target_margin:.2f} | "
                      f"Real: {actual_margin:.2f} | Qty: {qty}")
 
@@ -1604,35 +1793,67 @@ class CanalBot:
             #     (visibles en el panel de la posicion; las ejecuta el
             #      exchange). All-or-nothing: si falla -> fallback bot.)
             exchange_tps = False
+            tp_single = False
             if self.cfg.get("tp_mode") == "exchange":
                 exchange_tps = await self._place_exchange_tps(
                     symbol, side, qty, tp1_price, tp2_price)
+                if not exchange_tps and \
+                        self.cfg.get("tp_single_fallback", True):
+                    # [H8] 2 TPs no cargables -> 1 sola TP en Bitget que
+                    # cierra el 100% de la posicion en tp1_pct (+2% =
+                    # +20% PnL a 10x). exchange_tps queda True => el bot
+                    # NO ejecuta tp_accion (sin doble TP).
+                    tp_single = await self._place_single_tp(
+                        symbol, side, qty, tp1_price)
+                    exchange_tps = tp_single
+                    if tp_single:
+                        flag("TP-SINGLE-FALLBACK", ORIGEN_CODIGO,
+                             f"{symbol}: TP1+TP2 no cargables -> TP unico "
+                             f"100% en +{self.cfg['tp1_pct']*100:.0f}% "
+                             f"(+{self.cfg['tp1_pct']*self.cfg['leverage']*100:.0f}% "
+                             f"PnL a {self.cfg['leverage']:.0f}x).",
+                             logging.WARNING)
                 if not exchange_tps:
                     flag("TP-BOTFALLBACK", ORIGEN_CODIGO,
                          f"{symbol}: TP1/TP2 no se colocaron en Bitget -> "
                          f"ejecucion TP bot-side.", logging.WARNING)
-            tps_txt = "Bitget (visible)" if exchange_tps else "bot (fallback)"
+            if tp_single:
+                tps_txt = "Bitget (TP unico 100%)"
+            elif exchange_tps:
+                tps_txt = "Bitget (visible)"
+            else:
+                tps_txt = "bot (fallback)"
 
             # --- Alerta de texto a Telegram (TP1 cierra 50%, TP2 el resto) ---
+            if tp_single:
+                tp_l1 = (f"TP1: `{fmt_tp1}` (+{self.cfg['tp1_pct']*100:.0f}% -> "
+                         f"cierra 100% [unico TP])\n")
+                tp_l2 = ""
+            else:
+                tp_l1 = (f"TP1: `{fmt_tp1}` (+{self.cfg['tp1_pct']*100:.0f}% -> "
+                         f"cierra {self.cfg['tp1_close_frac']*100:.0f}%)\n")
+                tp_l2 = (f"TP2: `{fmt_tp2}` (+{self.cfg['tp2_pct']*100:.0f}% -> "
+                         f"cierre total)\n")
             msg = (
                 f"*{symbol} {side.upper()}*\n"
                 f"Entrada: `{fmt_price}`\n"
                 f"SL: `{fmt_sl}` (-{self.cfg['min_sl_dist_pct']*100:.0f}% "
                 f"precio / -{self.cfg['min_sl_dist_pct']*self.cfg['leverage']*100:.0f}% "
                 f"margen {self.cfg['leverage']:.0f}x)\n"
-                f"TP1: `{fmt_tp1}` (+{self.cfg['tp1_pct']*100:.0f}% -> "
-                f"cierra {self.cfg['tp1_close_frac']*100:.0f}%)\n"
-                f"TP2: `{fmt_tp2}` (+{self.cfg['tp2_pct']*100:.0f}% -> "
-                f"cierre total)\n"
+                f"{tp_l1}{tp_l2}"
                 f"TPs: {tps_txt}\n"
                 f"Qty: `{qty}` | Margen: `{actual_margin:.2f}` USDT"
             )
             if vwap_value is not None and math.isfinite(vwap_value):
                 msg += f"\nVWAP: `{vwap_value:.6f}`"
             await self.send_telegram(msg)
+            if exchange_tps:
+                # [H8] confirmacion post-carga: que quedo REALMENTE
+                # visible en Bitget (log + Telegram con trigger/size).
+                await self._reportar_tps_visibles(symbol)
             log.info(f"{symbol} {side.upper()} | Entry={fmt_price} SL={fmt_sl} "
                      f"TP1={fmt_tp1} TP2={fmt_tp2} | "
-                     f"TPs={'exchange' if exchange_tps else 'bot'} | "
+                     f"TPs={'single' if tp_single else ('exchange' if exchange_tps else 'bot')} | "
                      f"Qty={qty} | Margin={actual_margin:.2f}")
 
             # --- Memoria de la entrada + persistencia ---
@@ -1647,6 +1868,7 @@ class CanalBot:
                 "tp1_done": False,     # [TPO-2] TP1 aun no ejecutado
                 "tp2_done": False,     # [TPO-2] TP2 aun no ejecutado
                 "exchange_tps": exchange_tps,   # [TPO-3] TP en Bitget?
+                "tp_single": tp_single,   # [H8] 1 sola TP = 100% en +2%?
                 "quantity": qty,
                 "balance_before": balance,
                 "size_usdt": round(actual_margin, 2),
@@ -1790,16 +2012,36 @@ class CanalBot:
                                 f"*{symbol}* TP2 (cierre total) — profit "
                                 f"{profit_pct*100:+.2f}%")
                     elif accion == "tp1":
-                        # Cierre parcial: reduce-only del 50% de los contracts
-                        if await self._close_partial(
-                                symbol, side, float(pos["contracts"]),
-                                self.cfg["tp1_close_frac"]):
+                        # [FIX-H2] Cierre parcial TP1: _close_partial decide
+                        # el modo real (no siempre es el 50% configurado,
+                        # porque el step del mercado cuantiza la fraccion):
+                        #   "parcial" -> cerro close_qty (< qty)
+                        #   "total"   -> qty indivisible -> cerro TODO
+                        #                (flag TP1-NOSPLIT) y NO queda nada
+                        #                que gestionar: se marca tp2_done y
+                        #                se salta BE/trailing de este ciclo.
+                        modo = await self._close_partial(
+                            symbol, side, float(pos["contracts"]),
+                            self.cfg["tp1_close_frac"])
+                        if modo:
                             te["tp1_done"] = True
                             tp1_done = True
+                            if modo == "total":
+                                te["tp2_done"] = True
+                                await self._save_trade_entries()
+                                log.info(f"{symbol} TP1 "
+                                         f"(+{self.cfg['tp1_pct']*100:.0f}%) "
+                                         f"CIERRE TOTAL (qty no divisible al "
+                                         f"step). profit={profit_pct*100:+.2f}%")
+                                await self.send_telegram(
+                                    f"*{symbol}* TP1 = cierre TOTAL "
+                                    f"(qty no divisible al step) — profit "
+                                    f"{profit_pct*100:+.2f}%")
+                                continue
                             await self._save_trade_entries()
                             log.info(f"{symbol} TP1 (+{self.cfg['tp1_pct']*100:.0f}%)"
                                      f" PARCIAL {self.cfg['tp1_close_frac']*100:.0f}%"
-                                     f" cerrado. profit={profit_pct*100:+.2f}%")
+                                     f" (step) cerrado. profit={profit_pct*100:+.2f}%")
                             await self.send_telegram(
                                 f"*{symbol}* TP1 (cierra "
                                 f"{self.cfg['tp1_close_frac']*100:.0f}%) — "
@@ -2032,27 +2274,51 @@ class CanalBot:
             return False
 
     async def _close_partial(self, symbol: str, side: str, qty: float,
-                             frac: float) -> bool:
+                             frac: float) -> Optional[str]:
         """
-        [8.6d-bis] Cierra UNA FRACCION de la posicion (TP1: 50%) via orden
-        MARKET reduce-only. Documentacion Bitget V2 (Place-Order):
+        [8.6d-bis] Cierra UNA FRACCION de la posicion (TP1) via orden MARKET
+        reduce-only. Documentacion Bitget V2 (Place-Order):
           modo una via  -> side contrario + reduceOnly=yes
                            (tradeSide se ignora)
           modo hedge    -> side contrario + tradeSide=close
                            (reduceOnly solo aplica a modo una via)
-        => se envian AMBOS parametros: cada modo usa el suyo e ignora el
-        otro, cubriendo ambos sin tener que detectar el modo de la cuenta.
-        Devuelve True si Bitget acepto la orden.
+          => se envian AMBOS parametros: cada modo usa su suyo e ignora el
+             otro, cubriendo ambos sin tener que detectar el modo de la cuenta.
+
+        [FIX-H2] Cuantizacion al step con FLOOR (identica a
+        sl_tp.split_tp_qty, con la misma tolerancia fp), para que el cierre
+        bot-side sea EXACTAMENTE el que habria puesto el exchange.
+          ANTES usaba round(): con qty=0.003/step=0.001 cerraba 0.002 (67%)
+          y con steps=0 (qty=step, p.ej. XAUT 0.01) cerraba el 100% de la
+          posicion mientras el log decia "TP1 PARCIAL 50%".
+
+        Devuelve:
+          "parcial" -> se cerro close_qty (< qty), alineado al step por ABAJO.
+          "total"   -> NO existe fraccion valida 0 < close_qty < qty al step
+                       (qty < 2 steps o frac>=1): se cierra TODO y el llamador
+                       lo debe declarar como CIERRE TOTAL en TP1
+                       (flag TP1-NOSPLIT + tp2_done).
+          None      -> la orden fallo (ya flageada en los except).
         """
         try:
             market = await self._exch_call("market", symbol)
             precision = market["precision"]["amount"]
             step = market["limits"]["amount"]["min"] or (10 ** -precision)
-            # al step mas cercano sin exceder la fraccion objetivo
-            steps = int(round((qty * frac) / step))
-            close_qty = max(steps, 1) * step
-            if close_qty >= qty:            # no se puede partir -> total
+            # floor al step (MISMA formula/tolerancia que split_tp_qty)
+            steps = int(math.floor((qty * frac) / step + 1e-9))
+            close_qty = round(steps * step, 12)
+
+            if close_qty < step or close_qty >= qty:
+                # [FIX-H2] qty no admite partida: cierre TOTAL declarado.
+                flag("TP1-NOSPLIT", ORIGEN_CODIGO,
+                     f"{symbol}: qty={qty} frac={frac} step={step} -> sin "
+                     f"fraccion valida (0<{step}<=close<{qty}); TP1 ejecuta "
+                     f"CIERRE TOTAL.", logging.WARNING)
                 close_qty = qty
+                modo = "total"
+            else:
+                modo = "parcial"
+
             close_side = "sell" if side == "long" else "buy"
             params = {
                 "marginCoin": "USDT",
@@ -2061,9 +2327,10 @@ class CanalBot:
             }
             await self._exch_call("create_order", symbol, "market",
                                   close_side, close_qty, None, params)
-            log.info(f"{symbol} cierre parcial: {close_qty} "
-                     f"({frac*100:.0f}% de {qty}) lado={close_side}")
-            return True
+            log.info(f"{symbol} cierre {modo}: {close_qty} "
+                     f"({close_qty / qty * 100:.0f}% de {qty}) "
+                     f"lado={close_side}")
+            return modo
         except RateLimitExceeded:
             flag("429", ORIGEN_BIBLIOTECA,
                  f"_close_partial {symbol}: rate limit.", logging.WARNING)
