@@ -200,6 +200,15 @@ CONFIG = {
     "tp1_close_frac": 0.5,          # en TP1 se cierra el 50% de la posicion
     "tp2_pct": 0.03,                # TP2: +3% de precio -> se cierra el
                                     # RESTO (posicion completa)
+    "tp_mode": "exchange",          # [TPO-3] "exchange": TP1/TP2 se colocan
+                                    # como ordenes profit_plan EN BITGET
+                                    # (visibles en el panel y las ejecuta el
+                                    # exchange). "bot": las ejecuta el bot en
+                                    # manage_positions (TPO-2). Fallback
+                                    # automatico a "bot" si el exchange no
+                                    # acepta los TP (notional < minimo).
+    "tp_reconcile_sec": 600,        # [TPO-3] cada cuantos segundos manage
+                                    # verifica que los TP sigan en Bitget
 
     # -- [3.6c] Gate del Break Even --
     "be_after_tp1": True,           # [BE-TP1] el BE SOLO se evalua DESPUES
@@ -772,7 +781,7 @@ class CanalBot:
         "trade_entries", "trail_counts", "adverse_prices",
         "consecutive_losses", "cooldown_until", "last_scan_time", "rolling_pnl",
         "trades_csv", "trade_entries_path", "TRADE_CSV_HEADERS",
-        "alertas_enviadas",
+        "alertas_enviadas", "_tp_recon_last",
     )
 
     def __init__(self, config: dict = None):
@@ -792,6 +801,7 @@ class CanalBot:
         self.trail_counts: dict = {}       # nº de movimientos de trailing
         self.adverse_prices: dict = {}     # peor precio visto (max adverse)
         self.alertas_enviadas: dict = {}   # [CODIGO-005] dedupe de alertas
+        self._tp_recon_last: dict = {}     # [TPO-3] throttle reconcile TP
 
         # --- Cooldown global por perdidas consecutivas ---
         self.consecutive_losses: int = 0
@@ -1114,6 +1124,363 @@ class CanalBot:
                  f"Actualizando SL {symbol}: {e}", logging.ERROR)
             return False
 
+    # -----------------------------------------------------------------
+    # [8.6b-ter] TP EN EL EXCHANGE [TPO-3]: ordenes profit_plan Bitget
+    #   El TP1/TP2 se colocan como ordenes VISIBLES en el panel de la
+    #   posicion de Bitget y las ejecuta el exchange (no el bot).
+    #   Endpoints verificados V2 classic (ccxt implicit):
+    #     place-tpsl-order (planType=profit_plan, size, triggerPrice)
+    #     orders-plan-pending / orders-plan-history (reconcile)
+    #     cancel-plan-order (limpieza al cerrar)
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _bsymbol(symbol: str) -> str:
+        """[TPO-3] 'BTC/USDT:USDT' -> 'BTCUSDT' (formato API Bitget)."""
+        return symbol.split(":")[0].replace("/", "")
+
+    @staticmethod
+    def _plan_list(body) -> list:
+        """[TPO-3] Normaliza la respuesta de los endpoints de planes
+        (acepta {'data': {'entrustedList': [...]}} o lista directa)."""
+        data = body.get("data", body) if isinstance(body, dict) else body
+        if isinstance(data, dict):
+            lst = data.get("entrustedList", [])
+            return lst if isinstance(lst, list) else []
+        return data if isinstance(data, list) else []
+
+    async def _place_tp_order(self, symbol: str, side: str,
+                              trigger_price: float, qty: float,
+                              tag: str) -> bool:
+        """[TPO-3a] Coloca UNA orden profit_plan (TP) en Bitget. Devuelve
+        True solo si Bitget la acepto. Nunca lanza excepcion."""
+        try:
+            market = await self._exch_call("market", symbol)
+            min_notional = market.get("limits", {}).get("cost", {}).get("min") or 5.0
+            if qty <= 0 or not math.isfinite(qty * trigger_price) \
+                    or qty * trigger_price < min_notional:
+                flag("TP-NOTIONAL-MIN", ORIGEN_BIBLIOTECA,
+                     f"{symbol} {tag}: qty={qty} notional="
+                     f"{qty * trigger_price:.2f} < min {min_notional} USDT; "
+                     f"orden TP omitida.", logging.WARNING)
+                return False
+            fmt_trig = await self._exch_call("price_to_precision", symbol,
+                                             trigger_price)
+            fmt_qty = await self._exch_call("amount_to_precision", symbol, qty)
+            params = {
+                "symbol": self._bsymbol(symbol),
+                "marginCoin": "USDT",
+                "productType": "USDT-FUTURES",
+                "planType": "profit_plan",
+                "triggerPrice": str(fmt_trig),   # executePrice ausente -> mercado
+                "triggerType": "fill_price",
+                "holdSide": "long" if side == "long" else "short",
+                "size": str(fmt_qty),
+                "clientOid": f"{tag}{int(time.time() * 1000)}",
+            }
+            await self._exch_call(
+                "private_mix_post_v2_mix_order_place_tpsl_order", params)
+            log.info(f"{symbol} TP {tag} colocado en Bitget: "
+                     f"trigger={fmt_trig} size={fmt_qty}")
+            return True
+        except RateLimitExceeded:
+            flag("429", ORIGEN_BIBLIOTECA,
+                 f"_place_tp_order {symbol}: rate limit.", logging.WARNING)
+            await asyncio.sleep(5)
+            return False
+        except BadRequest as e:
+            flag("400", ORIGEN_BIBLIOTECA, f"_place_tp_order {symbol}: {e}",
+                 logging.ERROR)
+            return False
+        except (NetworkError, RequestTimeout):
+            flag("NET", ORIGEN_BIBLIOTECA,
+                 f"_place_tp_order {symbol}: error de red.", logging.WARNING)
+            return False
+        except ExchangeError as e:
+            flag("500", ORIGEN_BIBLIOTECA, f"_place_tp_order {symbol}: {e}",
+                 logging.ERROR)
+            return False
+        except Exception as e:
+            flag("TPPLACE-UNEXPECTED", origen_de_excepcion(e),
+                 f"_place_tp_order {symbol}: {e}", logging.ERROR)
+            return False
+
+    async def _cancel_exchange_tps(self, symbol: str) -> bool:
+        """[TPO-3b] Cancela TODAS las ordenes profit_plan del simbolo
+        (idempotente, best-effort: un fallo solo deja flag)."""
+        try:
+            params = {
+                "productType": "USDT-FUTURES",
+                "symbol": self._bsymbol(symbol),
+                "marginCoin": "USDT",
+                "planType": "profit_plan",
+            }
+            await self._exch_call(
+                "private_mix_post_v2_mix_order_cancel_plan_order", params)
+            log.debug(f"{symbol}: profit_plan pendientes cancelados.")
+            return True
+        except RateLimitExceeded:
+            flag("429", ORIGEN_BIBLIOTECA,
+                 f"_cancel_exchange_tps {symbol}: rate limit.", logging.WARNING)
+            await asyncio.sleep(5)
+            return False
+        except BadRequest as e:
+            flag("400", ORIGEN_BIBLIOTECA,
+                 f"_cancel_exchange_tps {symbol}: {e}", logging.WARNING)
+            return False
+        except (NetworkError, RequestTimeout):
+            flag("NET", ORIGEN_BIBLIOTECA,
+                 f"_cancel_exchange_tps {symbol}: error de red.",
+                 logging.WARNING)
+            return False
+        except ExchangeError as e:
+            flag("500", ORIGEN_BIBLIOTECA,
+                 f"_cancel_exchange_tps {symbol}: {e}", logging.WARNING)
+            return False
+        except Exception as e:
+            flag("TPCANCEL-UNEXPECTED", origen_de_excepcion(e),
+                 f"_cancel_exchange_tps {symbol}: {e}", logging.WARNING)
+            return False
+
+    async def _place_exchange_tps(self, symbol: str, side: str, qty: float,
+                                  tp1_price: float, tp2_price: float) -> bool:
+        """[TPO-3c] Coloca TP1+TP2 en Bitget. ALL-OR-NOTHING: si cualquiera
+        falla se cancela todo y devuelve False -> el llamador marca
+        exchange_tps=False y el TP lo ejecuta el bot (sin doble TP)."""
+        try:
+            await self._cancel_exchange_tps(symbol)      # limpia previas
+            market = await self._exch_call("market", symbol)
+            step = (market["limits"]["amount"]["min"]
+                    or 10 ** -market["precision"]["amount"])
+            tp1_qty, tp2_qty = sl_tp.split_tp_qty(
+                qty, self.cfg["tp1_close_frac"], step)
+            if tp1_qty <= 0:
+                flag("TP-SPLIT", ORIGEN_BIBLIOTECA,
+                     f"{symbol}: qty={qty} no divisible para TP1/TP2 "
+                     f"(step={step}) -> fallback bot-side.", logging.WARNING)
+                return False
+            if not await self._place_tp_order(symbol, side, tp1_price,
+                                              tp1_qty, "tp1"):
+                await self._cancel_exchange_tps(symbol)
+                return False
+            if not await self._place_tp_order(symbol, side, tp2_price,
+                                              tp2_qty, "tp2"):
+                await self._cancel_exchange_tps(symbol)
+                return False
+            log.info(f"{symbol} TP1+TP2 cargados en Bitget (visibles): "
+                     f"{tp1_qty}/{tp2_qty}")
+            return True
+        except Exception as e:
+            flag("TPSET-UNEXPECTED", origen_de_excepcion(e),
+                 f"_place_exchange_tps {symbol}: {e}", logging.ERROR)
+            await self._cancel_exchange_tps(symbol)
+            return False
+
+    async def _pending_profit_plans(self, symbol: str) -> Optional[list]:
+        """[TPO-3d] profit_plan PENDIENTES del simbolo.
+        None = error (ya flageado); lista = puede estar vacia."""
+        try:
+            params = {"planType": "profit_loss",
+                      "productType": "USDT-FUTURES",
+                      "symbol": self._bsymbol(symbol), "limit": "50"}
+            body = await self._exch_call(
+                "private_mix_get_v2_mix_order_orders_plan_pending", params)
+            if isinstance(body, dict):
+                code = str(body.get("code", "00000"))
+                if code not in ("00000", "0"):
+                    flag("TPPEND", ORIGEN_BIBLIOTECA,
+                         f"{symbol}: code={code} "
+                         f"{str(body.get('msg'))[:120]}", logging.WARNING)
+                    return None
+            return [o for o in self._plan_list(body)
+                    if o.get("planType") == "profit_plan"]
+        except RateLimitExceeded:
+            flag("429", ORIGEN_BIBLIOTECA,
+                 f"_pending_profit_plans {symbol}: rate limit.",
+                 logging.WARNING)
+            await asyncio.sleep(5)
+            return None
+        except BadRequest as e:
+            flag("400", ORIGEN_BIBLIOTECA,
+                 f"_pending_profit_plans {symbol}: {e}", logging.WARNING)
+            return None
+        except (NetworkError, RequestTimeout):
+            flag("NET", ORIGEN_BIBLIOTECA,
+                 f"_pending_profit_plans {symbol}: error de red.",
+                 logging.WARNING)
+            return None
+        except ExchangeError as e:
+            flag("500", ORIGEN_BIBLIOTECA,
+                 f"_pending_profit_plans {symbol}: {e}", logging.WARNING)
+            return None
+        except Exception as e:
+            flag("TPPEND-UNEXPECTED", origen_de_excepcion(e),
+                 f"_pending_profit_plans {symbol}: {e}", logging.WARNING)
+            return None
+
+    async def _tp1_executed_en_bitget(self, symbol: str,
+                                      tp1_fmt: float) -> bool:
+        """[TPO-3e] ¿Existio una orden profit_plan con ESTE trigger de TP1
+        y fue EJECUTADA? (historia de planes). Cualquier error -> False
+        (no afirma)."""
+        try:
+            params = {"planType": "profit_loss",
+                      "productType": "USDT-FUTURES",
+                      "symbol": self._bsymbol(symbol),
+                      "planStatus": "executed", "limit": "50"}
+            body = await self._exch_call(
+                "private_mix_get_v2_mix_order_orders_plan_history", params)
+            if isinstance(body, dict):
+                code = str(body.get("code", "00000"))
+                if code not in ("00000", "0"):
+                    flag("TPHIST", ORIGEN_BIBLIOTECA,
+                         f"{symbol}: code={code}", logging.WARNING)
+                    return False
+            for o in self._plan_list(body):
+                if o.get("planType") != "profit_plan":
+                    continue
+                try:
+                    trig = float(o.get("triggerPrice", 0))
+                except (TypeError, ValueError):
+                    continue
+                if abs(trig - tp1_fmt) <= max(abs(tp1_fmt) * 1e-4, 1e-9):
+                    return True
+            return False
+        except RateLimitExceeded:
+            flag("429", ORIGEN_BIBLIOTECA,
+                 f"_tp1_executed_en_bitget {symbol}: rate limit.",
+                 logging.WARNING)
+            await asyncio.sleep(5)
+            return False
+        except Exception as e:
+            flag("TPHIST-UNEXPECTED", origen_de_excepcion(e),
+                 f"_tp1_executed_en_bitget {symbol}: {e}", logging.WARNING)
+            return False
+
+    async def _reconcile_exchange_tps(self, symbol: str, side: str,
+                                      te: dict, contracts: float,
+                                      profit_pct: float) -> None:
+        """[TPO-3f] Reconciliacion (throttle tp_reconcile_sec) de que los
+        TP1/TP2 existan en Bitget:
+          * TP1 ausente ya EJECUTADO -> confirma tp1_done (gate BE).
+          * TP1/TP2 ausentes sin ejecutar -> re-colocar; si no es posible
+            -> cancelar todo y exchange_tps=False (fallback bot-side).
+        """
+        now = time.time()
+        if now - self._tp_recon_last.get(symbol, 0.0) < \
+                float(self.cfg.get("tp_reconcile_sec", 600)):
+            return
+        self._tp_recon_last[symbol] = now
+        if not te.get("exchange_tps", False):
+            # modo bot: NO debe haber profit_plan colgando (limpiar restos)
+            restos = await self._pending_profit_plans(symbol)
+            if restos:
+                await self._cancel_exchange_tps(symbol)
+            return
+        plans = await self._pending_profit_plans(symbol)
+        if plans is None:
+            return                              # error ya flageado
+        try:
+            f1 = float(await self._exch_call("price_to_precision", symbol,
+                                             float(te["tp1_price"])))
+            f2 = float(await self._exch_call("price_to_precision", symbol,
+                                             float(te["tp2_price"])))
+        except Exception as e:
+            flag("TPREC-PRICE", origen_de_excepcion(e),
+                 f"{symbol}: precision de trigger TP: {e}", logging.WARNING)
+            return
+
+        def _match(o, f):
+            try:
+                return abs(float(o.get("triggerPrice", 0)) - f) \
+                    <= max(abs(f) * 1e-4, 1e-9)
+            except (TypeError, ValueError):
+                return False
+
+        p1 = any(_match(o, f1) for o in plans)
+        p2 = any(_match(o, f2) for o in plans)
+
+        # --- ¿TP1 ausente porque ya se ejecuto (p.ej. tras restart)? ---
+        if not p1 and not te.get("tp1_done", False):
+            if await self._tp1_executed_en_bitget(symbol, f1):
+                te["tp1_done"] = True
+                await self._save_trade_entries()
+                log.info(f"{symbol} TP1 ejecutado por Bitget "
+                         f"(confirmado en historia).")
+                await self.send_telegram(
+                    f"*{symbol}* TP1 ejecutado (Bitget)")
+                p1 = True
+
+        falta = []
+        if not p1 and not te.get("tp1_done", False):
+            falta.append(("tp1", float(te["tp1_price"])))
+        if not p2:
+            falta.append(("tp2", float(te["tp2_price"])))
+        if not falta:
+            return
+
+        # --- Re-colocar los TP faltantes (all-or-nothing) ---
+        try:
+            market = await self._exch_call("market", symbol)
+            step = (market["limits"]["amount"]["min"]
+                    or 10 ** -market["precision"]["amount"])
+            if te.get("tp1_done", False):
+                # TP1 ya ejecutado: TP2 cierra TODO lo que queda
+                qmap = {"tp1": 0.0, "tp2": round(contracts, 12)}
+            else:
+                t1q, t2q = sl_tp.split_tp_qty(
+                    contracts, self.cfg["tp1_close_frac"], step)
+                qmap = {"tp1": t1q, "tp2": t2q}
+        except Exception as e:
+            flag("TPREC-SPLIT", origen_de_excepcion(e),
+                 f"{symbol}: {e}", logging.WARNING)
+            return
+        for tag, px in falta:
+            if qmap.get(tag, 0) <= 0 or not await self._place_tp_order(
+                    symbol, side, px, qmap[tag], tag):
+                await self._cancel_exchange_tps(symbol)
+                te["exchange_tps"] = False
+                await self._save_trade_entries()
+                flag("TP-FALLBACK", ORIGEN_CODIGO,
+                     f"{symbol}: re-colocacion de {tag} en Bitget fallo -> "
+                     f"TP pasa a bot-side.", logging.WARNING)
+                return
+        nombres = ", ".join(t for t, _ in falta)
+        log.info(f"{symbol} TP reparado en Bitget: {nombres}")
+        await self.send_telegram(
+            f"*{symbol}* TP en Bitget reparado ({nombres})")
+
+    def _reconstruir_te(self, symbol: str, pos: dict, balance: float) -> dict:
+        """[TPO-3g] Reconstruye trade_entries perdido (Render: disco
+        efimero). Deriva TODO de datos del exchange + CONFIG (nunca
+        inventa valores ajenos); entry_time = ahora (limitacion: fills
+        anteriores al restart pueden quedar fuera del CSV)."""
+        entry = float(pos["entryPrice"])
+        side = pos.get("side", "long")
+        signo = 1.0 if side == "long" else -1.0
+        f1, f2 = self.cfg["tp1_pct"], self.cfg["tp2_pct"]
+        minsl = self.cfg["min_sl_dist_pct"]
+        te = {
+            "entry_time": datetime.now().isoformat(),
+            "symbol": symbol,
+            "side": side,
+            "entry_price": entry,
+            # aproximacion al preset SL original (solo para CSV/BE)
+            "sl_price": entry * (1 - signo * minsl),
+            "tp1_price": entry * (1 + signo * f1),
+            "tp2_price": entry * (1 + signo * f2),
+            "tp1_done": False,
+            "tp2_done": False,
+            "quantity": float(pos.get("contracts", 0)),
+            "balance_before": float(balance or 0.0),
+            "size_usdt": 0.0,
+            "risk_pct": 0.0,
+            "exchange_tps": True,   # optimista: lo refina el reconcile
+        }
+        flag("TE-REBUILD", ORIGEN_CODIGO,
+             f"{symbol}: trade_entries reconstruido tras restart "
+             f"(entry_time=ahora; reconcile refina TP).", logging.WARNING)
+        return te
+
     async def open_position(self, symbol: str, side: str, sl_price: float,
                             tp_price: float, tp2_price: float = None,
                             balance: float = None,
@@ -1125,9 +1492,10 @@ class CanalBot:
           2) Recalcula SL/TP1/TP2 con el precio REAL de entrada.
           3) Sizing: margen = balance * risk_pct, notional = margen * leverage.
           4) Respeta precision/step y notional minimo de Bitget (~5 USDT).
-          5) Orden market con presetStopLossPrice. [TPO-2] el TP NO se
-             envia al exchange: los TPs son TP1/TP2, ejecutados por
-             manage_positions (sl_tp.tp_accion) con cierres parciales.
+          5) Orden market con presetStopLossPrice. [TPO-3] TP1/TP2 se
+             colocan como ordenes profit_plan EN BITGET (visibles y las
+             ejecuta el exchange); si el exchange no los acepta, fallback
+             a ejecucion bot-side (manage_positions, TPO-2).
           6) Alerta Telegram + persistencia en trade_entries.json.
         """
         if symbol in self.session_active:
@@ -1232,6 +1600,19 @@ class CanalBot:
                                   qty, None, params)
             fmt_price = await self._exch_call("price_to_precision", symbol, price)
 
+            # --- [TPO-3] TP1/TP2 como ordenes profit_plan EN BITGET ---
+            #     (visibles en el panel de la posicion; las ejecuta el
+            #      exchange). All-or-nothing: si falla -> fallback bot.)
+            exchange_tps = False
+            if self.cfg.get("tp_mode") == "exchange":
+                exchange_tps = await self._place_exchange_tps(
+                    symbol, side, qty, tp1_price, tp2_price)
+                if not exchange_tps:
+                    flag("TP-BOTFALLBACK", ORIGEN_CODIGO,
+                         f"{symbol}: TP1/TP2 no se colocaron en Bitget -> "
+                         f"ejecucion TP bot-side.", logging.WARNING)
+            tps_txt = "Bitget (visible)" if exchange_tps else "bot (fallback)"
+
             # --- Alerta de texto a Telegram (TP1 cierra 50%, TP2 el resto) ---
             msg = (
                 f"*{symbol} {side.upper()}*\n"
@@ -1243,14 +1624,16 @@ class CanalBot:
                 f"cierra {self.cfg['tp1_close_frac']*100:.0f}%)\n"
                 f"TP2: `{fmt_tp2}` (+{self.cfg['tp2_pct']*100:.0f}% -> "
                 f"cierre total)\n"
+                f"TPs: {tps_txt}\n"
                 f"Qty: `{qty}` | Margen: `{actual_margin:.2f}` USDT"
             )
             if vwap_value is not None and math.isfinite(vwap_value):
                 msg += f"\nVWAP: `{vwap_value:.6f}`"
             await self.send_telegram(msg)
             log.info(f"{symbol} {side.upper()} | Entry={fmt_price} SL={fmt_sl} "
-                     f"TP1={fmt_tp1} TP2={fmt_tp2} | Qty={qty} | "
-                     f"Margin={actual_margin:.2f}")
+                     f"TP1={fmt_tp1} TP2={fmt_tp2} | "
+                     f"TPs={'exchange' if exchange_tps else 'bot'} | "
+                     f"Qty={qty} | Margin={actual_margin:.2f}")
 
             # --- Memoria de la entrada + persistencia ---
             self.trade_entries[symbol] = {
@@ -1263,6 +1646,7 @@ class CanalBot:
                 "tp2_price": tp2_price,
                 "tp1_done": False,     # [TPO-2] TP1 aun no ejecutado
                 "tp2_done": False,     # [TPO-2] TP2 aun no ejecutado
+                "exchange_tps": exchange_tps,   # [TPO-3] TP en Bitget?
                 "quantity": qty,
                 "balance_before": balance,
                 "size_usdt": round(actual_margin, 2),
@@ -1303,7 +1687,9 @@ class CanalBot:
         [8.6c] Gestion ciclica de posiciones abiertas:
           1) Detecta posiciones cerradas por el exchange (TP/SL/manual).
           2) Tracking de precios pico (trailing) y adverso (reportes).
-          2.5) TP1/TP2: +2% -> cierra 50%; +3% -> cierra TODO.
+          2.5) TP1/TP2 [TPO-3]: en modo exchange los ejecuta Bitget
+             (profit_plan) y aqui solo se reconcilian/detecta el fill
+             del TP1; fallback bot-side: +2% -> 50%, +3% -> TODO.
           3) BREAK EVEN: SOLO tras TP1 (be_after_tp1) y si profit >= trigger.
           4) TRAILING STOP (apagado con trailing_enabled=False; logica
              intacta en sl_tp.py [3]).
@@ -1342,29 +1728,54 @@ class CanalBot:
 
                 # =====================================================
                 # 2.5) TP1 / TP2 — DOS TP porcentuales sobre la entrada
-                #   [TPO-2] sustituyen al TP estructural del exchange.
-                #     TP1: profit >= tp1_pct  -> cierre parcial de
-                #          tp1_close_frac (50%) de la posicion
-                #     TP2: profit >= tp2_pct  -> cierre TOTAL (el resto);
-                #          tambien si el precio SALTO a TP2 sin pasar por
-                #          TP1 (gap entre ticks).
-                #   Estados tp1_done/tp2_done en trade_entries (persistido:
-                #   sobrevive reinicios; al cerrarse la posicion se borra).
-                #   (decision PURA -> sl_tp.tp_accion; aqui SOLO ejecucion:
-                #    ordenes, estado, logs, Telegram)
+                #   [TPO-3] tp_mode="exchange" (default): los TP son
+                #   ordenes profit_plan EN BITGET (visibles y las ejecuta
+                #   el exchange). El bot solo:
+                #     (a) detecta el fill del TP1 (posicion encogida 25%+)
+                #         -> tp1_done para el gate del BE,
+                #     (b) reconcilia (tp_reconcile_sec) que las ordenes
+                #         sigan ahi; si faltan las re-coloca; si no puede
+                #         -> exchange_tps=False y el TP lo ejecuta el BOT
+                #         (fallback TPO-2 con sl_tp.tp_accion; NUNCA ambos).
+                #   te["exchange_tps"]=False (p.ej. notional < minimo):
+                #   ejecucion bot-side completa (TPO-2): TP1 -> cierre
+                #   parcial 50%; TP2 -> cierre TOTAL (o gap a TP2).
+                #   Estados tp1_done/tp2_done en trade_entries (persistido).
                 # =====================================================
                 tp1_done = False
                 te = self.trade_entries.get(symbol)
                 if te is None:
-                    log.warning(f"{symbol}: sin trade_entries para TP1/TP2; "
-                                f"TPs omitidos en este ciclo.")
-                elif te.get("tp2_done", False):
+                    # [TPO-3] disco efimero de Render: reconstruir desde
+                    # el exchange + CONFIG (flag TE-REBUILD).
+                    te = self._reconstruir_te(symbol, pos, balance)
+                    self.trade_entries[symbol] = te
+                    await self._save_trade_entries()
+                if te.get("tp2_done", False):
                     # TP2 ya ejecutado (cierre en vuelo): NO seguir con
                     # tracking/BE/trailing de una posicion que se esta
                     # cerrando (evita ordenes de SL inutiles).
                     continue
+
+                # (a) TP1 del exchange ya ejecuto? (encogido 25%+)
+                if not te.get("tp1_done", False):
+                    qty_orig = float(te.get("quantity") or 0)
+                    if qty_orig > 0 and float(pos["contracts"]) < qty_orig * 0.75:
+                        te["tp1_done"] = True
+                        await self._save_trade_entries()
+                        log.info(f"{symbol} TP1 ejecutado por Bitget "
+                                 f"(50% cerrado).")
+                        await self.send_telegram(
+                            f"*{symbol}* TP1 ejecutado (Bitget)")
+                tp1_done = bool(te.get("tp1_done", False))
+
+                if self.cfg.get("tp_mode") == "exchange" and \
+                        te.get("exchange_tps", False):
+                    # (b) el exchange ejecuta: solo reconciliar ordenes
+                    await self._reconcile_exchange_tps(
+                        symbol, side, te, float(pos["contracts"]),
+                        profit_pct)
                 else:
-                    tp1_done = bool(te.get("tp1_done", False))
+                    # --- FALLBACK bot-side [TPO-2] (sin TP en exchange) ---
                     accion = sl_tp.tp_accion(profit_pct, tp1_done, self.cfg)
                     if accion == "tp2":
                         # Cierre TOTAL de la posicion (close_position ->
@@ -1597,6 +2008,7 @@ class CanalBot:
         """[8.6d] Cierra la posicion completa (TP2, manual/kill-switch)."""
         try:
             await self._exch_call("close_position", symbol)
+            await self._cancel_exchange_tps(symbol)   # [TPO-3] sin TP colgando
             log.info(f"{symbol} cerrada (cierre total).")
             return True
         except RateLimitExceeded:
@@ -1682,6 +2094,7 @@ class CanalBot:
         """
         try:
             await asyncio.sleep(2)  # espera a que Bitget consolide el fill
+            await self._cancel_exchange_tps(sym)  # [TPO-3] limpiar TP residuales
             trades = await self._exch_call("fetch_my_trades", sym, limit=20)
             if not trades:
                 return
@@ -1760,6 +2173,7 @@ class CanalBot:
         self.alerts_history.pop(f"{sym}_trail_peak", None)
         self.trail_counts.pop(sym, None)
         self.session_active.discard(sym)
+        self._tp_recon_last.pop(sym, None)   # [TPO-3]
 
     # -----------------------------------------------------------------
     # [8.7] COOLDOWN POR PERDIDAS CONSECUTIVAS (riesgo global)
