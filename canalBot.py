@@ -1607,7 +1607,28 @@ class CanalBot:
             if qmap.get(tag, 0) <= 0 or not await self._place_tp_order(
                     symbol, side, px, qmap[tag], tag):
                 await self._cancel_exchange_tps(symbol)
+                # [H8] 2 TP imposibles -> intentar 1 TP = 100% @ tp1
+                # (mismo fallback de open_position; caso comun tras
+                # restart cuando el TP2 no cabe en notional minimo).
+                # No aplica si tp1 ya ejecuto (el trigger de tp1 ya fue
+                # cruzado -> cerraria al instante en vez de esperar tp2).
+                if self.cfg.get("tp_single_fallback", True) and \
+                        not te.get("tp1_done", False) and \
+                        await self._place_single_tp(
+                            symbol, side, contracts,
+                            float(te["tp1_price"])):
+                    te["exchange_tps"] = True
+                    te["tp_single"] = True
+                    await self._save_trade_entries()
+                    flag("TP-SINGLE-FALLBACK", ORIGEN_CODIGO,
+                         f"{symbol}: {tag} no re-colocable -> TP unico "
+                         f"100% en Bitget (+{self.cfg['tp1_pct']*100:.0f}%).",
+                         logging.WARNING)
+                    await self.send_telegram(
+                        f"*{symbol}* TP unico 100% cargado en Bitget")
+                    return
                 te["exchange_tps"] = False
+                te["tp_single"] = False
                 await self._save_trade_entries()
                 flag("TP-FALLBACK", ORIGEN_CODIGO,
                      f"{symbol}: re-colocacion de {tag} en Bitget fallo -> "
