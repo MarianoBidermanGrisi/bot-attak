@@ -17,9 +17,10 @@
       >>> REGLA ESTRICTA: la logica de trading de botbb_engine
           (detect_signal / _scan_side_arrays / _check_divergence) NO se
           aplica en este bot. Solo se conservan sus matematicas.
-   4) ESTRATEGIA ACTIVA = SignalVWAP (TradingView Pine v5 traducido):
-      EMAs 9/14/50/100 + VWAP anclado + estructura de pivotes +
-      Canal de Regresion Logaritmica + senales LONG/SHORT.
+    4) ESTRATEGIA ACTIVA = SignalVWAP (TradingView Pine v5 traducido):
+       EMAs 20/50/100/200 (parametros REALES del bot en CONFIG [3.1];
+       el Pine original usa 9/14/50/100) + VWAP anclado + estructura de
+       pivotes + Canal de Regresion Logaritmica + senales LONG/SHORT.
    5) Las senales se VISUALIZAN en imagenes de Telegram estilo TradingView
       (velas + canal relleno + triangulos LONG/SHORT + VWAP + eje derecho).
 
@@ -29,7 +30,9 @@
    [2]  SISTEMA DE FLAGS Y WARNINGS (origen: CODIGO | BIBLIOTECA | DATOS)
    [3]  CONFIGURACION MANUAL DE PARAMETROS (EMA, TP, BE, trailing, margen...)
    [4]  LOGGING (sustituye print() - obligatorio en Render)
-   [5]  BLACKLIST de activos NO-crypto en Bitget
+    [5]  BLACKLIST de activos NO-crypto en Bitget (defensa en profundidad)
+         [5.1] es_cripto(): FILTRO POSITIVO - solo criptomonedas operables
+               (isRwa de Bitget descarta acciones/indices/ETF/forex)
    [6]  VARIABLES DE ENTORNO (Bitget / Telegram / Render)
    [7]  CALCULOS MATEMATICOS PRESERVADOS de botbb_engine  [NO APLICADOS]
    [8]  MOTOR BITGET/TELEGRAM/RENDER extraido de botbb_engine
@@ -137,10 +140,12 @@ def _showwarning_adaptado(message, category, filename, lineno, file=None, line=N
 # =============================================================================
 CONFIG = {
     # -- [3.1] SENAL: EMAs del indicador SignalVWAP (TradingView) --
-    "ema_fast": 20,                  # EMA 1  (cruza contra la de 100)
-    "ema_mid": 50,                  # EMA 2  (filtro: debe ser > (long) o < (short) que la de 50)
-    "ema_slow": 100,                 # EMA 3  (referencia media)
-    "ema_cross": 200,               # EMA 4  (cruce rapida vs lenta)
+    "ema_fast": 20,                  # EMA 1: la RAPIDA; cruza contra la EMA 200
+    "ema_mid": 50,                   # EMA 2: filtro de alineacion; en LONG debe
+                                     #        ser > EMA100, en SHORT < EMA100
+    "ema_slow": 100,                 # EMA 3: lenta del filtro de alineacion
+                                     #        (compara contra la EMA50)
+    "ema_cross": 200,                # EMA 4: la LENTA del cruce (vs EMA20)
 
     # -- [3.2] VWAP anclado (Anchor Period del indicador) --
     "vwap_anchor": "Session",       # Session|Week|Month|Quarter|Year|Decade|Century
@@ -382,6 +387,83 @@ NON_CRYPTO_BASES: set = {
     # --- Commodities ---
     "COPPER", "NATGAS",
 }
+
+
+# =============================================================================
+# [5.1] FILTRO POSITIVO DE CRIPTOMONEDAS - REGLA PRINCIPAL de mercado
+#      (verificacion en vivo contra Bitget, 2026-10, 827 perps USDT)
+# =============================================================================
+# Bitget etiqueta CADA producto con info["isRwa"] en load_markets():
+#   "NO"  -> cripto pura.  BTC, ETH, DOGE, DIA (oraculo), CVX (Convex),
+#            SPX (memecoin SPX6900 a 0.36, NO el indice S&P500), F, C, O...
+#   "YES" -> activo del mundo real tokenizado -> NO operable aqui:
+#            ACCIONES  TSLA, AAPL, NVDA, MSFT, COIN, MSTR...
+#            INDICES   SP500 (7816), NDX100 (30761), JP225 (68349), HSI
+#            ETF       QQQ (748), SPY, IWM, IBIT, SOXL...
+#            FOREX     EURUSD (1.117), USDJPY, GBPUSD, USDBRL
+#            COMMOD.   XAU, XAG, XPT, XPD, COPPER, NATGAS
+#            RWA TOKENS PAXG (Pax Gold), XAUT (Tether Gold) -> excluidos
+#                      tambien: el usuario opera SOLO CRIPTO PURO.
+# (Los precios citados son los observados al auditar: los NO son tokens
+#  de centavos/miles; los YES cotizan como el activo subyacente real.)
+#
+# NON_CRYPTO_BASES [5] queda como FALLBACK: solo interviene cuando el mercado
+# NO trae isRwa (dato ausente). Motivo del cambio de orden de prioridad
+# (auditoria 2026-10 sobre los 827 perps USDT de Bitget):
+#   * la blacklist solo cubria 108 de los 361 activos NO-crypto reales
+#     (se escapaban 253: EURUSD, HSI, IBIT, SPY, NDX100, JP225...),
+#   * y ademas excluia 17 CRIPTOS reales por colision de ticker
+#     (APR, ARX, BB, BEAT, BILL, BREV, BSB, C, CHIP, CVX, DASH, F, O, S,
+#      SPX=SPX6900, T, W).  -> isRwa manda; la blacklist solo de apoyo.
+# EXCEPCIONES a isRwa=YES. VACIA por decision del usuario (2026-10-12):
+# "solo cripto puro debe operarse" -> tambien se excluyen los tokens RWA
+# on-chain con respaldo en oro (PAXG = Pax Gold, XAUT = Tether Gold), que
+# Bitget clasifica como RWA. Deja aqui cualquier ticker si cambiaste de idea:
+#   CRIPTO_RWA_PERMITIDAS = {"PAXG", "XAUT"}
+CRIPTO_RWA_PERMITIDAS: set = set()
+
+
+def es_cripto(symbol: str, exchange=None) -> tuple:
+    """[5.1a] ¿Es este simbolo una CRIPTOMONEDA operable? -> (ok, motivo).
+
+    Orden de decision (la clasificacion de Bitget manda; fail-closed):
+      1) Debe ser perp lineal USDT (/USDT:USDT) -> formato del bot.
+      2) info.isRwa == "YES" -> NO (accion/indice/ETF/forex/commodity),
+         salvo que este en CRIPTO_RWA_PERMITIDAS (set VACIO por defecto:
+         solo cripto puro, sin PAXG/XAUT ni ningun RWA tokenizado).
+      3) info.isRwa == "NO"  -> SI (cripto), aunque la ticker colisione
+         con una accion de la blacklist (DASH, CVX, SPX...).
+      4) Sin isRwa (o exchange=None) -> fallback a NON_CRYPTO_BASES; si
+         tampoco esta ahi, se permite y el llamador emite CRYPTO-NOCLASS.
+    `exchange` = cliente ccxt (sync o async) con markets ya cargados.
+    """
+    # 1) Solo perps lineales USDT (formato unico que opera el bot)
+    if not isinstance(symbol, str) or not symbol.endswith("/USDT:USDT"):
+        return False, "no-perp-usdt"
+
+    base = symbol.split("/")[0]
+
+    # 2/3) Clasificacion oficial de Bitget: info["isRwa"]
+    info = None
+    markets = getattr(exchange, "markets", None) if exchange is not None else None
+    if markets:
+        mkt = markets.get(symbol)
+        if isinstance(mkt, dict):
+            info = mkt.get("info")
+
+    if isinstance(info, dict):
+        is_rwa = str(info.get("isRwa", "")).strip().upper()
+        if is_rwa == "YES":
+            if base in CRIPTO_RWA_PERMITIDAS:
+                return True, "rwa-permitida"   # token on-chain permitido
+            return False, "isRwa=YES"          # accion/indice/ETF/forex/commodity
+        if is_rwa == "NO":
+            return True, "isRwa=NO"            # cripto
+
+    # 4) Sin dato clasificatorio -> solo la blacklist de apoyo decide
+    if base in NON_CRYPTO_BASES:
+        return False, "blacklist"
+    return True, "sin-clasificacion"
 
 
 # =============================================================================
@@ -939,18 +1021,42 @@ class CanalBot:
     async def get_top_symbols(self, n: int = 100) -> list:
         """
         [8.3b] TOP N permutativos USDT:USDT por volumen de las ultimas 24h,
-        excluyendo la BLACKLIST de activos no-crypto (seccion [5]).
+        SOLO CRIPTOMONEDAS (filtro [5.1] es_cripto: manda info.isRwa de
+        Bitget; la blacklist NON_CRYPTO_BASES solo actua como FALLBACK
+        cuando el mercado no trae isRwa). Acciones, indices, ETF, forex
+        y commodities quedan fuera del universo de escaneo y de trading.
         """
         try:
             tickers = await self._exch_call("fetch_tickers")
-            ranked = [
-                (s, float(t.get("quoteVolume", 0)))
-                for s, t in tickers.items()
-                if s.endswith("/USDT:USDT") and s.split("/")[0] not in NON_CRYPTO_BASES
-            ]
+            candidatos = [(s, float(t.get("quoteVolume", 0) or 0))
+                          for s, t in tickers.items()
+                          if isinstance(s, str) and s.endswith("/USDT:USDT")]
+
+            ranked, excl_rwa, excl_otro, sin_clase = [], 0, 0, 0
+            for sym, vol in candidatos:
+                ok, motivo = es_cripto(sym, self.exchange)
+                if not ok:
+                    if motivo == "isRwa=YES":
+                        excl_rwa += 1          # accion/indice/ETF/forex/commodity
+                    else:
+                        excl_otro += 1         # blacklist / no-perp-usdt
+                    continue
+                if motivo == "sin-clasificacion":
+                    sin_clase += 1             # mercado sin isRwa -> solo blacklist
+                ranked.append((sym, vol))
+
             ranked.sort(key=lambda x: x[1], reverse=True)
-            log.info(f"TOP symbols: {len(ranked)} cryptos tras blacklist "
-                     f"({len(NON_CRYPTO_BASES)} excluidos)")
+            if sin_clase:
+                # No es un error: avisa de que ese mercado no traia isRwa y
+                # por eso solo lo freno la blacklist (riesgo residual).
+                flag("CRYPTO-NOCLASS", ORIGEN_DATOS,
+                     f"{sin_clase} perps sin isRwa en markets: validados solo "
+                     f"contra la blacklist ({len(NON_CRYPTO_BASES)} tickers).",
+                     logging.WARNING)
+            log.info(f"TOP symbols: {len(ranked)} CRIPTO perps tras filtro "
+                     f"| excluidos {excl_rwa} no-crypto (isRwa=YES) + "
+                     f"{excl_otro} blacklist/no-perp | universo Bitget="
+                     f"{len(candidatos)}")
             return [s for s, _ in ranked[:n]]
         except RateLimitExceeded:
             flag("429", ORIGEN_BIBLIOTECA, "get_top_symbols: rate limit.", logging.WARNING)
@@ -1702,6 +1808,21 @@ class CanalBot:
                  f"{symbol}: en cooldown de 1h tras su cierre. Orden omitida.",
                  logging.WARNING)
             return False
+
+        # [5.1] ULTIMA LINEA DE DEFENSA DE MERCADO: aunque el simbolo llegue
+        # aqui por otra via (backtest, llamada manual, bug en el escaneo),
+        # NUNCA se envia una orden que no sea CRIPTOMONEDAS (isRwa=YES =
+        # accion/indice/ETF/forex/commodity -> bloqueada).
+        ok_mercado, motivo_mercado = es_cripto(symbol, self.exchange)
+        if not ok_mercado:
+            flag("RISK-NO-CRIPTO", ORIGEN_CODIGO,
+                 f"{symbol}: orden RECHAZADA ({motivo_mercado}) - solo se "
+                 f"operan criptomonedas.", logging.ERROR)
+            return False
+        if motivo_mercado == "sin-clasificacion":
+            flag("CRYPTO-NOCLASS", ORIGEN_DATOS,
+                 f"{symbol}: mercado sin isRwa; validado solo contra la "
+                 f"blacklist antes de operar.", logging.WARNING)
 
         if balance is None:
             balance = await self.get_balance()
@@ -2644,14 +2765,15 @@ class CanalBot:
 
 # =============================================================================
 # [9] ESTRATEGIA ACTIVA - SignalVWAP (traduccion Python del Pine v5 adjunto)
-#      indicator SignalVWAP Clean: EMAs 9/14/50/100 + VWAP anclado +
+#      indicator SignalVWAP Clean: EMAs 20/50/100/200 (ver CONFIG [3.1];
+#      el Pine original declara 9/14/50/100) + VWAP anclado +
 #      estructura de pivotes (BOS/CHOCH) + Canal de Regresion Logaritmica.
 # =============================================================================
 class SignalVWAP:
     """
     [9.0] Motor puro de la senal (sin acceso a red: solo pandas/numpy).
       Metodos:
-        [9.1] _emas()          -> EMAs 9/14/50/100 (ta.ema de TradingView)
+        [9.1] _emas()          -> EMAs 20/50/100/200 (ta.ema de TradingView)
         [9.2] _vwap()          -> VWAP con ancla configurable (Session/Week/...)
         [9.3] _estructura()    -> pivotes de leg + cruces de estructura
         [9.4] _canal()         -> regresion logaritmica + bandas +-N desv
@@ -2662,7 +2784,8 @@ class SignalVWAP:
         self.cfg = cfg
 
     # -----------------------------------------------------------------
-    # [9.1] EMAS del indicador: shortest=9, short=14, longer=50, longest=100
+    # [9.1] EMAS del indicador: fast=20, mid=50, slow=100, cross=200
+    #       (parametros REALES de CONFIG [3.1]; Pine original: 9/14/50/100)
     # -----------------------------------------------------------------
     def _emas(self, close: pd.Series) -> dict:
         """[9.1] Cuatro EMAs con inicializacion SMA (identica a ta.ema)."""
@@ -3073,10 +3196,10 @@ class SignalVWAP:
         """
         [9.5] Pipeline completo por simbolo:
           0) validacion de datos (longitud, NaN, precios)  -> flags DATOS
-          1) EMAs 9/14/50/100
+          1) EMAs 20/50/100/200 (CONFIG [3.1])
           2) VWAP anclado
-          3) Senales: long  = cruza EMA9>EMA100 AND EMA14>EMA50 AND close>VWAP
-                      short = cruza EMA9<EMA100 AND EMA14<EMA50 AND close<VWAP
+          3) Senales: long  = cruza EMA20>EMA200 AND EMA50>EMA100 AND close>VWAP
+                      short = cruza EMA20<EMA200 AND EMA50<EMA100 AND close<VWAP
           4) estructura de pivotes -> inicio del canal
           5) canal de regresion logaritmica
         Retorna dict con arrays o None si los datos no sirven.
@@ -3110,7 +3233,7 @@ class SignalVWAP:
             emas = self._emas(close)
             vwap = self._vwap(df)
 
-            # --- Cruces EMA9 vs EMA100 (crossover/crossunder de Pine) ---
+            # --- Cruces EMA20 vs EMA200 (crossover/crossunder de Pine) ---
             f, x = emas["fast"].values, emas["cross"].values
             mid, slow = emas["mid"].values, emas["slow"].values
             n = len(df)
@@ -4019,12 +4142,24 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
                         tf_ms: int, balance: float, trading: bool):
     """
     [11.3] Descarga OHLCV del TOP y evalua SignalVWAP simbolo a simbolo.
+      0) [5.1] Filtra el universo a SOLO CRIPTOMONEDAS antes de descargar
+         velas: ni llamadas API, ni graficos ni alertas para acciones/
+         indices/ETF/forex/commodities.
       Por cada senal en la ULTIMA vela (CODIGO-004):
         1) Genera el grafico estilo TradingView ([10A]).
         2) Envia la imagen a Telegram (siempre).
         3) Si trading_habilitado: abre la posicion con SL/TP ([8.6b]).
       Deduplica alertas repetidas de la misma vela (CODIGO-005).
     """
+    # --- [5.1] Universo EXCLUSIVAMENTE cripto (defensa en profundidad) ---
+    top_cripto = [s for s in top if es_cripto(s, bot.exchange)[0]]
+    if len(top_cripto) != len(top):
+        log.info(f"[5.1] Escaneo: {len(top) - len(top_cripto)} simbolos "
+                 f"no-crypto excluidos del universo.")
+    top = top_cripto
+    if not top:
+        return
+
     try:
         ohlcv_data = await bot.fetch_ohlcv_batch(
             top, bot.cfg["timeframe"], bot.cfg["ohlcv_limit"])
@@ -4069,7 +4204,7 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
                 continue
 
             # --- [FIX-2] Senal en la ULTIMA vela CERRADA (n-2) ---
-            # Antes se evaluaba n-1 (vela aun viva): el cruce EMA9/EMA100
+            # Antes se evaluaba n-1 (vela aun viva): el cruce EMA20/EMA200
             # podia aparecer y desaparecer DENTRO de la misma vela (repaint)
             # y la orden salia por mecha, no por confirmacion. Ahora la
             # senal solo vale si la vela ya cerro y esta "fresca" (menos de
