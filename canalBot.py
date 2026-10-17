@@ -244,6 +244,22 @@ CONFIG = {
     "be_trigger_pct": 0.0132,       # Activa BE cuando el precio esta +1.32% a favor
     "be_offset_pct": 0.002,         # Mueve el SL a +0.2% de la entrada (long) / -0.2% (short)
 
+    # -- [3.7b] BE DE RESCATE (Deep Adverse) - feature independiente del BE [3.7] --
+    # Logica (ver manage_positions [8.6c] y sl_tp.py [2b]):
+    #   * FASE 1: la posicion toca deep_adverse_pct de PERDIDA de precio
+    #     (-2.8% precio = -28% PnL con leverage 10x) -> flag permanente
+    #     "deep_adverse" persistido en trade_entries.json + alerta Telegram.
+    #     El SL de -5% y los TPs NO se tocan: la proteccion sigue intacta.
+    #   * FASE 2: con el flag activo, si el precio se recupera hasta
+    #     deep_be_close_pct (-0.2% o mejor) -> cierre TOTAL por mercado.
+    #     Nunca se mueve ninguna orden de SL (evita ventanas sin proteccion).
+    #   * EXCLUSIVIDAD con el BE [3.7]: si hubo TP1 (+2%) el precio jamas
+    #     llego a -2.8%; si hubo deep adverse, el cierre a -0.2% ocurre
+    #     ANTES de +2% y el TP1 no se ejecuta en ese camino.
+    "deep_be_enabled": True,        # maestro de la feature (False = desactiva)
+    "deep_adverse_pct": -0.028,     # FASE 1: umbral de bandera (precio, -2.8%)
+    "deep_be_close_pct": -0.002,    # FASE 2: nivel de cierre (precio, -0.2%)
+
     # -- [3.8] Trailing Stop --
     "trailing_dist_pct": 0.0035,    # Distancia REAL del SL al pico (0.35%)
                                     # [FIX-4] antes era config muerto: ahora
@@ -1817,6 +1833,12 @@ class CanalBot:
             # [H8] None = desconocido tras rebuild; el reconcile lo DEDUCE
             # del tamano del plan pendiente (size == contracts -> unico).
             "tp_single": None,
+            # [8.6c-DR] BE de rescate: el flag NO viaja en el exchange, vive
+            # en este JSON. Si se perdio (Render: disco efimero) y el precio
+            # sigue en el umbral, la FASE 1 lo re-activa sola en el 1er tick;
+            # la limitacion es solo si el precio rescato mientras el bot
+            # estaba caido (ya no hay como saberlo: no hay historial).
+            "deep_adverse": False,
         }
         flag("TE-REBUILD", ORIGEN_CODIGO,
              f"{symbol}: trade_entries reconstruido tras restart "
@@ -2054,6 +2076,7 @@ class CanalBot:
                 "tp2_done": False,     # [TPO-2] TP2 aun no ejecutado
                 "exchange_tps": exchange_tps,   # [TPO-3] TP en Bitget?
                 "tp_single": tp_single,   # [H8] 1 sola TP = 100% en +2%?
+                "deep_adverse": False,  # [8.6c-DR] flag del BE de rescate
                 "quantity": qty,
                 "balance_before": balance,
                 "size_usdt": round(actual_margin, 2),
@@ -2097,6 +2120,9 @@ class CanalBot:
           2.5) TP1/TP2 [TPO-3]: en modo exchange los ejecuta Bitget
              (profit_plan) y aqui solo se reconcilian/detecta el fill
              del TP1; fallback bot-side: +2% -> 50%, +3% -> TODO.
+          2.6) BE DE RESCATE (Deep Adverse) [8.6c-DR]: FASE 1 bandera al
+             -2.8% de precio (persistida) / FASE 2 cierre TOTAL por
+             mercado al -0.2% o mejor. No mueve SL; logica en sl_tp [2b].
           3) BREAK EVEN: SOLO tras TP1 (be_after_tp1) y si profit >= trigger.
           4) TRAILING STOP (apagado con trailing_enabled=False; logica
              intacta en sl_tp.py [3]).
@@ -2252,6 +2278,54 @@ class CanalBot:
                     self.peak_prices[symbol] = max(self.peak_prices[symbol], mark)
                 else:
                     self.peak_prices[symbol] = min(self.peak_prices[symbol], mark)
+
+                # =====================================================
+                # 2.6) BE DE RESCATE (Deep Adverse) - DOS fases [8.6c-DR]
+                #   Logica PURA en sl_tp.py [2b]; aqui SOLO se ejecuta
+                #   (flag persistido + cierre). NO toca el BE normal [3]
+                #   ni mueve ninguna orden de SL.
+                #   FASE 1: profit <= deep_adverse_pct (-2.8% precio =
+                #     -28% PnL @10x) -> flag PERMANENTE en trade_entries
+                #     (JSON) + alerta TG. El SL de -5% y los TPs siguen
+                #     intactos: la proteccion de la caida NO se toca.
+                #   FASE 2: flag activo Y profit >= deep_be_close_pct
+                #     (-0.2% precio) -> cierre TOTAL por mercado via
+                #     close_position() (ya cancela TPs, cooldown, CSV, TG).
+                #   Si el precio nunca vuelve -> el SL de -5% cierra, como
+                #   siempre. Nunca hay ventana sin SL (no se mueve orden).
+                # =====================================================
+                if self.cfg.get("deep_be_enabled", True):
+                    if not te.get("deep_adverse", False):
+                        # --- FASE 1: bandera de adversidad profunda ---
+                        if sl_tp.deep_adverse_activado(profit_pct, self.cfg):
+                            te["deep_adverse"] = True   # permanente (JSON)
+                            await self._save_trade_entries()
+                            log.warning(
+                                f"{symbol} DEEP ADVERSE: {profit_pct*100:+.2f}% "
+                                f"(umbral {self.cfg['deep_adverse_pct']*100:.1f}%). "
+                                f"Si vuelve a {self.cfg['deep_be_close_pct']*100:.1f}% "
+                                f"se cierra en BE de rescate. SL -5% intacto.")
+                            await self.send_telegram(
+                                f"*{symbol}* DEEP ADVERSE {profit_pct*100:+.2f}% "
+                                f"(umbral {self.cfg['deep_adverse_pct']*100:.1f}%) — "
+                                f"si vuelve a "
+                                f"{self.cfg['deep_be_close_pct']*100:.1f}% cierro "
+                                f"en BE de rescate")
+                    elif sl_tp.deep_be_debe_cerrar(profit_pct, self.cfg):
+                        # --- FASE 2: rescate completado -> cierre TOTAL ---
+                        if await self.close_position(symbol):
+                            te["close_reason"] = "deep_be"   # motivo explicito
+                            te["tp2_done"] = True   # ya no gestiones mas
+                            await self._save_trade_entries()
+                            log.info(
+                                f"{symbol} BE DE RESCATE: precio "
+                                f"{profit_pct*100:+.2f}% >= "
+                                f"{self.cfg['deep_be_close_pct']*100:.1f}% -> "
+                                f"CIERRE TOTAL 100%.")
+                            await self.send_telegram(
+                                f"*{symbol}* BE DE RESCATE: cierre total "
+                                f"({profit_pct*100:+.2f}%)")
+                            continue   # posicion fuera: no evaluar BE/trailing
 
                 # =====================================================
                 # 3) BREAK EVEN (BE) - se evalua UNA sola vez por posicion
@@ -2587,8 +2661,15 @@ class CanalBot:
                     trade_fees += abs(float(t["fee"].get("cost", 0)))
 
             net = trade_pnl - trade_fees
-            status = "TP" if trade_pnl > 0 else ("SL" if trade_pnl < 0 else "BE")
-            reason = "tp" if trade_pnl > 0 else ("sl" if trade_pnl < 0 else "be")
+            # Motivo del cierre: si el llamador dejo uno EXPLICITO (p.ej.
+            # "deep_be" del BE de rescate en te["close_reason"]) manda sobre
+            # el signo del PnL: un rescate cierra con PnL algo negativo pero
+            # NO es un SL ni un TP -> asi el Telegram y el CSV no lo
+            # etiquetan como "SL".
+            reason = entry.get("close_reason") or (
+                "tp" if trade_pnl > 0 else ("sl" if trade_pnl < 0 else "be"))
+            status = {"tp": "TP", "sl": "SL", "be": "BE",
+                      "deep_be": "DEEP-BE"}.get(reason, str(reason).upper())
 
             # [3.9c] Si fue PERDIDA neta, bloquear SOLO este simbolo 24h.
             # (Se llama DESPUES de que manage_positions puso la pausa base
