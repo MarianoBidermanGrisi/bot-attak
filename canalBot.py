@@ -176,6 +176,18 @@ CONFIG = {
                                     # de la estrategia sigue en "timeframe" (5m)
     "macd_filter_limit": 300,       # velas 15m descargadas SOLO si hay senal 5m
 
+    # -- [3.5c] Indicador Choppiness Index (CHOP) --
+    # (traduccion del Pine v5 oficial; banda visual + FILTRO DE ENTRADA)
+    "chop_enabled": True,           # mostrar panel CHOP en el grafico Telegram
+    "chop_length": 14,              # ventana del indicador (input.int(14) Pine)
+    "chop_upper": 61.8,             # banda superior: CI > 61.8 = mercado LATERAL
+    "chop_lower": 38.2,             # banda inferior: CI < 38.2 = TENDENCIA fuerte
+    "chop_offset": 0,               # desplazamiento visual (offset Pine, 0=ninguno)
+    # -- [3.5d] Filtro de entrada CHOP (condicion OBLIGATORIA de senal) --
+    "chop_filter_enabled": True,    # LONG y SHORT exigen CHOP <= chop_entry_max
+    "chop_entry_max": 38.2,         # umbral de entrada: mercado en TENDENCIA
+                                    # (NaN del warmup = False = sin senal)
+
     # -- [3.6] Riesgo / Gestion (configurable a mano) --
     "trading_habilitado": True,     # *** MAESTRO: True=ORDENES REALES en Bitget
                                     #             False=solo alertas+graficos ***
@@ -1111,6 +1123,30 @@ class CanalBot:
             "enableRateLimit": True,
             "options": {"defaultType": "swap"},
         })
+        # [FIX-DNS] El conector por defecto de aiohttp (y por tanto de
+        # ccxt.async_support) usa el resolver del sistema con aiodns si
+        # esta instalado; en Windows ese resolver falla con
+        # "Cannot contact DNS servers" aunque el cliente SINCrono
+        # (requests/getaddrinfo) funciona. Forzamos ThreadedResolver
+        # (getaddrinfo en threadpool = mismo camino que ya funciona).
+        # En Linux/Render tambien es correcto: es el resolver por defecto
+        # de aiohttp cuando aiodns no esta presente.
+        try:
+            exch.tcp_connector = aiohttp.TCPConnector(
+                resolver=aiohttp.ThreadedResolver(),
+                enable_cleanup_closed=True,
+            )
+            # Pre-creamos la sesion para que open() de ccxt la REUTILICE
+            # (solo la crea si self.session is None) y cierre() la libere.
+            exch.session = aiohttp.ClientSession(
+                connector=exch.tcp_connector)
+        except Exception as e:
+            # Si el fallback falla, dejamos el conector original de ccxt:
+            # peor caso = el bug de DNS de antes, nunca un crash del batch.
+            flag("DNS-FALLBACK", origen_de_excepcion(e),
+                 f"No se pudo instalar ThreadedResolver en el cliente "
+                 f"async: {type(e).__name__}: {e}. Se usa el conector "
+                 f"por defecto de ccxt.", logging.WARNING)
         try:
             tasks = [self._fetch_single(exch, s, timeframe, limit) for s in symbols]
             results = await asyncio.gather(*tasks)
@@ -3190,6 +3226,73 @@ class SignalVWAP:
         return {"upper": upper, "lower": lower, "slope": pendientes, "seg": seg}
 
     # -----------------------------------------------------------------
+    # [9.6] CHOPPINESS INDEX (CHOP) - indicador de lateralidad vs tendencia
+    #       Traduccion directa del Pine v5 oficial de TradingView:
+    #         ci = 100 * log10( sum(ATR(1), length) / (highest(length) -
+    #              lowest(length)) ) / log10(length)
+    #       Donde ATR(1) = True Range sin suavizar (Wilder):
+    #         TR = max(high-low, |high-close_prev|, |low-close_prev|)
+    #       Interpretacion:
+    #         * CHOP > 61.8  -> mercado LATERAL (fase de rango/consolidacion)
+    #         * CHOP < 38.2  -> mercado en TENDENCIA fuerte (movimiento direccional)
+    #         * banda 38.2-61.8 -> zona mixta
+    #       Rango teorico [0, 100]. Cuanto mas alto, mas "choppy" (sin direccion).
+    # -----------------------------------------------------------------
+    def _choppiness(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        [9.6] Calcula el Choppiness Index para cada barra del DataFrame.
+
+        Requiere al menos `chop_length` + 1 barras para tener TR definido
+        desde la segunda barra. Devuelve un array float64 con NaN donde no
+        hay datos suficientes o el denominador es 0 (precio plano).
+        """
+        length = int(self.cfg.get("chop_length", 14))
+        if length < 1:
+            length = 14
+
+        n = len(df)
+        out = np.full(n, np.nan, dtype=np.float64)
+        if n < length + 1:
+            return out
+
+        high = df["high"].values.astype(np.float64)
+        low = df["low"].values.astype(np.float64)
+        close = df["close"].values.astype(np.float64)
+
+        # --- True Range (ATR(1) = TR sin suavizar) ---
+        prev_close = np.empty(n, dtype=np.float64)
+        prev_close[0] = close[0]           # primera barra: sin previo, TR = high-low
+        prev_close[1:] = close[:-1]
+        tr = np.maximum(high - low,
+                        np.maximum(np.abs(high - prev_close),
+                                   np.abs(low - prev_close)))
+
+        # --- Suma de TR en la ventana deslizante de `length` barras ---
+        tr_sum = np.full(n, np.nan, dtype=np.float64)
+        for i in range(length, n):
+            tr_sum[i] = tr[i - length + 1: i + 1].sum()
+
+        # --- Highest high y lowest low en la misma ventana ---
+        hh = np.full(n, np.nan, dtype=np.float64)   # highest(length)
+        ll = np.full(n, np.nan, dtype=np.float64)   # lowest(length)
+        for i in range(length - 1, n):
+            hh[i] = high[i - length + 1: i + 1].max()
+            ll[i] = low[i - length + 1: i + 1].min()
+
+        # --- Numerador / denominador del logaritmo ---
+        # denominador = rango total del precio en la ventana (highest-lowest)
+        rng = hh - ll
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = tr_sum / rng
+            ci = 100.0 * np.log10(ratio) / np.log10(float(length))
+
+        # Protecciones: rng=0 (precio exactamente plano), ratio<=0, NaN/Inf
+        bad = ~np.isfinite(ci) | (rng <= 0) | (tr_sum <= 0)
+        ci[bad] = np.nan
+        out[length:] = ci[length:]          # warm-up: primeras `length` barras NaN
+        return out
+
+    # -----------------------------------------------------------------
     # [9.5] EVALUAR - orquestador: valida datos y junta todas las series
     # -----------------------------------------------------------------
     def evaluar(self, df: pd.DataFrame, symbol: str = "?") -> Optional[dict]:
@@ -3199,7 +3302,9 @@ class SignalVWAP:
           1) EMAs 20/50/100/200 (CONFIG [3.1])
           2) VWAP anclado
           3) Senales: long  = cruza EMA20>EMA200 AND EMA50>EMA100 AND close>VWAP
+                              AND CHOP <= chop_entry_max (filtro de tendencia)
                       short = cruza EMA20<EMA200 AND EMA50<EMA100 AND close<VWAP
+                              AND CHOP <= chop_entry_max
           4) estructura de pivotes -> inicio del canal
           5) canal de regresion logaritmica
         Retorna dict con arrays o None si los datos no sirven.
@@ -3248,9 +3353,23 @@ class SignalVWAP:
                         cruza_down[i] = True   # ta.crossunder
 
             c = close.values
+
+            # --- [3.5d] Choppiness Index: calculado ANTES de las mascaras porque
+            # es condicion OBLIGATORIA de entrada (long y short exigen
+            # CHOP <= chop_entry_max). NaN (warmup de `chop_length`) -> False
+            # -> sin senal hasta que el indicador este maduro. ---
+            chop = self._choppiness(df)
+
             with np.errstate(invalid="ignore"):
-                long_mask = (cruza_up & (mid > slow) & (c > vwap))
-                short_mask = (cruza_down & (mid < slow) & (c < vwap))
+                # [3.5d] Filtro CHOP de entrada: solo mercado en tendencia.
+                if self.cfg.get("chop_filter_enabled", True):
+                    chop_ok = chop <= float(self.cfg.get("chop_entry_max",
+                                                          38.2))
+                else:
+                    # Filtro desactivado por env/override -> no altera masks.
+                    chop_ok = np.ones(n, dtype=bool)
+                long_mask = (cruza_up & (mid > slow) & (c > vwap) & chop_ok)
+                short_mask = (cruza_down & (mid < slow) & (c < vwap) & chop_ok)
             long_mask = np.nan_to_num(long_mask.astype(np.float64),
                                       nan=0.0).astype(bool)
             short_mask = np.nan_to_num(short_mask.astype(np.float64),
@@ -3271,6 +3390,7 @@ class SignalVWAP:
                 "short_idx": np.flatnonzero(short_mask).tolist(),
                 "estructura": estructura,
                 "canal": canal,
+                "chop": chop,   # [3.5c] serie Choppiness Index (array float64)
             }
         except Exception as e:
             flag("CODIGO-006", origen_de_excepcion(e),
@@ -3345,7 +3465,17 @@ class GraficoSignalVWAP:
             l = df["low"].values[s:n]
             c = df["close"].values[s:n]
 
-            fig, ax = plt.subplots(figsize=(12, 6), facecolor=cls.COL_BG)
+            # --- [3.5c] Figura con 2 paneles si hay CHOP; si no, 1 panel ---
+            mostrar_chop = (bool(cfg.get("chop_enabled", True))
+                            and res.get("chop") is not None)
+            if mostrar_chop:
+                fig, (ax, ax2) = plt.subplots(
+                    2, 1, figsize=(12, 8), facecolor=cls.COL_BG,
+                    gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+                fig.subplots_adjust(hspace=0.06)
+            else:
+                fig, ax = plt.subplots(figsize=(12, 6), facecolor=cls.COL_BG)
+                ax2 = None
             ax.set_facecolor(cls.COL_BG)
 
             # --- Rejilla y ejes (estilo TV: eje de precios a la DERECHA) ---
@@ -3557,13 +3687,16 @@ class GraficoSignalVWAP:
                     transform=ax.transAxes, color=cls.COL_AXIS,
                     fontsize=8, va="top", zorder=8)
 
-            # --- Eje X: horas visibles ---
+            # --- Eje X: horas visibles (solo en el panel INFERIOR) ---
             step = max(1, vent // 7)
             ticks = list(range(0, vent, step))
             fechas = pd.to_datetime(df["timestamp"].values[s:n], unit="ms", utc=True)
             etiquetas = [fechas[i].strftime("%H:%M") for i in ticks]
-            ax.set_xticks(ticks)
-            ax.set_xticklabels(etiquetas)
+            ax_eje_x = ax2 if ax2 is not None else ax   # panel inferior
+            ax_eje_x.set_xticks(ticks)
+            ax_eje_x.set_xticklabels(etiquetas)
+            if ax2 is not None:
+                ax.set_xticklabels([])   # sin etiquetas X en el panel de precio
             ax.set_xlim(-1, vent)
 
             # --- Eje Y a la derecha (como TradingView) ---
@@ -3581,6 +3714,67 @@ class GraficoSignalVWAP:
             pad_y = (ymax - ymin) * 0.07
             if pad_y > 0:
                 ax.set_ylim(ymin - pad_y, ymax + pad_y)
+
+            # --- [3.5c] PANEL INFERIOR: CHOPPINESS INDEX estilo TradingView ---
+            #   Linea azul #2962FF + bandas 61.8/38.2 (dashed) + 50 (tenue)
+            #   + fill translucido rgb(33,150,243,90) = alpha 0.10
+            #   + etiqueta "CHOP X.XX" arriba-izquierda + eje Y derecho.
+            if mostrar_chop:
+                chop_full = res.get("chop")
+                chop_w = chop_full[s:n] if chop_full is not None else None
+                upper_b = float(cfg.get("chop_upper", 61.8))
+                lower_b = float(cfg.get("chop_lower", 38.2))
+
+                ax2.set_facecolor(cls.COL_BG)
+                ax2.grid(True, color=cls.COL_GRID, linewidth=0.6, alpha=0.8)
+                ax2.set_axisbelow(True)
+                for sp in ax2.spines.values():
+                    sp.set_color(cls.COL_GRID)
+                ax2.tick_params(colors=cls.COL_AXIS, labelsize=8)
+
+                if chop_w is not None:
+                    okc = np.isfinite(chop_w)
+                    # Relleno translucido entre bandas (Pine: alpha=90/100=0.10)
+                    if np.any(okc):
+                        ax2.fill_between(x, lower_b, upper_b,
+                                         color="#2196F3", alpha=0.10, zorder=1)
+                    # Bandas de referencia
+                    ax2.axhline(upper_b, color=cls.COL_AXIS, linestyle="--",
+                                linewidth=0.8, zorder=2)
+                    ax2.axhline(50.0, color=cls.COL_AXIS, linestyle="-",
+                                linewidth=0.5, alpha=0.5, zorder=2)
+                    ax2.axhline(lower_b, color=cls.COL_AXIS, linestyle="--",
+                                linewidth=0.8, zorder=2)
+                    # Linea del indicador
+                    if np.any(okc):
+                        ax2.plot(x[okc], chop_w[okc], color=cls.COL_VWAP,
+                                 linewidth=1.3, zorder=3)
+                    # Etiqueta del valor actual (estilo TV: "CHOP 43.98")
+                    if len(okc) and okc[-1]:
+                        val_actual = float(chop_w[-1])
+                        ax2.text(0.01, 0.95, "CHOP ",
+                                 transform=ax2.transAxes, color=cls.COL_TEXT,
+                                 fontsize=9, fontweight="bold", va="top",
+                                 zorder=4)
+                        ax2.text(0.055, 0.95, f"{val_actual:.2f}",
+                                 transform=ax2.transAxes, color=cls.COL_VWAP,
+                                 fontsize=9, fontweight="bold", va="top",
+                                 zorder=4)
+
+                    # Eje Y derecho (como TradingView)
+                    ax2.yaxis.tick_right()
+                    ax2.yaxis.set_label_position("right")
+                    # Rango Y que incluye bandas + datos con padding
+                    finitos = chop_w[np.isfinite(chop_w)]
+                    if len(finitos):
+                        ymin_c = min(float(finitos.min()), lower_b)
+                        ymax_c = max(float(finitos.max()), upper_b)
+                        pad_c = (ymax_c - ymin_c) * 0.1 or 5.0
+                        ax2.set_ylim(ymin_c - pad_c, ymax_c + pad_c)
+                    else:
+                        ax2.set_ylim(0, 100)
+                else:
+                    ax2.set_ylim(0, 100)
 
             fig.tight_layout()
             buf = BytesIO()
@@ -4258,6 +4452,11 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
             vwap_last = float(res["vwap"][ultima])
             canal_up = res["canal"]["upper"][ultima]
             canal_lo = res["canal"]["lower"][ultima]
+            # [3.5d] Valor del CHOP en la vela de senal (ya paso el filtro
+            # <= chop_entry_max; se muestra para trazabilidad en Telegram).
+            chop_last = float(res["chop"][ultima])
+            chop_txt = (f"{chop_last:.2f}" if np.isfinite(chop_last)
+                        else "n/a")
 
             # --- 1) Grafico estilo TradingView -> Telegram ---
             buf = await asyncio.to_thread(
@@ -4267,6 +4466,8 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
                 f"*{symbol.split(':')[0]}* senal *{lado.upper()}* "
                 f"(TF {bot.cfg['timeframe']})\n"
                 f"Close: `{close_last:.6g}` | VWAP: `{vwap_last:.6g}`\n"
+                f"CHOP: `{chop_txt}` (filtro <= "
+                f"{bot.cfg.get('chop_entry_max', 38.2)})\n"
                 f"Canal: sup `{canal_up:.6g}` / inf `{canal_lo:.6g}`\n"
                 f"Ancla VWAP: {bot.cfg['vwap_anchor']}")
             if buf:
@@ -4284,7 +4485,7 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
                      logging.WARNING)
 
             log.info(f"SENAL {lado.upper()} {symbol} | close={close_last:.6g} "
-                     f"| vwap={vwap_last:.6g}")
+                     f"| vwap={vwap_last:.6g} | chop={chop_txt}")
 
             # --- 2) Trading real (solo si trading_habilitado=True) ---
             if trading:
