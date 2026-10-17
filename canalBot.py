@@ -263,6 +263,13 @@ CONFIG = {
     "cooldown_rolling_window": 6,   # Ventana de ultimos N trades para cooldown rolling
     "cooldown_loss_threshold": -0.30,  # Si PnL rolling < umbral, pausar
 
+    # -- [3.9b] Cooldown POR SIMBOLO tras cualquier cierre --
+    "cooldown_symbol_hours": 1.0,       # Pausa del simbolo tras un cierre (TP/BE)
+    "cooldown_loss_symbol_hours": 24.0, # [3.9c] Pausa del simbolo si el cierre
+                                        # fue en PERDIDA neta (PnL - fees < 0).
+                                        # Solo ESE simbolo queda bloqueado;
+                                        # el resto del TOP sigue escaneandose.
+
     # -- [3.10] Grafico enviado a Telegram --
     "chart_candles": 120,           # Velas visibles en la imagen
     "chart_dpi": 100,               # Resolucion del PNG
@@ -2105,8 +2112,13 @@ class CanalBot:
             # 1) Detectar posiciones que desaparecieron (ya cerradas)
             for sym in list(self.session_active):
                 if sym not in active_symbols:
-                    self.cooldowns[sym] = time.time() + 3600  # pausa 1h
-                    log.info(f"{sym} CERRADA. Cooldown 1h activado.")
+                    # [3.9b] Pausa base por cierre; si fue PERDIDA,
+                    # _process_closed_position la extiende a 24h.
+                    horas_base = float(self.cfg.get("cooldown_symbol_hours",
+                                                    1.0))
+                    self.cooldowns[sym] = time.time() + horas_base * 3600
+                    log.info(f"{sym} CERRADA. Cooldown {horas_base:.1f}h "
+                             f"activado (se extiende si hay perdida).")
                     await self._process_closed_position(sym)
                     self._cleanup_symbol(sym)
 
@@ -2578,6 +2590,11 @@ class CanalBot:
             status = "TP" if trade_pnl > 0 else ("SL" if trade_pnl < 0 else "BE")
             reason = "tp" if trade_pnl > 0 else ("sl" if trade_pnl < 0 else "be")
 
+            # [3.9c] Si fue PERDIDA neta, bloquear SOLO este simbolo 24h.
+            # (Se llama DESPUES de que manage_positions puso la pausa base
+            # de 1h; aqui se extiende si net < 0. TP/BE no toca nada.)
+            self._cooldown_por_perdida(sym, net)
+
             await self.send_telegram(
                 f"*{sym} CERRADA*\nPnL: {net:.2f} USDT ({status})\n"
                 f"Fees: -{trade_fees:.2f}")
@@ -2784,7 +2801,8 @@ class CanalBot:
 
     def en_cooldown_simbolo(self, symbol: str) -> bool:
         """
-        [8.9d] [FIX-3] ¿Esta el simbolo en su pausa de 1h tras cerrar?
+        [8.9d] [FIX-3] ¿Esta el simbolo en su pausa tras cerrar?
+          (1h tras TP/BE, 24h tras PERDIDA — ver [3.9b]/[3.9c]).
           Antes self.cooldowns se ESCRIBIA en manage_positions() pero nunca
           se leia: el cooldown por simbolo era codigo muerto y se podia
           re-entrar en el mismo minuto que salio (revenge trading).
@@ -2797,6 +2815,30 @@ class CanalBot:
             self.cooldowns.pop(symbol, None)   # pausa vencida -> limpiar
             return False
         return True
+
+    def _cooldown_por_perdida(self, symbol: str, net_pnl: float):
+        """
+        [3.9c] Tras un cierre, si el resultado neto fue PERDIDA
+        (net_pnl < 0: PnL de Bitget menos fees), extiende el cooldown de
+        SOLO ese simbolo a cooldown_loss_symbol_hours (24h por defecto).
+
+        Razon: un SL alcanzado indica que el mercado invalido la tesis de
+        entrada; re-entrar rapido en el mismo simbolo es revenge-trading.
+        El cooldown NUNCA se acorta: si ya existe una pausa mas larga
+        (p.ej. 24h de una perdida previa), se conserva.
+        Solo net < 0 activa la extension; TP y BE (net >= 0) mantienen la
+        pausa base de cooldown_symbol_hours (1h).
+        """
+        if net_pnl >= 0:
+            return   # TP/BE: no hay razon para bloquear 24h
+        horas = float(self.cfg.get("cooldown_loss_symbol_hours", 24.0))
+        hasta = time.time() + horas * 3600
+        actual = self.cooldowns.get(symbol, 0.0)
+        if hasta > actual:
+            self.cooldowns[symbol] = hasta
+            log.info(f"{symbol} COOLDOWN-LOSS: perdida neta "
+                     f"{net_pnl:.2f} USDT -> bloqueado {horas:.1f}h "
+                     f"(solo este simbolo).")
 
 
 # =============================================================================
