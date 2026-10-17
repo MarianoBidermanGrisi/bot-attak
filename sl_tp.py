@@ -15,6 +15,8 @@ SECCIONES (logica PURA: solo numeros, sin I/O):
                                        TP1/TP2 para colocar las ordenes
                                        profit_plan EN Bitget [TPO-3]
   [2] BREAK EVEN - be_debe_evaluar() / be_objetivo() / be_mejora()
+  [2b] BE DE RESCATE (Deep Adverse) - deep_adverse_activado() /
+                    deep_be_debe_cerrar() : las DOS fases del BE de rescate
   [3] TRAILING   - trail_activacion() / trail_objetivo() / trail_debe_mover()
                    (logica CONSERVADA; se activa con trailing_enabled=True)
 
@@ -325,6 +327,53 @@ def be_mejora(side: str, new_sl: float, sl_actual: float) -> bool:
     else:
         mejora = new_sl < sl_actual
     return mejora
+
+
+# =============================================================================
+# [2b] BE DE RESCATE (Deep Adverse) - logica PURA de las DOS fases
+# =============================================================================
+# Por que existe este BE separado del BE normal [2]:
+#   El BE [2] solo protege el 50% restante y SOLO tras el TP1 (+2%). Una
+#   posicion que cayo hasta -2.8% de precio (-28% PnL a 10x) jamas llegara
+#   al TP1 antes de ser rescatada, y hasta ahora solo esperaba el SL de -5%
+#   (-50% del margen). El BE de rescate cubre esa zona muerta SIN mover
+#   ninguna orden de SL: el SL de -5% sigue protegiendo mientras la
+#   posicion este en negativo; el cierre lo ejecuta el CALLER por mercado
+#   cuando el precio demuestra rescate.
+# NO modifica el BE normal [2], los TP [1b] ni el SL de entrada [1].
+# =============================================================================
+def deep_adverse_activado(profit_pct: float, cfg: dict) -> bool:
+    """[2b.1] FASE 1: ¿La posicion toco el umbral de adversidad profunda?
+
+      profit_pct = (mark - entry)/entry en LONG  (PERDIDA -> negativo)
+      profit_pct = (entry - mark)/entry en SHORT (PERDIDA -> negativo)
+      Umbral: cfg["deep_adverse_pct"] (-0.028 = -2.8% precio = -28% PnL
+      con leverage 10x). Se cumple -> el llamador marca el flag PERMANENTE
+      deep_adverse (persistido en trade_entries.json) + alerta Telegram.
+
+      profit_pct no finito (NaN/Inf) -> False: nunca se banderea con datos
+      rotos (mismo criterio que tp_accion con NaN).
+    """
+    if not math.isfinite(profit_pct):
+        return False
+    return profit_pct <= float(cfg["deep_adverse_pct"])
+
+
+def deep_be_debe_cerrar(profit_pct: float, cfg: dict) -> bool:
+    """[2b.2] FASE 2: ¿El precio se recupero hasta el nivel de cierre?
+
+      Solo se invoca SI el flag deep_adverse ya esta activo (el llamador
+      lo comprueba): profit_pct >= cfg["deep_be_close_pct"] (-0.002 =
+      -0.2% de precio) -> cierre TOTAL por orden de mercado.
+
+      Si el precio nunca vuelve, esta funcion nunca devuelve True y la
+      posicion la cierra el SL original de -5% del exchange.
+
+      profit_pct no finito -> False (nunca cierra con datos rotos).
+    """
+    if not math.isfinite(profit_pct):
+        return False
+    return profit_pct >= float(cfg["deep_be_close_pct"])
 
 
 # =============================================================================
