@@ -4,6 +4,7 @@
 ==============================================================================
  canalBot - BOT MONOLITICO (archivo unico) Bitget + Telegram + Render
 ==============================================================================
+ 
  Fichero: canalBot.py
  Proposito:
    1) Extrae TODO lo relacionado con Bitget/Render/Telegram del bot original
