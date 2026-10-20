@@ -21,6 +21,13 @@
        EMAs 20/50/100/200 (parametros REALES del bot en CONFIG [3.1];
        el Pine original usa 9/14/50/100) + VWAP anclado + estructura de
        pivotes + Canal de Regresion Logaritmica + senales LONG/SHORT.
+       FILTROS DE ENTRADA adicionales (todos obligatorios):
+         - MACD Signal Line en 15m (color verde/rojo)  [CONFIG 3.5b]
+         - Choppiness Index <= 38.2 (solo tendencia)   [CONFIG 3.5d]
+         - ATR(1h) <= 2.5% (volatilidad compatible con el SL fijo 5%)
+                                                          [CONFIG 3.5e]
+         - Volumen 24h >= 15M USDT (liquidez minima del perp)
+                                                          [CONFIG 3.5f]
    5) Las senales se VISUALIZAN en imagenes de Telegram estilo TradingView
       (velas + canal relleno + triangulos LONG/SHORT + VWAP + eje derecho).
 
@@ -187,6 +194,36 @@ CONFIG = {
     "chop_filter_enabled": True,    # LONG y SHORT exigen CHOP <= chop_entry_max
     "chop_entry_max": 38.2,         # umbral de entrada: mercado en TENDENCIA
                                     # (NaN del warmup = False = sin senal)
+
+    # -- [3.5e] Filtro de VOLATILIDAD ATR (protege el SL fijo 5%) --
+    # MOTIVO: el SL es SIEMPRE -5% de precio (CONFIG [3.6], min=max=0.05).
+    # Si el ATR del TF superior indica que una vela "normal" mueve el
+    # precio 2.5% o mas, esa vela puede barrer el SL sin que la tesis de
+    # entrada este invalidada. Este filtro NO modifica el SL: solo impide
+    # ENTRAR en regimes de volatilidad incompatible con el. Logica:
+    #   ATR%(filtro_atr_tf) <= filtro_atr_max_pct
+    #   con filtro_atr_max_pct = 5% / k  (k=2 de seguridad -> 2.5%).
+    # Patron identico al filtro MACD 15m [3.5b]: TF secundario descargado
+    # SOLO cuando ya hay senal candidata en "timeframe" (5m).
+    "filtro_atr_enabled": True,     # maestro: False = filtro desactivado
+    "filtro_atr_tf": "1h",          # TF donde se mide la volatilidad
+                                    # (1h: el SL de 5% equivale a ~5 velas;
+                                    #  wick tipico 1h no lo barre)
+    "filtro_atr_length": 14,        # ventana Wilder del ATR (estandar)
+    "filtro_atr_max_pct": 0.025,    # umbral 2.5% del precio (5% / k=2)
+                                    # (ver [11.3c-1] para la matematica)
+
+    # -- [3.5f] Filtro de LIQUIDEZ (volumen 24h minimo en USDT) --
+    # MOTIVO: el TOP 100 por volumen incluye perps con solo 1-5M USDT/dia
+    # en la cola (ranks 40-100): libros delgados, spreads anchos y wicks
+    # falsos que pueden disparar el SL sin precio real. Este filtro exige
+    # un volumen 24h MINIMO para que el perp entre en el universo.
+    # Dato medido (Bitget 2026-10): >=15M deja ~19 perps del TOP 100
+    # (incluye majors incluso en dias flojos); >=50M dejaria solo 6.
+    # EDITAR AQUI para cambiar el umbral:
+    #   15_000_000 = 15M USDT (recomendado)
+    #   0 o None  = SIN filtro (comportamiento antiguo: solo el rank TOP N)
+    "min_quote_volume_24h": 15_000_000,   # umbral en USDT (volumen 24h)
 
     # -- [3.6] Riesgo / Gestion (configurable a mano) --
     "trading_habilitado": True,     # *** MAESTRO: True=ORDENES REALES en Bitget
@@ -907,7 +944,7 @@ class CanalBot:
         "trade_entries", "trail_counts", "adverse_prices",
         "consecutive_losses", "cooldown_until", "last_scan_time", "rolling_pnl",
         "trades_csv", "trade_entries_path", "TRADE_CSV_HEADERS",
-        "alertas_enviadas", "_tp_recon_last",
+        "alertas_enviadas", "_tp_recon_last", "top_volumes", "atr_values",
     )
 
     def __init__(self, config: dict = None):
@@ -928,6 +965,15 @@ class CanalBot:
         self.adverse_prices: dict = {}     # peor precio visto (max adverse)
         self.alertas_enviadas: dict = {}   # [CODIGO-005] dedupe de alertas
         self._tp_recon_last: dict = {}     # [TPO-3] throttle reconcile TP
+        self.top_volumes: dict = {}        # [3.5f] {simbolo: vol 24h USDT}
+                                           # del ultimo get_top_symbols:
+                                           # se muestra en el caption de
+                                           # Telegram (trazabilidad)
+        self.atr_values: dict = {}         # [3.5e/11.3c] {simbolo: ATR%
+                                           # del TF alt} calculado por
+                                           # _atr_filtro_ok: se muestra en
+                                           # el mensaje de APERTURA de
+                                           # Telegram (trazabilidad)
 
         # --- Cooldown global por perdidas consecutivas ---
         self.consecutive_losses: int = 0
@@ -1060,6 +1106,12 @@ class CanalBot:
         Bitget; la blacklist NON_CRYPTO_BASES solo actua como FALLBACK
         cuando el mercado no trae isRwa). Acciones, indices, ETF, forex
         y commodities quedan fuera del universo de escaneo y de trading.
+
+        [3.5f] Ademas exige un volumen 24h MINIMO (min_quote_volume_24h,
+        15M USDT por defecto) para descartar la cola iliquida del TOP N.
+        El mapa {simbolo: volumen} del resultado se guarda en
+        self.top_volumes para mostrar el volumen en el alerta de Telegram
+        ([11.3] caption) y poder auditar cada senal.
         """
         try:
             tickers = await self._exch_call("fetch_tickers")
@@ -1081,6 +1133,26 @@ class CanalBot:
                 ranked.append((sym, vol))
 
             ranked.sort(key=lambda x: x[1], reverse=True)
+
+            # --- [3.5f] Filtro de LIQUIDEZ: volumen 24h minimo (USDT) ---
+            # ranked ya esta ordenado de mayor a menor volumen. Un perp por
+            # debajo del umbral (cola iliquida del TOP N) se excluye del
+            # universo de escaneo y de trading. 0/None = sin filtro.
+            min_vol = float(self.cfg.get("min_quote_volume_24h") or 0)
+            self.top_volumes = {}              # reconstruir en cada escaneo
+            if min_vol > 0:
+                excl_bajo_vol = sum(1 for _, v in ranked if v < min_vol)
+                ranked = [(s, v) for s, v in ranked if v >= min_vol]
+                if excl_bajo_vol:
+                    flag("VOL-FILTRO", ORIGEN_DATOS,
+                         f"[3.5f] {excl_bajo_vol} perps excluidos por volumen "
+                         f"24h < {min_vol / 1e6:.0f}M USDT (quedan "
+                         f"{len(ranked)} con liquidez suficiente).",
+                         logging.INFO)
+
+            # Mapa symbol->volumen del TOP final (para caption Telegram)
+            self.top_volumes = {s: v for s, v in ranked}
+
             if sin_clase:
                 # No es un error: avisa de que ese mercado no traia isRwa y
                 # por eso solo lo freno la blacklist (riesgo residual).
@@ -1089,7 +1161,8 @@ class CanalBot:
                      f"contra la blacklist ({len(NON_CRYPTO_BASES)} tickers).",
                      logging.WARNING)
             log.info(f"TOP symbols: {len(ranked)} CRIPTO perps tras filtro "
-                     f"| excluidos {excl_rwa} no-crypto (isRwa=YES) + "
+                     f"liquidez (>= {min_vol / 1e6:.0f}M) | excluidos "
+                     f"{excl_rwa} no-crypto (isRwa=YES) + "
                      f"{excl_otro} blacklist/no-perp | universo Bitget="
                      f"{len(candidatos)}")
             return [s for s, _ in ranked[:n]]
@@ -1849,7 +1922,8 @@ class CanalBot:
                             tp_price: float, tp2_price: float = None,
                             balance: float = None,
                             df: pd.DataFrame = None, entry_idx: int = None,
-                            vwap_value: float = None) -> bool:
+                            vwap_value: float = None,
+                            atr_pct: float = None) -> bool:
         """
         [8.6b] Abre posicion MARKET en Bitget con SL precargado.
           1) Valida precio/SL/TP1/TP2 finitos y coherentes.
@@ -1861,6 +1935,8 @@ class CanalBot:
              ejecuta el exchange); si el exchange no los acepta, fallback
              a ejecucion bot-side (manage_positions, TPO-2).
           6) Alerta Telegram + persistencia en trade_entries.json.
+             La alerta incluye VWAP (si se paso) y el ATR% del TF alt
+             que valido el filtro de volatilidad [3.5e] (atr_pct).
         """
         if symbol in self.session_active:
             log.debug(f"{symbol} ya tiene posicion activa. Saltando.")
@@ -2053,6 +2129,12 @@ class CanalBot:
             )
             if vwap_value is not None and math.isfinite(vwap_value):
                 msg += f"\nVWAP: `{vwap_value:.6f}`"
+            # [3.5e] ATR del TF alt que valido la ENTRADA (filtro de
+            # volatilidad): se muestra como % para trazabilidad (el mismo
+            # valor que comprobo _atr_filtro_ok contra el umbral 2.5%).
+            if atr_pct is not None and math.isfinite(atr_pct):
+                msg += (f"\nATR({self.cfg.get('filtro_atr_tf', '1h')}): "
+                        f"`{atr_pct * 100:.2f}%`")
             await self.send_telegram(msg)
             if exchange_tps:
                 # [H8] confirmacion post-carga: que quedo REALMENTE
@@ -4455,6 +4537,147 @@ async def _macd_color_15m(bot: CanalBot, symbol: str) -> Optional[bool]:
     return bool(overlay.iloc[-1])
 
 
+# -----------------------------------------------------------------------------
+# [11.3c-1] ATR (Average True Range) de Wilder - VOLATILIDAD MEDIA
+# -----------------------------------------------------------------------------
+def _atr_wilder(df: pd.DataFrame, length: int = 14) -> Optional[float]:
+    """
+    [11.3c-1] ATR (Average True Range) de Wilder - VOLATILIDAD MEDIA.
+
+    ¿Qué es? Media suavizada del rango real de cada vela:
+        TR   = max(high-low, |high-close_prev|, |low-close_prev|)
+        ATR  = RMA(TR, length): ATR[i] = (ATR[i-1]*(L-1) + TR[i]) / L
+    ¿Para qué? El bot entra solo si ATR% <= umbral [CONFIG 3.5e], para
+    que el SL fijo del 5% (CONFIG [3.6]) no quede a la distancia de una
+    vela "normal" del TF superior. Este filtro NO calcula ni modifica el
+    SL: solo decide si se ENTRA.
+
+    Retorna: ATR% (ATR / ultimo close) como decimal, ej. 0.018 = 1.8%.
+             None = datos insuficientes o invalidos (warmup, NaN, etc.)
+
+    NOTA (por que hay codigo nuevo aqui): el TR ya se calcula en
+    SignalVWAP._choppiness [9.6] y el suavizado Wilder en
+    MathPreservados.calculate_rsi [7.6], pero ambos estan embutidos en SU
+    indicador (CHOP / RSI) y no son funciones reutilizables. Aqui se
+    reimplementa la misma formula por separado (~15 lineas) sin tocar
+    esos indicadores ya probados en produccion (DRY vs. riesgo de
+    refactor: se prioriza no romper lo existente).
+    """
+    try:
+        # --- Validacion de datos minimos (mismo criterio que el resto del bot) ---
+        if df is None or len(df) < length + 1:
+            return None
+        high = df["high"].values.astype(np.float64)
+        low = df["low"].values.astype(np.float64)
+        close = df["close"].values.astype(np.float64)
+        if not (np.all(np.isfinite(high)) and np.all(np.isfinite(low))
+                and np.all(np.isfinite(close))):
+            return None
+        if np.any(close <= 0) or np.any(high <= 0) or np.any(low <= 0):
+            return None
+
+        # --- True Range (TR) barra a barra (identico a _choppiness [9.6]) ---
+        n = len(close)
+        prev_close = np.empty(n, dtype=np.float64)
+        prev_close[0] = close[0]          # primera barra: sin previo, TR = high-low
+        prev_close[1:] = close[:-1]
+        tr = np.maximum(high - low,
+                        np.maximum(np.abs(high - prev_close),
+                                   np.abs(low - prev_close)))
+
+        # --- Suavizado Wilder (RMA, alpha=1/length; identico a calculate_rsi [7.6]) ---
+        # ATR[length-1] = media simple de los primeros `length` TR;
+        # luego ATR[i] = (ATR[i-1]*(L-1) + TR[i]) / L.
+        atr = np.full(n, np.nan, dtype=np.float64)
+        atr[length - 1] = np.mean(tr[:length])
+        alpha = 1.0 / length
+        for i in range(length, n):
+            atr[i] = atr[i - 1] * (1.0 - alpha) + tr[i] * alpha
+
+        # --- ATR% = ATR / close (decimal); ultima barra madura ---
+        atr_last = atr[n - 1]
+        if not np.isfinite(atr_last) or close[n - 1] <= 0:
+            return None
+        return float(atr_last / close[n - 1])
+    except Exception as e:
+        # Nunca lanza: el filtro debe ser fail-closed (None = sin senal)
+        flag("ATR-CORE-UNEXPECTED", origen_de_excepcion(e),
+             f"_atr_wilder: {type(e).__name__}: {e}", logging.ERROR)
+        return None
+
+
+async def _atr_filtro_ok(bot: CanalBot, symbol: str) -> Optional[bool]:
+    """
+    [11.3c-2] ¿El ATR del TF superior permite entrar con SL fijo 5%?
+
+    Devuelve:
+        True  -> ATR% <= filtro_atr_max_pct: volatilidad COMPATIBLE con
+                 el SL fijo de 5% (una vela normal del TF alt no lo barre).
+        False -> ATR% >  umbral: mercado demasiado caliente; la vela
+                 tipica podria barrer el SL sin invalidar la tesis.
+        None  -> NO evaluable (sin datos / warmup insuficiente / error de
+                 red): fail-closed, SIN senal (no se inventa confirmacion).
+
+    Patron identico a _macd_color_15m [11.3b]: descarga del TF secundario
+    SOLO cuando ya hay senal candidata en "timeframe" (5m), para minimizar
+    llamadas a la API y rate limits.
+    """
+    if not bot.cfg.get("filtro_atr_enabled", True):
+        return True   # filtro desactivado -> condicion cumplida
+
+    tf = bot.cfg.get("filtro_atr_tf", "1h")
+    length = int(bot.cfg.get("filtro_atr_length", 14))
+    try:
+        # Margen extra de velas para el warmup del ATR + el ultimo cierre
+        data = await bot.fetch_ohlcv_batch([symbol], tf, length + 50)
+    except RateLimitExceeded:
+        flag("429", ORIGEN_BIBLIOTECA,
+             f"ATR-filtro {symbol}: rate limit.", logging.WARNING)
+        return None
+    except (NetworkError, RequestTimeout):
+        flag("NET", ORIGEN_BIBLIOTECA,
+             f"ATR-filtro {symbol}: error de red.", logging.WARNING)
+        return None
+    except Exception as e:
+        flag("ATR-FETCH-UNEXPECTED", origen_de_excepcion(e),
+             f"ATR-filtro {symbol}: {type(e).__name__}: {e}", logging.ERROR)
+        return None
+
+    filas = data.get(symbol)
+    if not filas:
+        flag("ATR-FILTRO-DATOS", ORIGEN_DATOS,
+             f"{symbol}: sin velas {tf} para el filtro ATR.", logging.WARNING)
+        return None
+
+    df = pd.DataFrame(
+        filas, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+    # Solo velas CERRADAS (la vela en formacion repintaria el ATR, igual
+    # que el filtro MACD 15m [11.3b])
+    tf_ms = timeframe_a_ms(tf)
+    ahora = time.time() * 1000.0
+    cerradas = df[df["timestamp"] + tf_ms <= ahora]
+
+    atr_pct = _atr_wilder(cerradas, length)
+    if atr_pct is None:
+        flag("ATR-FILTRO-DATOS", ORIGEN_DATOS,
+             f"{symbol}: ATR {tf} no calculable (warmup/datos).",
+             logging.DEBUG)
+        return None
+
+    # [3.5e] Guardar el ATR% real del simbolo: lo mostrara el mensaje de
+    # APERTURA en Telegram (open_position) para trazabilidad del filtro.
+    self_atr = getattr(bot, "atr_values", None)
+    if isinstance(self_atr, dict):
+        self_atr[symbol] = atr_pct
+
+    umbral = float(bot.cfg.get("filtro_atr_max_pct", 0.025))
+    pasa = atr_pct <= umbral
+    log.debug(f"{symbol} ATR-filtro: ATR%({tf})={atr_pct*100:.2f}% "
+              f"umbral={umbral*100:.1f}% -> {'PASA' if pasa else 'RECHAZA'}")
+    return pasa
+
+
 async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
                         tf_ms: int, balance: float, trading: bool):
     """
@@ -4560,6 +4783,27 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
                           f"{'VERDE' if macd_ok else 'ROJA'} no coincide.")
                 continue
 
+            # --- [11.3c] FILTRO ATR: protege el SL fijo 5% de barridos ---
+            #   Entra SOLO si ATR%(TF alt) <= filtro_atr_max_pct (2.5%),
+            #   es decir si una vela "normal" del TF superior no puede
+            #   barrer el SL de 5% sin invalidar la tesis. NO modifica el
+            #   SL; solo decide si se ENTRA. Se evalua ANTES del dedupe
+            #   (mismo motivo que el filtro MACD [11.3b]): si hoy el ATR
+            #   esta alto, la MISMA vela de senal puede cumplir en el
+            #   proximo escaneo cuando se enfre la volatilidad.
+            atr_ok = await _atr_filtro_ok(bot, symbol)
+            if atr_ok is None:
+                # Sin verificacion -> NO hay senal (fail-closed, sin inventar)
+                log.debug(f"{symbol} senal {lado.upper()} descartada: ATR "
+                          f"{bot.cfg.get('filtro_atr_tf')} no evaluable.")
+                continue
+            if not atr_ok:
+                log.debug(f"{symbol} senal {lado.upper()} descartada: ATR "
+                          f"{bot.cfg.get('filtro_atr_tf')} > "
+                          f"{bot.cfg.get('filtro_atr_max_pct', 0.025)*100:.1f}% "
+                          f"(vela normal podria barrer el SL 5%).")
+                continue
+
             # --- Deduplicar (CODIGO-005): misma vela + mismo lado = 1 aviso ---
             clave = f"{symbol}|{lado}|{int(vela_ts)}"
             if clave in bot.alertas_enviadas:
@@ -4585,10 +4829,17 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
             buf = await asyncio.to_thread(
                 GraficoSignalVWAP.generar, symbol, df, res, bot.cfg,
                 lado, ultima, True)
+            # [3.5f] Volumen 24h del perp (USDT, en millones) para el
+            # caption: trazabilidad de la LIQUIDEZ con la que entra la
+            # senal (el filtro [3.5f] ya garantiza >= min_quote_volume).
+            vol_usdt = bot.top_volumes.get(symbol)
+            vol_txt = (f"{vol_usdt / 1e6:.1f}M" if vol_usdt is not None
+                       else "n/a")
             caption = (
                 f"*{symbol.split(':')[0]}* senal *{lado.upper()}* "
                 f"(TF {bot.cfg['timeframe']})\n"
                 f"Close: `{close_last:.6g}` | VWAP: `{vwap_last:.6g}`\n"
+                f"Vol 24h: `{vol_txt}` USDT\n"
                 f"CHOP: `{chop_txt}` (filtro <= "
                 f"{bot.cfg.get('chop_entry_max', 38.2)})\n"
                 f"Canal: sup `{canal_up:.6g}` / inf `{canal_lo:.6g}`\n"
@@ -4637,7 +4888,10 @@ async def _procesar_top(bot: CanalBot, strat: SignalVWAP, top: list,
                     symbol=symbol, side=lado, sl_price=sl, tp_price=tp1,
                     tp2_price=tp2,
                     balance=balance, df=df, entry_idx=ultima,
-                    vwap_value=vwap_last)
+                    vwap_value=vwap_last,
+                    # [3.5e] ATR% que valido el filtro (para el Telegram
+                    # de apertura; None si no esta cacheado)
+                    atr_pct=bot.atr_values.get(symbol))
                 if not abierta:
                     log.debug(f"{symbol}: posicion no abierta "
                               "(riesgo/limite/precison).")
