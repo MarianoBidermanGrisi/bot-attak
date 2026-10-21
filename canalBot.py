@@ -4,7 +4,6 @@
 ==============================================================================
  canalBot - BOT MONOLITICO (archivo unico) Bitget + Telegram + Render
 ==============================================================================
- 
  Fichero: canalBot.py
  Proposito:
    1) Extrae TODO lo relacionado con Bitget/Render/Telegram del bot original
@@ -22,13 +21,15 @@
        EMAs 20/50/100/200 (parametros REALES del bot en CONFIG [3.1];
        el Pine original usa 9/14/50/100) + VWAP anclado + estructura de
        pivotes + Canal de Regresion Logaritmica + senales LONG/SHORT.
-       FILTROS DE ENTRADA adicionales (todos obligatorios):
-         - MACD Signal Line en 15m (color verde/rojo)  [CONFIG 3.5b]
+       FILTROS DE ENTRADA adicionales:
+         - MACD Signal Line en 15m (color verde/rojo)  [CONFIG 3.5b] ACTIVO
          - Choppiness Index <= 38.2 (solo tendencia)   [CONFIG 3.5d]
+           >>> chop_filter_enabled = False (DESACTIVADO para pruebas:
+               reactivar poniendo True en CONFIG [3.5d]).
          - ATR(1h) <= 2.5% (volatilidad compatible con el SL fijo 5%)
-                                                          [CONFIG 3.5e]
-         - Volumen 24h >= 15M USDT (liquidez minima del perp)
-                                                          [CONFIG 3.5f]
+                                                          [CONFIG 3.5e] ACTIVO
+         - Volumen 24h >= 10M USDT (liquidez minima del perp)
+                                                          [CONFIG 3.5f] ACTIVO
    5) Las senales se VISUALIZAN en imagenes de Telegram estilo TradingView
       (velas + canal relleno + triangulos LONG/SHORT + VWAP + eje derecho).
 
@@ -192,7 +193,12 @@ CONFIG = {
     "chop_lower": 38.2,             # banda inferior: CI < 38.2 = TENDENCIA fuerte
     "chop_offset": 0,               # desplazamiento visual (offset Pine, 0=ninguno)
     # -- [3.5d] Filtro de entrada CHOP (condicion OBLIGATORIA de senal) --
-    "chop_filter_enabled": True,    # LONG y SHORT exigen CHOP <= chop_entry_max
+    # INTERRUPTOR MANUAL: True = activo (LONG/SHORT exigen CHOP <= 38.2);
+    # False = DESACTIVADO (estado actual: pruebas sin el filtro para medir
+    # la frecuencia real de senales SignalVWAP en 5m). Para reactivarlo:
+    # cambiar a True y redeployar. El calculo del indicador [3.5c] NO se
+    # toca: sigue dibujandose en el grafico de Telegram.
+    "chop_filter_enabled": False,   # *** DESACTIVADO para pruebas ***
     "chop_entry_max": 38.2,         # umbral de entrada: mercado en TENDENCIA
                                     # (NaN del warmup = False = sin senal)
 
@@ -219,12 +225,14 @@ CONFIG = {
     # en la cola (ranks 40-100): libros delgados, spreads anchos y wicks
     # falsos que pueden disparar el SL sin precio real. Este filtro exige
     # un volumen 24h MINIMO para que el perp entre en el universo.
-    # Dato medido (Bitget 2026-10): >=15M deja ~19 perps del TOP 100
-    # (incluye majors incluso en dias flojos); >=50M dejaria solo 6.
+    # Dato medido (Bitget 2026-10): >=15M dejaba ~19-22 perps del TOP 100;
+    # >=10M amplia el universo (~30 perps) sin entrar en la cola de 1-5M
+    # (libros delgados y wicks falsos).
     # EDITAR AQUI para cambiar el umbral:
-    #   15_000_000 = 15M USDT (recomendado)
+    #   10_000_000 = 10M USDT (ACTUAL - pruebas)
+    #   15_000_000 = 15M USDT (valor anterior, mas restrictivo)
     #   0 o None  = SIN filtro (comportamiento antiguo: solo el rank TOP N)
-    "min_quote_volume_24h": 15_000_000,   # umbral en USDT (volumen 24h)
+    "min_quote_volume_24h": 10_000_000,   # umbral en USDT (volumen 24h)
 
     # -- [3.6] Riesgo / Gestion (configurable a mano) --
     "trading_habilitado": True,     # *** MAESTRO: True=ORDENES REALES en Bitget
@@ -3508,9 +3516,10 @@ class SignalVWAP:
           1) EMAs 20/50/100/200 (CONFIG [3.1])
           2) VWAP anclado
           3) Senales: long  = cruza EMA20>EMA200 AND EMA50>EMA100 AND close>VWAP
-                              AND CHOP <= chop_entry_max (filtro de tendencia)
+                              AND CHOP <= chop_entry_max [solo si
+                              chop_filter_enabled=True; False = sin filtro]
                       short = cruza EMA20<EMA200 AND EMA50<EMA100 AND close<VWAP
-                              AND CHOP <= chop_entry_max
+                              AND CHOP <= chop_entry_max [mismo interruptor]
           4) estructura de pivotes -> inicio del canal
           5) canal de regresion logaritmica
         Retorna dict con arrays o None si los datos no sirven.
