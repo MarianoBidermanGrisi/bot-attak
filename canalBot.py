@@ -177,6 +177,12 @@ CONFIG = {
     "ohlcv_limit": 1500,            # Cantidad de velas a descargar por simbolo
     "scan_interval_sec": 300,       # Cada cuantos segundos se re-escanea el TOP 100
     "max_concurrent_fetches": 10,   # Concurrencia maxima de descargas (semaforo)
+    # [FIX-RATE] Suavizado de la RAFAGA de descargas por ciclo de escaneo:
+    # Bitget cerraba conexiones a los ~7-8s del lote (~31 peticiones de golpe)
+    # y salian 6-11 flags NET por ciclo. Se espacian los ARRANQUES de
+    # peticion (throttle) y se reintenta cada simbolo antes de rendirse.
+    "fetch_throttle_sec": 0.15,     # separacion minima entre inicios de fetch
+    "fetch_retries": 1,             # reintentos extra por simbolo (429 o red)
 
     # -- [3.5b] Filtro MACD Signal Line (condicion de entrada en 15m) --
     "macd_filter_enabled": True,    # LONG exige Signal Line VERDE en 15m;
@@ -1193,33 +1199,57 @@ class CanalBot:
     # -----------------------------------------------------------------
     # [8.4] DESCARGA DE VELAS OHLCV (asincrona, concurrencia controlada)
     # -----------------------------------------------------------------
-    async def _fetch_single(self, exch, symbol: str, timeframe: str, limit: int):
+    async def _fetch_single(self, exch, symbol: str, timeframe: str,
+                            limit: int, retries: int = None):
         """[8.4a] Descarga OHLCV de UN simbolo. Devuelve (symbol, velas|None).
-        Nunca lanza: en error devuelve None y el resto sigue."""
+        Nunca lanza: en error devuelve None y el resto sigue.
+        [FIX-RATE] Ante 429 o error de red REINTENTA (backoff creciente)
+        antes de rendirse; el flag WARNING solo se emite al AGOTAR los
+        intentos, para que un warning signifique "problema real" y no
+        "fallo transitorio absorbido". retries=None -> lee CONFIG [3.5]."""
+        if retries is None:
+            retries = int(self.cfg.get("fetch_retries", 1))
+        intentos = 1 + max(0, retries)
         async with self.semaphore:
-            try:
-                ohlcv = await exch.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-                return symbol, ohlcv
-            except RateLimitExceeded:
-                flag("429", ORIGEN_BIBLIOTECA,
-                     f"fetch_ohlcv {symbol}: rate limit, espero 2s.", logging.WARNING)
-                await asyncio.sleep(2)
-                return symbol, None
-            except (NetworkError, RequestTimeout):
-                flag("NET", ORIGEN_BIBLIOTECA,
-                     f"fetch_ohlcv {symbol}: error de red.", logging.WARNING)
-                await asyncio.sleep(1)
-                return symbol, None
-            except Exception as e:
-                flag("OHLCV-UNEXPECTED", origen_de_excepcion(e),
-                     f"fetch_ohlcv {symbol}: {e}", logging.ERROR)
-                return symbol, None
+            for intento in range(1, intentos + 1):
+                try:
+                    ohlcv = await exch.fetch_ohlcv(symbol, timeframe=timeframe,
+                                                   limit=limit)
+                    return symbol, ohlcv
+                except RateLimitExceeded:
+                    if intento < intentos:
+                        # Backoff 2s, 4s... fuera del WARNING: reintento callado
+                        await asyncio.sleep(2 * intento)
+                        continue
+                    flag("429", ORIGEN_BIBLIOTECA,
+                         f"fetch_ohlcv {symbol}: rate limit tras "
+                         f"{intentos} intentos.", logging.WARNING)
+                    await asyncio.sleep(2)
+                    return symbol, None
+                except (NetworkError, RequestTimeout):
+                    if intento < intentos:
+                        # 1.5s, 3s...: deja que Bitget libere la ventana
+                        await asyncio.sleep(1.5 * intento)
+                        continue
+                    flag("NET", ORIGEN_BIBLIOTECA,
+                         f"fetch_ohlcv {symbol}: error de red tras "
+                         f"{intentos} intentos.", logging.WARNING)
+                    return symbol, None
+                except Exception as e:
+                    flag("OHLCV-UNEXPECTED", origen_de_excepcion(e),
+                         f"fetch_ohlcv {symbol}: {e}", logging.ERROR)
+                    return symbol, None
 
     async def fetch_ohlcv_batch(self, symbols: list, timeframe: str = "5m",
                                 limit: int = 100) -> dict:
         """
         [8.4b] Descarga BATCH de velas con un cliente async temporal.
         Devuelve {symbol: [[ts,o,h,l,c,v], ...]} solo con los que respondieron.
+        [FIX-RATE] Los ARRANQUES de cada peticion se espacian
+        (fetch_throttle_sec, lock+intervalo) porque lanzar las ~31 de golpe
+        con gather() estallaba el limite de conexion de Bitget a los ~7-8s
+        (rafagas NET en logs del 21-10). El semaforo [3.5] sigue limitando
+        las peticiones EN VUELO; el throttle limita la TASA de lanzamiento.
         """
         exch = ccxt_async.bitget({
             "apiKey": API_KEY,
@@ -1252,8 +1282,29 @@ class CanalBot:
                  f"No se pudo instalar ThreadedResolver en el cliente "
                  f"async: {type(e).__name__}: {e}. Se usa el conector "
                  f"por defecto de ccxt.", logging.WARNING)
+        # [FIX-RATE] Throttle de ARRANQUES: cada peticion espera su turno
+        # (lock + intervalo minimo) antes de lanzarse. Con 31 simbolos x
+        # 0.15s = ~4.7s de escalonado por lote: por debajo del umbral que
+        # Bitget castigaba, y despreciable frente al ciclo de 300s.
+        throttle = float(self.cfg.get("fetch_throttle_sec", 0.15))
+        pace_lock = asyncio.Lock()
+        siguiente_inicio = 0.0
+        bucle = asyncio.get_running_loop()
+
+        async def _con_pacing(sym: str):
+            nonlocal siguiente_inicio
+            if throttle > 0:
+                async with pace_lock:
+                    ahora = bucle.time()
+                    if ahora < siguiente_inicio:
+                        await asyncio.sleep(siguiente_inicio - ahora)
+                    # Marca el inicio de la PROXIMA peticion ANTES de soltar
+                    # el lock: asi los arranques nunca se solapan en el tiempo.
+                    siguiente_inicio = bucle.time() + throttle
+            return await self._fetch_single(exch, sym, timeframe, limit)
+
         try:
-            tasks = [self._fetch_single(exch, s, timeframe, limit) for s in symbols]
+            tasks = [_con_pacing(s) for s in symbols]
             results = await asyncio.gather(*tasks)
             return {r[0]: r[1] for r in results if r[1] is not None}
         finally:
