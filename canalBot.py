@@ -288,6 +288,17 @@ CONFIG = {
                                     # tp1_pct (+2% = +20% PnL a 10x).
                                     # False = sin TP unico (bot-side).
 
+    # -- [EMA-CUT] Corte por EMA: cierre TOTAL por mercado --
+    # MOTIVO: si la EMA20 pierde sostenidamente (2 velas cerradas) contra
+    # EMA50/100/200, la tendencia de la posición esta rota; cerrar YA
+    # (en vez de esperar SL/BE) preserva capital. Logica pura en
+    # evaluar_corte_ema(); ejecucion en _corte_ema_gestionar().
+    "corte_ema_enabled": True,      # [EMA-CUT] activar el corte por EMA
+    "corte_ema_reintentos": 8,      # [EMA-CUT-RETRY] intentos de cierre/
+                                    # descarga ante errores TRANSITORIOS
+                                    # (429/500/red)
+    "corte_ema_retry_sec": 15.0,    # [EMA-CUT-RETRY] espera entre intentos
+
     # -- [3.6c] Gate del Break Even --
     "be_after_tp1": True,           # [BE-TP1] el BE SOLO se evalua DESPUES
                                     # de ejecutarse el TP1
@@ -501,6 +512,22 @@ FLAGS_CODIGO_DOC = {
     "SL-RECONCILE": "El estado persistido del ratchet difiere del SL REAL en "
                     "Bitget (o fallo la reconciliacion): manda el exchange, "
                     "se adopta su valor y se persiste.",
+    # --- Flags de la feature [EMA-CUT] (corte por EMA) ---
+    "EMA-CUT-CODIGO": "Excepcion DENTRO de evaluar_corte_ema() (p.ej. cfg "
+                      "con claves ema_* faltantes): se devuelve None y no se "
+                      "corta (fail-closed). Origen: codigo local.",
+    "EMA-CUT-DATOS": "Datos no evaluable fuera de excepcion (serie None, "
+                     "<3 velas, NaN/inf en las 3 cerradas o warmup <200): "
+                     "None -> no cortar. Origen: DATOS de mercado.",
+    "EMA-CUT-RETRY": "Transitorio: descarga de velas o evaluacion fallaron "
+                     "en un reintento de _corte_ema_gestionar (red/rate "
+                     "limit/sin vela): se reintenta; NO corta.",
+    "EMA-CUT-REJECT": "Reintentos agotados (corte_ema_reintentos) sin senal "
+                      "evaluable: se descarta el corte por EMA este ciclo "
+                      "(nunca se emite en calma, solo tras RETRY).",
+    "EMA-CUT-UNEXPECTED": "Excepcion inesperada en _corte_ema_gestionar "
+                          "(incluye mocks de test): se captura para no tumbar "
+                          "el ciclo de manage_positions; no se corta.",
     # CODIGO-017 ELIMINADO [TPO-2]: el TP estructural (pivote/borde/rr_ratio)
     # ya no existe; ahora son TP1/TP2 porcentuales (sl_tp.tp_accion).
 }
@@ -2769,6 +2796,11 @@ class CanalBot:
           2.5) TP1/TP2 [TPO-3]: en modo exchange los ejecuta Bitget
              (profit_plan) y aqui solo se reconcilian/detecta el fill
              del TP1; fallback bot-side: +2% -> 50%, +3% -> TODO.
+          2.55) CORTE POR EMA [EMA-CUT]: si la EMA20 pierde sostenida
+             (2 velas cerradas) contra 50/100/200 del mismo lado ->
+             cierre TOTAL por mercado y FIN del tick (prioridad sobre
+             ratchet/BE/trailing); reintento 15s x N ante fallos
+             transitorios, fail-closed si los datos no evaluan.
           2.6) BE DE RESCATE (Deep Adverse) [8.6c-DR]: FASE 1 bandera al
              -2.8% de precio (persistida) / FASE 2 cierre TOTAL por
              mercado al -0.2% o mejor. No mueve SL; logica en sl_tp [2b].
@@ -2927,6 +2959,21 @@ class CanalBot:
                     self.peak_prices[symbol] = max(self.peak_prices[symbol], mark)
                 else:
                     self.peak_prices[symbol] = min(self.peak_prices[symbol], mark)
+
+                # =====================================================
+                # 2.55) CORTE POR EMA [EMA-CUT] - PRIORIDAD "EMA MANDA"
+                #   Si la EMA20 pierde sostenidamente (2 velas cerradas)
+                #   contra 50/100/200 del MISMO lado que la posicion, la
+                #   tendencia esta rota: se cierra el 100% por mercado YA
+                #   y se `continue` -> ratchet, BE, deep adverse y
+                #   trailing NO corren en este tick (no quedan ordenes
+                #   vivas que ajustar). Solo evalua si hay config ON; si
+                #   no es evaluable/rechazado, la proteccion original
+                #   (SL/BE/TP) sigue intacta.
+                # =====================================================
+                if self.cfg.get("corte_ema_enabled"):
+                    if await self._corte_ema_gestionar(symbol, side):
+                        continue
 
                 # =====================================================
                 # 2.6) BE DE RESCATE (Deep Adverse) - DOS fases [8.6c-DR]
@@ -3203,6 +3250,151 @@ class CanalBot:
         except Exception as e:
             flag("CLOSE-UNEXPECTED", origen_de_excepcion(e),
                  f"Cerrando {symbol}: {e}", logging.ERROR)
+            return False
+
+    # -----------------------------------------------------------------
+    # [EMA-CUT] Capa 1 (datos): descarga de velas CERRADAS del tf de la
+    # estrategia. Fail-closed: cualquier problema -> None (no cortar).
+    # -----------------------------------------------------------------
+    async def _corte_ema_descargar(self, symbol: str,
+                                   tf: str) -> Optional[pd.DataFrame]:
+        """
+        [EMA-CUT-1] Descarga las velas del timeframe principal SOLO para
+        UN simbolo bajo demanda.
+
+        Porque bajo demanda: en el escaneo (_procesar_top) los simbolos
+        con posicion abierta hacen `continue` y nunca llegan a strat.
+        evaluar(); sin este puente el corte jamas veria sus propias
+        posiciones.
+
+        Flags por origen quirurgico:
+          EMA-CUT-DATOS      -> origen DATOS (sin filas/vacias)
+          429 / NET          -> origen BIBLIOTECA (transitorios)
+          EMA-CUT-UNEXPECTED -> origen calculado por origen_de_excepcion
+        """
+        try:
+            limit = int(self.cfg.get("ohlcv_limit", 100))
+            data = await self.fetch_ohlcv_batch([symbol], tf, limit)
+        except RateLimitExceeded:
+            flag("429", ORIGEN_BIBLIOTECA,
+                 f"corte_ema {symbol}: rate limit.", logging.WARNING)
+            return None
+        except (NetworkError, RequestTimeout):
+            flag("NET", ORIGEN_BIBLIOTECA,
+                 f"corte_ema {symbol}: error de red.", logging.WARNING)
+            return None
+        except Exception as e:
+            flag("EMA-CUT-UNEXPECTED", origen_de_excepcion(e),
+                 f"corte_ema {symbol}: {type(e).__name__}: {e}",
+                 logging.ERROR)
+            return None
+
+        filas = data.get(symbol)
+        if not filas:
+            flag("EMA-CUT-DATOS", ORIGEN_DATOS,
+                 f"{symbol}: sin velas {tf} para el corte por EMA.",
+                 logging.WARNING)
+            return None
+
+        df = pd.DataFrame(
+            filas, columns=["timestamp", "open", "high", "low",
+                            "close", "volume"])
+
+        # SOLO velas cerradas: la vela en formacion repintaria el cierre
+        # y dispararia cortes fantasma (mismo criterio que ATR/MACD [11.3b]).
+        tf_ms = timeframe_a_ms(tf)
+        ahora = time.time() * 1000.0
+        cerradas = df[df["timestamp"] + tf_ms <= ahora]
+
+        if cerradas.empty:
+            flag("EMA-CUT-DATOS", ORIGEN_DATOS,
+                 f"{symbol}: 0 velas cerradas {tf} para el corte por EMA.",
+                 logging.WARNING)
+            return None
+        return cerradas
+
+    # -----------------------------------------------------------------
+    # [EMA-CUT] Capa 2+3 (ejecucion y prioridad): evaluar y, si hay
+    # corte sostenido del MISMO lado, cerrar el 100% por mercado YA.
+    # -----------------------------------------------------------------
+    async def _corte_ema_gestionar(self, symbol: str, side: str) -> bool:
+        """
+        [EMA-CUT] Orquesta descarga -> evaluacion pura -> cierre total.
+
+        Returns:
+            True  -> la posicion se cerro; el caller DEBE hacer `continue`
+                     (prioridad "EMA manda": sin ratchet/BE/trailing en
+                     ese tick, la posicion ya no existe).
+            False -> no evaluable / sin corte / lado contrario / rechazo
+                     definitivo; el caller sigue con la logica original
+                     (SL/ratchet/BE/TP siguen protegiendo).
+
+        Reintentos 15s x N solo ante errores TRANSITORIOS (429/500/red):
+        un cierre que no se ejecuta debe reintentarse ~2 min antes de
+        rendirse, porque es una proteccion de capital, no un detalle.
+        """
+        try:
+            tf = self.cfg.get("timeframe", "5m")
+            max_intentos = max(1, int(self.cfg.get("corte_ema_reintentos", 8)))
+            espera = float(self.cfg.get("corte_ema_retry_sec", 15.0))
+
+            for intento in range(1, max_intentos + 1):
+                cerradas = await self._corte_ema_descargar(symbol, tf)
+                if cerradas is None:
+                    # Transitorio (datos/red/429): reintentar mas tarde.
+                    flag("EMA-CUT-RETRY", ORIGEN_DATOS,
+                         f"{symbol}: descarga {tf} fallida "
+                         f"(intento {intento}/{max_intentos}).",
+                         logging.WARNING)
+                    await asyncio.sleep(espera)
+                    continue
+
+                senal = evaluar_corte_ema(cerradas["close"], self.cfg)
+
+                # Fail-closed de la Capa 1: sin evaluacion segura NO se
+                # cierra (nunca arriesgar un cierre erroneo por datos malos).
+                if senal is None:
+                    log.debug(f"{symbol}: corte_ema no evaluable "
+                              f"(warmup/datos) -> sin accion.")
+                    return False
+                # Evaluable y sin condicion sostenida -> nada que cortar.
+                if senal == "none":
+                    return False
+                # La rotura es del lado contrario a MI posicion -> no me afecta.
+                if senal != side:
+                    return False
+
+                # CORTE CONFIRMADO del mismo lado: cierre TOTAL por mercado.
+                ok = await self.close_position(symbol)
+                if ok:
+                    log.info(f"{symbol} CORTE-EMA [{side}]: tendencia rota "
+                             f"2 velas (fast vs 50/100/200) -> cierre TOTAL "
+                             f"por mercado (intento {intento}).")
+                    await self.send_telegram(
+                        f"*{symbol}* CORTE-EMA [{side.upper()}]: EMA20 rota "
+                        f"2 velas consecutivas contra 50/100/200 -> cierre "
+                        f"total por mercado.")
+                    return True
+
+                # close_position ya dejo su flag (429/400/NET/500); aqui
+                # solo se marca el reintento del corte.
+                flag("EMA-CUT-RETRY", ORIGEN_BIBLIOTECA,
+                     f"{symbol}: cierre fallido "
+                     f"(intento {intento}/{max_intentos}).",
+                     logging.WARNING)
+                await asyncio.sleep(espera)
+
+            # Sin banderas de desesperacion el silencio de 2 min pasaria
+            # desapercibido en produccion -> CRITICAL visible en Render.
+            flag("EMA-CUT-REJECT", ORIGEN_CODIGO,
+                 f"{symbol}: CORTE-EMA [{side}] agotado "
+                 f"({max_intentos} intentos) SIN cerrar la posicion.",
+                 logging.CRITICAL)
+            return False
+        except Exception as e:
+            flag("EMA-CUT-UNEXPECTED", origen_de_excepcion(e),
+                 f"_corte_ema_gestionar({symbol}): "
+                 f"{type(e).__name__}: {e}", logging.ERROR)
             return False
 
     async def _close_partial(self, symbol: str, side: str, qty: float,
@@ -4196,6 +4388,98 @@ class SignalVWAP:
                  f"evaluar_signalvwap({symbol}): {type(e).__name__}: {e}",
                  logging.ERROR)
             return None
+
+
+# =============================================================================
+# [9.9] CORTE POR EMA - funcion PURA (sin acceso a red, exchange ni estado)
+# =============================================================================
+def evaluar_corte_ema(close: pd.Series, cfg: dict) -> Optional[str]:
+    """
+    [EMA-CUT] Detecta si la tendencia de la posición esta rota de forma
+    SOSTENIDA: la EMA20 (fast) queda por debajo de EMA50/100/200 (long)
+    o por encima de las tres (short) en 2 VELAS CERRADAS consecutivas.
+
+    Porque SOSTENIDO y no cruce: un cruce aislado es ruido de velas
+    chicas; exigir 2 velas seguidas filtra whipsaws y evita cerrar
+    posiciones buenas por un solo tick adverso.
+
+    Simetrico long/short: en LONG exige fast < (mid, slow, cross); en
+    SHORT, fast > (mid, slow, cross).
+
+    FAIL-CLOSED: si no hay al menos 3 velas cerradas evaluables (warmup:
+    la EMA200 necesita ~200 velas), devuelve None = NO EVALUAR y NO
+    CERRAR; ante la duda manda la proteccion original (SL/BE/TP).
+
+    Returns:
+        "long"  -> cortar posiciones LONG  (fast bajo las 3, 2 velas)
+        "short" -> cortar posiciones SHORT (fast sobre las 3, 2 velas)
+        "none"  -> evaluable, sin condicion de corte
+        None    -> no evaluable (datos insuficientes/invalidos) -> no cortar
+    """
+    try:
+        # Se necesitan 3 velas cerradas: n-1 (actual) y ademas n-2 y n-3
+        # para el estado sostenido; indices -2 y -3 ignoran la vela en
+        # formacion (que repintaria el cierre, igual que [11.3b]/ATR).
+        if close is None or len(close) < 3:
+            return None
+
+        cierre = pd.to_numeric(close, errors="coerce").to_numpy(
+            dtype=float, copy=False)
+        if len(cierre) < 3 or not np.isfinite(cierre[-3:]).all():
+            return None
+
+        # Mismas claves de config que usa SignalVWAP._emas() para que el
+        # corte y la senal compartan parametros (20/50/100/200).
+        fast_len = int(cfg["ema_fast"])
+        mid_len = int(cfg["ema_mid"])
+        slow_len = int(cfg["ema_slow"])
+        cross_len = int(cfg["ema_cross"])
+        # Warmup insuficiente => la EMA no esta formada => no evaluar.
+        if len(cierre) < max(fast_len, mid_len, slow_len, cross_len):
+            return None
+
+        serie = pd.Series(cierre)
+        ema_fast = MathPreservados.ema_tv(serie, fast_len)
+        ema_mid = MathPreservados.ema_tv(serie, mid_len)
+        ema_slow = MathPreservados.ema_tv(serie, slow_len)
+        ema_cross = MathPreservados.ema_tv(serie, cross_len)
+
+        # Estado en las 2 velas cerradas n-2 y n-3 (la ultima cerrada es
+        # -2; -3 es la anterior). Si alguna no es finita -> no evaluable.
+        for i in (-2, -3):
+            f = float(ema_fast.iloc[i])
+            m = float(ema_mid.iloc[i])
+            s = float(ema_slow.iloc[i])
+            x = float(ema_cross.iloc[i])
+            if not all(math.isfinite(v) for v in (f, m, s, x)):
+                return None
+
+            # LONG roto: la EMA20 queda por debajo de las TRES lentas.
+            long_roto = (f < m) and (f < s) and (f < x)
+            # SHORT roto: espejo exacto (f > las tres).
+            short_roto = (f > m) and (f > s) and (f > x)
+
+            if not long_roto and not short_roto:
+                # En cualquiera de las 2 velas la condicion deja de ser
+                # sostenida -> sin corte (el estado debe repetirse).
+                return "none"
+
+        # Las 2 velas cumplen: decidir lado. Si ambas ramas coincidieran
+        # (imposible por construccion), prevalece "none" por prudencia.
+        f_last = float(ema_fast.iloc[-2])
+        m_last = float(ema_mid.iloc[-2])
+        s_last = float(ema_slow.iloc[-2])
+        x_last = float(ema_cross.iloc[-2])
+        if (f_last < m_last) and (f_last < s_last) and (f_last < x_last):
+            return "long"
+        if (f_last > m_last) and (f_last > s_last) and (f_last > x_last):
+            return "short"
+        return "none"
+    except Exception as e:
+        # Fail-closed: cualquier error de calculo => no cortar.
+        flag("EMA-CUT-CODIGO", origen_de_excepcion(e),
+             f"evaluar_corte_ema: {type(e).__name__}: {e}", logging.ERROR)
+        return None
 
 
 # =============================================================================
