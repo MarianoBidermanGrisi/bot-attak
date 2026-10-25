@@ -292,6 +292,55 @@ CONFIG = {
     "be_after_tp1": True,           # [BE-TP1] el BE SOLO se evalua DESPUES
                                     # de ejecutarse el TP1
 
+    # -- [3.6d] SL ESCALONADO (ratchet) por tramos de beneficio --
+    # MOTIVO: reducir la perdida MEDIA sin tocar los TPs (+2%/+3%).
+    # Con SL fijo -5% el break-even teorico (sin fees) exige
+    #   w = 5/(3.5+5) = 58.8% de aciertos; con el escalon en -4%:
+    #   w = 4/7.5 = 53.3%, y con -3.5%: w = 3.5/7 = 50.0%.
+    # TABLA (profit = % de PRECIO a favor con MARK PRICE, cada 15s):
+    #   profit <  +1.00%  ->  SL sin cambio (-5.00%, base de entrada)
+    #   profit >= +1.00%  ->  SL -4.00%  (sube 1.0% de precio)
+    #   profit >= +1.50%  ->  SL -3.50%  (sube 1.5% de precio)
+    #   profit >= +2.00%  ->  TP1 (+2%) y a partir de ahi manda el BE
+    #                         (+0.20%) [3.6c + 3.7]: FIN DE LA CADENA.
+    # REGLAS (confirmadas por el usuario):
+    #   * Monotono: el SL jamas retrocede. Si el precio vuelve a caer,
+    #     el escalon ya alcanzado se MANTIENE (p.ej. +1.4% -> SL -4%;
+    #     luego caiga a +0.6% -> el SL sigue en -4%).
+    #   * Salto de tramo: si el mark salta de +0.9% a +1.7% se aplica
+    #     DIRECTAMENTE el ultimo escalon alcanzado (-3.5%), no uno a uno.
+    #   * AMBOS lados: en SHORT los mismos % quedan POR ENCIMA de la
+    #     entrada (SL a +4.00% / +3.50% de precio sobre la entrada).
+    #   * deep_be [3.7b] NO se toca: su FASE 1 depende del MARK (-2.8%),
+    #     no del SL. Con el SL ya en -4%/-3.5% el precio pasa primero por
+    #     -2.8% (se arma el flag) y DESPUES por el SL; si se recupera hasta
+    #     -0.2% cierra el rescate, si sigue cayendo cierra el SL.
+    #   * Solo se evalua mientras NO se haya ejecutado el TP1 (tp1_done).
+    #   * Monotonia tambien contra el BE: jamas se envia un SL que empeore
+    #     la proteccion vigente (sl_tp.be_mejora).
+    # EDITAR AQUI los tramos: tupla de (profit_min, dist_sl_desde_entrada)
+    # en decimal, orden ascendente. () o enabled=False = desactivado.
+    "sl_ratchet_enabled": True,      # maestro de la feature
+    "sl_ratchet_steps": ((0.010, 0.040),    # +1.00% -> SL a -4.00%
+                         (0.015, 0.035)),   # +1.50% -> SL a -3.50%
+    # -- [3.6d-2] RECONCILIACION CONTRA EL SL REAL DE BITGET --
+    # MOTIVO: dos gaps documentados que sin esta lectura son imposibles
+    # de cerrar con logica local:
+    #   GAP A: el bot solo guardaba 'sl_ratchet_price' en el JSON; si la
+    #     orden HTTP devolvio OK pero el trigger NO se reflejo en el panel
+    #     de Bitget, nadie lo verificaba (los TP si tienen su propio
+    #     _reconcile_exchange_tps cada tp_reconcile_sec).
+    #   GAP B: Render usa disco efimero -> al redeploy se pierde
+    #     trade_entries.json, _reconstruir_te reinicia step=-1/price=None
+    #     y el ratchet podia EMPEORAR un SL que realmentee estaba en
+    #     -3.50% (lo volvia a poner en -4.00%).
+    # PROTOCOLO (metodos [3.6d-2a/b/c]): el SL REAL del exchange es la
+    #   fuente de verdad; la PRIMERA lectura ocurre en el primer tick de
+    #   manage y despues cada sl_reconcile_sec. Si el SL no se puede leer
+    #   -> ratchet CONGELADO (nunca se mueve un stop cuyo valor se ignora;
+    #   la proteccion base de -5% sigue colgada desde la apertura).
+    "sl_reconcile_sec": 600,         # cadencia de la lectura del SL real
+
     # -- [3.7] Break Even (BE) --
     "be_trigger_pct": 0.0132,       # Activa BE cuando el precio esta +1.32% a favor
     "be_offset_pct": 0.002,         # Mueve el SL a +0.2% de la entrada (long) / -0.2% (short)
@@ -432,6 +481,26 @@ FLAGS_CODIGO_DOC = {
                   "dibujada salia ~sqrt(m-1) mas estrecha que la real.",
     "CODIGO-016": "La leyenda 'SignalVWAP Clean' no muestra valores de plots "
                   "(TradingView muestra '0.000 0.000'): diferencia cosmética.",
+    # --- [3.6d] SL escalonado (ratchet) y su reconciliacion [3.6d-2] ---
+    "RATCHET-CFG": "sl_ratchet_steps con un tramo mal formado o una distancia "
+                   "fuera de (0,1): se ignora SOLO ese tramo y el resto de la "
+                   "cadena sigue operativa.",
+    "RATCHET-UNEXPECTED": "Excepcion inesperada dentro de _sl_ratchet_tick: "
+                          "se captura para no tumbar el ciclo de gestion.",
+    "SLPLAN": "Error de la API de Bitget al leer los planes pendientes "
+              "(code != 00000) durante la reconciliacion del SL.",
+    "SLPLAN-UNEXPECTED": "Excepcion inesperada leyendo los planes de SL "
+                         "(incluye mocks de test): se devuelve None y el "
+                         "llamador reintenta.",
+    "SL-NOPLAN": "LIMITACION/estado: el SL real NO se pudo leer (sin plan de "
+                 "perdida visible o lectura fallida sin dato previo) -> "
+                 "ratchet CONGELADO: no se envia ninguna orden de SL hasta "
+                 "poder leerlo (la proteccion base -5% sigue en Bitget).",
+    "SL-MULTIPLAN": "Varios planes distintos de profit para el mismo simbolo: "
+                    "se usa el trigger mas cercano a la entrada.",
+    "SL-RECONCILE": "El estado persistido del ratchet difiere del SL REAL en "
+                    "Bitget (o fallo la reconciliacion): manda el exchange, "
+                    "se adopta su valor y se persiste.",
     # CODIGO-017 ELIMINADO [TPO-2]: el TP estructural (pivote/borde/rr_ratio)
     # ya no existe; ahora son TP1/TP2 porcentuales (sl_tp.tp_accion).
 }
@@ -959,7 +1028,8 @@ class CanalBot:
         "trade_entries", "trail_counts", "adverse_prices",
         "consecutive_losses", "cooldown_until", "last_scan_time", "rolling_pnl",
         "trades_csv", "trade_entries_path", "TRADE_CSV_HEADERS",
-        "alertas_enviadas", "_tp_recon_last", "top_volumes", "atr_values",
+        "alertas_enviadas", "_tp_recon_last", "_sl_recon_last",
+        "top_volumes", "atr_values",
     )
 
     def __init__(self, config: dict = None):
@@ -980,6 +1050,10 @@ class CanalBot:
         self.adverse_prices: dict = {}     # peor precio visto (max adverse)
         self.alertas_enviadas: dict = {}   # [CODIGO-005] dedupe de alertas
         self._tp_recon_last: dict = {}     # [TPO-3] throttle reconcile TP
+        self._sl_recon_last: dict = {}     # [3.6d-2] throttle reconcile SL
+                                            # real (sl_reconcile_sec): si el
+                                            # dict esta VACIO la primera
+                                            # lectura es ya en el 1er tick
         self.top_volumes: dict = {}        # [3.5f] {simbolo: vol 24h USDT}
                                            # del ultimo get_top_symbols:
                                            # se muestra en el caption de
@@ -1010,6 +1084,10 @@ class CanalBot:
             "be_triggered", "be_price", "trail_count", "trail_peak_price", "trail_final_sl",
             "entry_weekday", "entry_hour", "size_usdt", "risk_pct",
             "max_favorable_pct", "max_adverse_pct",
+            # [3.6d] SL escalonado (append al final de la cabecera; si
+            # existiera un trades.csv generado ANTES de este cambio, borrarlo
+            # o regenerar su cabecera: las filas nuevas llevan 2 columnas mas)
+            "sl_ratchet_step", "sl_ratchet_price",
         ]
 
     # -----------------------------------------------------------------
@@ -1746,6 +1824,267 @@ class CanalBot:
                  f"_pending_profit_plans {symbol}: {e}", logging.WARNING)
             return None
 
+    # -----------------------------------------------------------------
+    # [3.6d-2a] LECTURA DEL SL REAL (planes de perdida) en Bitget
+    # -----------------------------------------------------------------
+    async def _pending_stop_plan(self, symbol: str,
+                                 entry: float) -> Optional[dict]:
+        """[3.6d-2a] Devuelve el SL (plan de perdida) PENDIENTE en Bitget.
+
+        Usa EXACTAMENTE el mismo endpoint que _pending_profit_plans
+        (private_mix_get_v2_mix_order_orders_plan_pending, planType
+        profit_loss) y filtra en cliente lo que NO es profit_plan: asi no
+        se inventa ningun endpoint nuevo (regla de honestidad tecnica).
+
+        CONVENCION DE DEVOLUCION (identica a _pending_profit_plans):
+          None                     -> ERROR de lectura (red/429/400/500/
+                                      inesperado): ya flageado; el llamador
+                                      reintenta y, si NUNCA hubo una lectura
+                                      buena, congela el ratchet (fail-safe).
+          {"found": False, "tipos": [..], "n_planes": N}
+                                     -> respuesta legible pero SIN plan de
+                                      SL visible (n_planes>0 = hay TPs u
+                                      otros planes pero no nuestro stop).
+          {"found": True, "trigger": float}
+                                     -> SL real localizado. Si hubiera VARIOS
+                                      planes distintos de profit se toma el
+                                      mas cercano a la entrada y se flagea
+                                      SL-MULTIPLAN (un SL legitimo jamas
+                                      queda lejos de la entrada).
+
+        El trigger se valida contra la entrada: cualquier distancia
+        absurda (> 4x min_sl_dist_pct) se descarta como dato que no es
+        nuestro SL (protege contra respuestas inesperadas de la API).
+        """
+        try:
+            # --- entrada sanamente: sin numero valido no hay SL que leer ---
+            if not math.isfinite(entry) or entry <= 0:
+                flag("SL-RECONCILE", ORIGEN_CODIGO,
+                     f"{symbol}: entry={entry} no finita/<=0 -> sin lectura "
+                     f"de SL (ratchet congelado por el llamador).",
+                     logging.WARNING)
+                return None
+
+            params = {"planType": "profit_loss",
+                      "productType": "USDT-FUTURES",
+                      "symbol": self._bsymbol(symbol), "limit": "50"}
+            body = await self._exch_call(
+                "private_mix_get_v2_mix_order_orders_plan_pending", params)
+            if isinstance(body, dict):
+                code = str(body.get("code", "00000"))
+                if code not in ("00000", "0"):
+                    flag("SLPLAN", ORIGEN_BIBLIOTECA,
+                         f"{symbol}: code={code} "
+                         f"{str(body.get('msg'))[:120]}", logging.WARNING)
+                    return None
+
+            planes = self._plan_list(body)
+            tipos = [str(o.get("planType")) for o in planes
+                     if isinstance(o, dict)]
+
+            # --- candidatos a SL: todo plan que NO sea profit_plan ---
+            tope = 4.0 * float(self.cfg.get("min_sl_dist_pct", 0.05))
+            candidatos = []
+            for o in planes:
+                if not isinstance(o, dict):
+                    continue
+                pt = o.get("planType")
+                if pt in (None, "", "profit_plan"):
+                    continue           # TP (o elemento que no es un plan)
+                try:
+                    trig = float(o.get("triggerPrice", 0))
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(trig) or trig <= 0:
+                    continue
+                if abs(trig - entry) / entry > tope:
+                    # Un SL nunca esta tan lejos de la entrada: se ignora
+                    # ese trigger en vez de decidir con un dato ajeno.
+                    continue
+                candidatos.append(trig)
+
+            if not candidatos:
+                return {"found": False, "tipos": tipos,
+                        "n_planes": len(planes)}
+            if len(candidatos) > 1:
+                flag("SL-MULTIPLAN", ORIGEN_CODIGO,
+                     f"{symbol}: {len(candidatos)} planes de SL candidatos "
+                     f"{candidatos}; se usa el mas cercano a la entrada "
+                     f"{entry}.", logging.WARNING)
+                candidatos.sort(key=lambda t: abs(t - entry))
+            return {"found": True, "trigger": candidatos[0]}
+
+        except RateLimitExceeded:
+            flag("429", ORIGEN_BIBLIOTECA,
+                 f"_pending_stop_plan {symbol}: rate limit.", logging.WARNING)
+            await asyncio.sleep(5)
+            return None
+        except BadRequest as e:
+            flag("400", ORIGEN_BIBLIOTECA,
+                 f"_pending_stop_plan {symbol}: {e}", logging.WARNING)
+            return None
+        except (NetworkError, RequestTimeout):
+            flag("NET", ORIGEN_BIBLIOTECA,
+                 f"_pending_stop_plan {symbol}: error de red.", logging.WARNING)
+            return None
+        except ExchangeError as e:
+            flag("500", ORIGEN_BIBLIOTECA,
+                 f"_pending_stop_plan {symbol}: {e}", logging.WARNING)
+            return None
+        except Exception as e:
+            # Cobertura amplia a proposito: un mock/ AssertionError de test
+            # o cualquier sorpresa NO debe tumbar el ciclo de gestion.
+            flag("SLPLAN-UNEXPECTED", origen_de_excepcion(e),
+                 f"_pending_stop_plan {symbol}: {type(e).__name__}: {e}",
+                 logging.WARNING)
+            return None
+
+    # -----------------------------------------------------------------
+    # [3.6d-2b/c] RECONCILIACION del estado del ratchet vs SL real
+    # -----------------------------------------------------------------
+    def _congelar_ratchet(self, symbol: str, te: dict, motivo: str) -> None:
+        """[3.6d-2c] Congela el ratchet: sin SL legible NO se mueve nada.
+
+        Es un ONE-WAY dentro del ciclo: solo la lectura correcta de un plan
+        de SL lo des-congela (ningun error ni ausencia lo reactiva). No
+        persiste a JSON a proposito: si el proceso muere, al arrancar el
+        estado se re-deriva del exchange (idempotente) y asi los ciclos de
+        gestion no gastan saves de mas.
+        """
+        if te.get("sl_ratchet_frozen", False):
+            return                              # ya congelado: sin flag nuevo
+        te["sl_ratchet_frozen"] = True
+        flag("SL-NOPLAN", ORIGEN_CODIGO,
+             f"{symbol}: ratchet CONGELADO ({motivo}). step persistido="
+             f"{te.get('sl_ratchet_step')} -> sin lectura del SL real no se "
+             f"envia NINGUNA orden de SL (la proteccion base del exchange "
+             f"sigue intacta).", logging.WARNING)
+
+    async def _reconciliar_sl_ratchet(self, symbol: str, side: str,
+                                      entry: float, te: dict) -> None:
+        """[3.6d-2b] Sincroniza el ratchet con el SL REAL de Bitget.
+
+        CIERRA LOS DOS GAPS (ver CONFIG [3.6d-2]):
+          GAP A -> verifica que el SL pedido exista en el panel; el SL del
+                   exchange manda sobre lo que diga el JSON.
+          GAP B -> tras perder trade_entries.json, el escalon se RE-DERIVA
+                   del SL real: si estaba en -3.50% el estado vuelve a
+                   "step 1" y el ratchet jamas lo empeora a -4.00%.
+
+        THROTTLE: sl_reconcile_sec. Como _sl_recon_last arranca vacio, la
+        PRIMERA lectura es ya en el primer tick (el guard usa epoch 0.0).
+
+        PROTOCOLO (solo LEE; nunca envia ordenes):
+          * found=True  -> D = (entry-trigger)/entry  en long,
+                           D = (trigger-entry)/entry  en short,
+                           step = max({i : D <= dist_i} U {-1});
+                           se des-congela y, si difiere del persistido,
+                           se guarda + flag SL-RECONCILE.
+          * found=False -> SIN plan de SL visible -> CONGELADO. Si n_planes
+                           == 0 (respuesta vacia) se toleran 3 lecturas
+                           (sl_ratchet_empty) antes de congelar, para no
+                           castigar una respuesta transitoria.
+          * None (error)-> REINTENTO a sl_reconcile_sec: si ya hubo una
+                           lectura buena se conserva; si NUNCA la hubo ->
+                           CONGELADO (fail-safe: nunca mover un stop
+                           cuyo valor se ignora).
+        """
+        try:
+            # --- throttle de lectura al exchange ---
+            now = time.time()
+            if now - self._sl_recon_last.get(symbol, 0.0) < \
+                    float(self.cfg.get("sl_reconcile_sec", 600)):
+                return
+            self._sl_recon_last[symbol] = now
+
+            res = await self._pending_stop_plan(symbol, entry)
+
+            # --- (1) ERROR DE LECTURA ---
+            if res is None:
+                if te.get("sl_ratchet_reconciled", False):
+                    # Ya hubo una lectura buena: es lo mejor que sabemos y
+                    # se reintentara en sl_reconcile_sec (flag ya emitido
+                    # por el lector).
+                    return
+                self._congelar_ratchet(symbol, te,
+                                       "lectura del SL fallo y no hay "
+                                       "lectura previa")
+                return
+
+            # --- (2) LEGIBLE PERO SIN PLAN DE SL VISIBLE ---
+            if not res.get("found", False):
+                n_planes = int(res.get("n_planes", 0) or 0)
+                if n_planes == 0:
+                    # Respuesta vacia: posible vacio transitorio -> 3
+                    # lecturas antes de decidir (contador en memoria).
+                    vacias = int(te.get("sl_ratchet_empty", 0) or 0) + 1
+                    te["sl_ratchet_empty"] = vacias
+                    if vacias < 3:
+                        return
+                self._congelar_ratchet(
+                    symbol, te,
+                    f"sin plan de SL en Bitget (tipos="
+                    f"{res.get('tipos')}, n_planes={n_planes})")
+                return
+
+            # --- (3) SL REAL LOCALIZADO -> derivar el escalon aplicado ---
+            te["sl_ratchet_empty"] = 0
+            trig = float(res["trigger"])
+            if side == "long":
+                dist = (entry - trig) / entry     # SL por debajo: positivo
+            else:
+                dist = (trig - entry) / entry     # SHORT espejo
+
+            # step = max({i : D <= dist_i} U {-1}): si el SL real es MEJOR
+            # que cualquier escalon (p.ej. ya esta en BE) se toma el mayor,
+            # y si es peor (SL base -5%) -> -1. Asi el ratchet nunca cree
+            # que hay que "subir" un stop que ya esta mas arriba.
+            step = -1
+            for i, umbral in enumerate(self.cfg.get("sl_ratchet_steps") or ()):
+                try:
+                    d = float(umbral[1])
+                except (TypeError, ValueError, IndexError):
+                    continue                    # tramo corrupto: se ignora
+                if math.isfinite(d) and dist <= d and i > step:
+                    step = i
+
+            paso_antes = te.get("sl_ratchet_step", -1)
+            paso_antes = -1 if paso_antes is None else int(paso_antes)
+
+            if te.get("sl_ratchet_frozen", False):
+                te["sl_ratchet_frozen"] = False
+                log.info(f"{symbol} SL legible de nuevo -> ratchet "
+                         f"REACTIVADO (escalón derivado {step}).")
+            te["sl_ratchet_reconciled"] = True
+
+            if step != paso_antes:
+                # DIVERGENCIA JSON vs realidad: manda el exchange. Se
+                # persiste para que un proximo arranque no vuelva a
+                # empeorar el stop (nucleo del GAP B).
+                te["sl_ratchet_step"] = step
+                te["sl_ratchet_price"] = trig if step >= 0 else None
+                await self._save_trade_entries()
+                flag("SL-RECONCILE", ORIGEN_CODIGO,
+                     f"{symbol}: SL real {trig:.6f} (D={dist * 100:.2f}%) "
+                     f"-> escalón {step}; estado local era {paso_antes}. "
+                     f"Se adopta el valor del exchange.",
+                     logging.WARNING)
+                log.info(f"{symbol} SL-RECONCILE: trigger real {trig:.6f} "
+                         f"-> dist {dist * 100:+.2f}%, escalón {step} "
+                         f"(persistido {paso_antes}).")
+
+        except Exception as e:
+            # Nunca materializa fuera: la reconciliacion no puede tumbar
+            # el ciclo de gestion. Mismo criterio que una lectura None:
+            # sin dato fiable el ratchet queda CONGELADO (fail-safe).
+            flag("SL-RECONCILE", origen_de_excepcion(e),
+                 f"_reconciliar_sl_ratchet {symbol}: {type(e).__name__}: {e}",
+                 logging.ERROR)
+            if not te.get("sl_ratchet_reconciled", False):
+                self._congelar_ratchet(symbol, te,
+                                       f"excepcion en la reconciliacion: "
+                                       f"{type(e).__name__}")
+
     async def _tp1_executed_en_bitget(self, symbol: str,
                                       tp1_fmt: float) -> bool:
         """[TPO-3e] ¿Existio una orden profit_plan con ESTE trigger de TP1
@@ -1972,6 +2311,20 @@ class CanalBot:
             # la limitacion es solo si el precio rescato mientras el bot
             # estaba caido (ya no hay como saberlo: no hay historial).
             "deep_adverse": False,
+            # [3.6d] SL escalonado tras restart: se empieza SIN escalón
+            # (-1 = SL base de -5%, aproximacion al preset original). Si el
+            # precio sigue dentro de un tramo, el 1er tick de
+            # manage_positions aplica el escalón correcto solo (misma orden
+            # que habia antes del restart: idempotente).
+            "sl_ratchet_step": -1,
+            "sl_ratchet_price": None,
+            # [3.6d-2] tras perder el JSON (disco efimero de Render) se
+            # arranca DESCONFIANDO: el 1er tick lee el SL real en Bitget
+            # y de ahi deriva step/price (cierra el GAP B: sin esta lectura
+            # el ratchet podia bajar un SL ya puesto en -3.50% a -4.00%).
+            "sl_ratchet_reconciled": False,
+            "sl_ratchet_frozen": False,
+            "sl_ratchet_empty": 0,
         }
         flag("TE-REBUILD", ORIGEN_CODIGO,
              f"{symbol}: trade_entries reconstruido tras restart "
@@ -2219,6 +2572,21 @@ class CanalBot:
                 "exchange_tps": exchange_tps,   # [TPO-3] TP en Bitget?
                 "tp_single": tp_single,   # [H8] 1 sola TP = 100% en +2%?
                 "deep_adverse": False,  # [8.6c-DR] flag del BE de rescate
+                # [3.6d] SL escalonado: paso ya aplicado (-1 = NINGUNO, el
+                # SL sigue en la base de -5%) y el precio de SL que dejo el
+                # ultimo escalón (None = ninguno). Se persiste para no
+                # re-enviar la orden en cada tick ni perder el escalón
+                # tras un restart.
+                "sl_ratchet_step": -1,
+                "sl_ratchet_price": None,
+                # [3.6d-2] reconciliacion contra el SL REAL de Bitget:
+                # arranca SIN verificar (aunque acabemos de colocar el -5%:
+                # GAP A = que la orden HTTP diga OK no prueba que el
+                # trigger este en el panel) y SIN congelar; el 1er tick de
+                # _sl_ratchet_tick lee el SL real ANTES de poder actuar.
+                "sl_ratchet_reconciled": False,
+                "sl_ratchet_frozen": False,
+                "sl_ratchet_empty": 0,
                 "quantity": qty,
                 "balance_before": balance,
                 "size_usdt": round(actual_margin, 2),
@@ -2253,6 +2621,145 @@ class CanalBot:
             flag("OPEN-UNEXPECTED", origen_de_excepcion(e),
                  f"Abriendo {symbol}: {e}", logging.ERROR)
             return False
+
+    # -----------------------------------------------------------------
+    # [8.6c-2.7] SL ESCALONADO (ratchet) - ejecucion por tick de 15s
+    # -----------------------------------------------------------------
+    async def _sl_ratchet_tick(self, symbol: str, side: str, entry: float,
+                               profit_pct: float, te: dict,
+                               tp1_done: bool) -> None:
+        """
+        [8.6c-2.7] Aplica (si toca) UN escalón del SL configurado en [3.6d].
+
+        TABLA (profit = % de PRECIO a favor con mark price):
+            profit >= +1.00%  ->  SL -4.00%   (sube 1.0% de precio)
+            profit >= +1.50%  ->  SL -3.50%   (sube 1.5% de precio)
+            profit >= +2.00%  ->  TP1 y de ahi manda el BE (+0.20%):
+                                  por eso el bloque se corta en tp1_done.
+
+        REGLAS (decisiones del usuario 2026-10, ejecutadas aqui):
+          * Monotono: el SL jamas retrocede. Si el precio llego a +1.4%
+            (SL -4%) y luego cae a +0.6%, el SL se MANTIENE en -4%.
+          * Salto de tramo: 0.9% -> 1.7% aplica directamente -3.5%
+            (sl_tp.sl_ratchet_objetivo devuelve SIEMPRE el mas alto).
+          * Ambos lados: en SHORT los mismos % quedan POR ENCIMA de la
+            entrada (SL a +4.00% / +3.50%).
+          * FIN DE LA CADENA en tp1_pct (+2%): a partir de ahi manda el
+            TP1/TP2 y luego el BE (+0.20%). Tambien se corta si tp1_done
+            (incluye el caso GAP: profit +5% de golpe -> el mismo ciclo
+            cierra TP2 y una orden de SL aqui seria churn inutil).
+          * deep_be [3.6d] NO se ve afectado: su FASE 1 depende del MARK
+            (-2.8%), que el precio alcanza ANTES de un SL ya subido a
+            -4%/-3.5%; si luego rescata a -0.2% cierra el, si no, el SL.
+
+        Separacion de responsabilidades (misma arquitectura que el BE):
+          * Logica PURA de "que escalón toca"  -> sl_tp.sl_ratchet_objetivo.
+          * Proteccion "nunca empeorar el SL"  -> sl_tp.be_mejora.
+          * AQUI solo la ejecución: orden al exchange (pos_loss), estado
+            persistido (trade_entries.json), logs y alerta Telegram.
+
+        Estados y reintentos:
+          * te["sl_ratchet_step"]  = escalón ya aplicado (-1 = NINGUNO,
+            el SL sigue en la base -5.00%; 0/1 = indice del escalón).
+          * te["sl_ratchet_price"] = precio de SL que dejo el ultimo
+            escalón (None = ninguno). te["sl_price"] NO se toca: sigue
+            siendo el SL ORIGINAL de la entrada (lo usa el CSV).
+          * Orden rechazada por Bitget (429/500/red) -> NO se marca el
+            escalón -> se reintenta en el proximo tick de 15s.
+          * Si el SL vigente ya protege mas que el tramo (p.ej. BE o
+            trailing) -> se marca el escalón SIN llamar a la API.
+          * ANTES de todo lo anterior: reconciliacion contra el SL REAL
+            de Bitget [3.6d-2] (throttle sl_reconcile_sec). Si el SL no
+            es legible -> te["sl_ratchet_frozen"]=True y este metodo sale
+            SIN enviar nada (GAP A: verificar; GAP B: no empeorar un SL
+            ya subido tras perder el JSON en Render).
+        """
+        # Maestro + gate del TP1: tras el TP1 protege el BE (+0.20%).
+        if not self.cfg.get("sl_ratchet_enabled", False) or tp1_done:
+            return
+
+        # FIN DE LA CADENA en tp1_pct (+2%): a partir de ahi el ciclo ya
+        # ejecuta (o acaba de ejecutar) el TP1/TP2 y protege el BE, asi que
+        # re-enviar el SL aqui seria una orden inutil al instante de cerrar
+        # (caso GAP: profit +5% de golpe -> TP2 cierra TODO en el mismo
+        # ciclo). Cubre tambien la ventana en la que el TP del exchange
+        # aun no ha confirmado (tp1_done=False pero profit >= tp1_pct).
+        if profit_pct >= float(self.cfg.get("tp1_pct", 0.02)):
+            return
+
+        # [3.6d-2] GATE DE RECONCILIACION (GAP A/B): ANTES de tocar nada se
+        # comprueba el SL REAL en Bitget. La 1ª lectura es ya en este tick
+        # (throttle sl_reconcile_sec) y, si el SL no se puede leer, el
+        # ratchet queda CONGELADO hasta que haya una lectura correcta:
+        # nunca se envia una orden de SL sobre un stop cuyo valor se ignora
+        # (evita bajar un -3.50% real a -4.00% tras perder el JSON).
+        await self._reconciliar_sl_ratchet(symbol, side, entry, te)
+        if te.get("sl_ratchet_frozen", False):
+            return
+
+        try:
+            obj = sl_tp.sl_ratchet_objetivo(side, entry, profit_pct, self.cfg)
+            if obj is None:
+                return                       # sin escalón alcanzado todavia
+
+            # -1 = NINGUN valor aplicado (SL base -5%); 0/1 = escalón ya
+            # enviado. Se compara > porque el índice 0 es un escalón REAL.
+            paso_ya = te.get("sl_ratchet_step", -1)
+            paso_ya = -1 if paso_ya is None else int(paso_ya)
+            if obj["step"] <= paso_ya:
+                return                       # escalón ya aplicado (monotono)
+
+            # (a) ¿CUAL ES EL SL VIGENTE?
+            #     1º el del TRAILING si estuviera activo (logica [3]),
+            #     2º el ultimo SL aplicado por este ratchet,
+            #     3º el SL ORIGINAL de la entrada (-5.00%).
+            signo = 1.0 if side == "long" else -1.0
+            sl_base = float(
+                te.get("sl_price")
+                or (entry * (1.0 - signo * self.cfg["min_sl_dist_pct"])))
+            sl_actual = float(
+                self.alerts_history.get(f"{symbol}_trail_sl")
+                or te.get("sl_ratchet_price")
+                or sl_base)
+
+            # (b) ¿EL ESCALON MEJORA la proteccion actual?
+            if not sl_tp.be_mejora(side, obj["sl"], sl_actual):
+                # El stop vigente ya protege mas: se da por aplicado SIN
+                # gastar llamada a la API (monotonia + anti-429), igual
+                # que hace el BE en el [FIX-5].
+                te["sl_ratchet_step"] = obj["step"]
+                await self._save_trade_entries()
+                log.info(f"{symbol} SL ratchet omitido (no mejora): "
+                         f"SL actual {sl_actual:.6f} ya protege mas que "
+                         f"{obj['sl']:.6f}.")
+                return
+
+            # (c) Enviar el SL a Bitget (pos_loss, mismo endpoint que BE)
+            if await self._update_stop_loss(symbol, side, obj["sl"]):
+                te["sl_ratchet_step"] = obj["step"]
+                te["sl_ratchet_price"] = obj["sl"]
+                await self._save_trade_entries()
+                dist_txt = (f"{'-' if side == 'long' else '+'}"
+                            f"{obj['dist'] * 100:.2f}%")
+                log.info(f"{symbol} SL ESCALON {obj['step'] + 1}: "
+                         f"{sl_actual:.6f} -> {obj['sl']:.6f} "
+                         f"({dist_txt} precio) | profit "
+                         f"{profit_pct * 100:+.2f}% >= "
+                         f"{obj['profit_min'] * 100:.2f}%")
+                await self.send_telegram(
+                    f"*{symbol}* SL escalado -> `{obj['sl']:.6f}` "
+                    f"({dist_txt} precio)\n"
+                    f"Profit: `{profit_pct * 100:+.2f}%` "
+                    f"(escalon {obj['step'] + 1})")
+            # (d) API fallo -> 'sl_ratchet_step' SIN marcar: se reintenta
+            #     en el proximo ciclo de 15s (el flag ya lo emitio
+            #     _update_stop_loss: 429/400/500/NET/...).
+
+        except Exception as e:
+            # Nunca materializa fuera: no puede tumbar el ciclo de gestion.
+            flag("RATCHET-UNEXPECTED", origen_de_excepcion(e),
+                 f"_sl_ratchet_tick {symbol}: {type(e).__name__}: {e}",
+                 logging.ERROR)
 
     async def manage_positions(self, balance: float = None):
         """
@@ -2470,6 +2977,18 @@ class CanalBot:
                             continue   # posicion fuera: no evaluar BE/trailing
 
                 # =====================================================
+                # 2.7) SL ESCALONADO (ratchet) - tramos de beneficio [3.6d]
+                #   Toda la decision + ejecucion vive en el metodo
+                #   _sl_ratchet_tick() [8.6c-2.7] para que este bucle
+                #   siga siendo legible y el ratchet sea testeable por
+                #   separado (misma arquitectura que el BE: logica PURA
+                #   en sl_tp.py [4] -> ejecucion aqui).
+                #   mark price: mismo criterio que BE y deep adverse (15s).
+                # =====================================================
+                await self._sl_ratchet_tick(symbol, side, entry, profit_pct,
+                                            te, tp1_done)
+
+                # =====================================================
                 # 3) BREAK EVEN (BE) - se evalua UNA sola vez por posicion
                 # =====================================================
                 # QUE HACE EL BREAK EVEN (sin conocimientos previos):
@@ -2515,11 +3034,18 @@ class CanalBot:
                         # (a) ¿CUAL ES EL STOP LOSS QUE TENEMOS AHORA?
                         #     1º el SL del TRAILING si esta activo (es el mas
                         #        reciente y el mas ajustado al precio),
-                        #     2º si no, el SL ORIGINAL de la entrada.
+                        #     2º si no, el ultimo SL aplicado por el ratchet
+                        #        escalonado [3.6d] (p.ej. -4.00%/-3.50%),
+                        #     3º si no, el SL ORIGINAL de la entrada (-5%).
+                        #     (el orden importa: el BE solo se envia si
+                        #      MEJORA el vigente - nunca tira el stop atras)
                         sl_trailing = self.alerts_history.get(f"{symbol}_trail_sl")
-                        sl_original = (self.trade_entries.get(symbol) or {}).get("sl_price")
+                        te_sl = self.trade_entries.get(symbol) or {}
+                        sl_ratchet = te_sl.get("sl_ratchet_price")
+                        sl_original = te_sl.get("sl_price")
                         sl_actual = float(sl_trailing if sl_trailing else
-                                          (sl_original if sl_original else 0.0))
+                                          (sl_ratchet if sl_ratchet else
+                                           (sl_original if sl_original else 0.0)))
 
                         # (b) ¿CUAL SERIA EL SL DEL BREAK EVEN?
                         new_sl = sl_tp.be_objetivo(side, entry, self.cfg)
@@ -2859,6 +3385,7 @@ class CanalBot:
         self.trail_counts.pop(sym, None)
         self.session_active.discard(sym)
         self._tp_recon_last.pop(sym, None)   # [TPO-3]
+        self._sl_recon_last.pop(sym, None)   # [3.6d-2]
 
     # -----------------------------------------------------------------
     # [8.7] COOLDOWN POR PERDIDAS CONSECUTIVAS (riesgo global)
@@ -2989,6 +3516,12 @@ class CanalBot:
                 abs(self.peak_prices.get(sym, ep) - ep) / ep * 100, 2),
             "max_adverse_pct": round(
                 abs(self.adverse_prices.get(sym, ep) - ep) / ep * 100, 2),
+            # [3.6d] SL escalonado: paso alcanzado (-1 = NINGUNO, SL base
+            # -5%) y precio del ultimo SL aplicado por el ratchet (0 = ninguno)
+            "sl_ratchet_step": (-1 if entry.get("sl_ratchet_step") is None
+                                else int(entry.get("sl_ratchet_step", -1))),
+            "sl_ratchet_price": round(float(entry.get("sl_ratchet_price") or 0),
+                                      6),
         }
         write_header = not os.path.exists(self.trades_csv)
         try:
