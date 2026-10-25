@@ -19,6 +19,9 @@ SECCIONES (logica PURA: solo numeros, sin I/O):
                     deep_be_debe_cerrar() : las DOS fases del BE de rescate
   [3] TRAILING   - trail_activacion() / trail_objetivo() / trail_debe_mover()
                    (logica CONSERVADA; se activa con trailing_enabled=True)
+  [4] SL ESCALONADO (ratchet) - sl_ratchet_objetivo() : que escalon de SL
+                   corresponde al profit actual (0/1/2) y su precio.
+                   Ejecucion desde canalBot.manage_positions [8.6c-2.7].
 
 [TPO-2] EL TP ESTRUCTURAL (pivote/borde/rr_ratio/CODIGO-017) FUE ELIMINADO.
   Ahora hay DOS TPs porcentuales fijos sobre la entrada:
@@ -446,3 +449,110 @@ def trail_debe_mover(side: str, objetivo: float, sl_actual: float,
     if side == "long":
         return objetivo < mark and mejora >= min_mejora
     return objetivo > mark and mejora >= min_mejora
+
+
+# =============================================================================
+# [4] SL ESCALONADO (ratchet) - logica PURA de los tramos de beneficio
+# =============================================================================
+# Por que existe este bloque:
+#   El SL de entrada es FIJO en -5% (CONFIG [3.6]) y el TP2 cierra en +3%:
+#   para que la estrategia sea rentable exige ~58.8% de aciertos (sin fees).
+#   El ratchet SUBE el stop en tramos discretos segun el beneficio ya
+#   conseguido, sin tocar TPs ni BE, y con eso baja el umbral de acierto:
+#       SL -5.00% -> w = 5.0/(3.5+5.0) = 58.8%
+#       SL -4.00% -> w = 4.0/(3.5+4.0) = 53.3%
+#       SL -3.50% -> w = 3.5/(3.5+3.5) = 50.0%
+# TABLA (profit = % de PRECIO a favor; CONFIG [3.6d] sl_ratchet_steps):
+#   profit <  +1.00%  ->  sin cambio (SL base -5.00%)
+#   profit >= +1.00%  ->  SL -4.00%  (escalón 1, sube 1.0%)
+#   profit >= +1.50%  ->  SL -3.50%  (escalón 2, sube 1.5%)
+#   profit >= +2.00%  ->  FIN DE LA CADENA: entra el TP1 y de ahi manda
+#                         el BE (+0.20%) [be_after_tp1], que ya es mejor
+#                         proteccion que cualquier escalón.
+# REGLAS (decisiones confirmadas, aqui solo NUMEROS):
+#   * Monotono: se devuelve el escalon MAS ALTO alcanzado; el llamador solo
+#     actua si ese escalon es MAYOR que el ya aplicado (nunca retrocede).
+#   * Salto de tramo: 0.9% -> 1.7% devuelve directamente el escalón 2.
+#   * AMBOS lados: en SHORT la distancia se aplica HACIA ARRIBA de la
+#     entrada (SL a +4.00% / +3.50%), espejo exacto del LONG.
+#   * profit no finito o entrada invalida -> None (nunca actua con datos
+#     rotos, mismo criterio que tp_accion/deep_adverse).
+#   * La proteccion contra empeorar el stop NO es de aqui: el llamador
+#     exige mejora con sl_tp.be_mejora() contra el SL VIGENTE antes de
+#     enviar la orden al exchange, y ANTES reconcilia ese SL VIGENTE con
+#     el REAL de Bitget (canalBot [3.6d-2]: GAP A verifica la orden,
+#     GAP B evita empeorar un stop ya subido tras perder el JSON).
+# =============================================================================
+def sl_ratchet_objetivo(side: str, entry: float, profit_pct: float,
+                        cfg: dict) -> Optional[dict]:
+    """
+    [4.1] ¿Que escalón de SL corresponde al profit actual?
+
+    Devuelve:
+      None            -> feature desactivada, sin escalón alcanzado
+                         (profit < del primer umbral) o datos invalidos.
+      {"step": i,      -> índice del escalón (0-based) ya alcanzado
+           "sl": X,     -> precio de SL que corresponde (entry ± dist)
+           "dist": d,   -> distancia del SL a la entrada (decimal)
+           "profit_min": u}  -> umbral de beneficio que lo activa
+
+    El llamador (manage_positions [8.6c-2.7]) decide SI ejecutarlo:
+      * step > te["sl_ratchet_step"]  -> escalón nuevo: evaluar mejora y
+        enviar la orden (o reintentar en el próximo tick si la API falla).
+        (te["sl_ratchet_step"] arranca en -1 = NINGUN escalón aplicado,
+         porque el indice 0 SI es un escalón real: -4.00%.)
+      * step <= te["sl_ratchet_step"] -> ya aplicado: no se toca nada.
+      * ya tp1_done                   -> bloque entero se salta (BE manda).
+    """
+    # --- Maestro + configuracion ---
+    if not cfg.get("sl_ratchet_enabled", False):
+        return None
+    steps = cfg.get("sl_ratchet_steps") or ()
+    if not steps:
+        return None
+
+    # --- Validacion de numericidad (NaN/Inf -> None, nunca actua) ---
+    if not math.isfinite(profit_pct) or not math.isfinite(entry) or entry <= 0:
+        return None
+
+    # --- Escalón mas alto cuyo umbral ya se cumple ---
+    # Se recorre entero (y no se asume orden) para que un CONFIG mal
+    # ordenado no pueda aplicar un escalón inferior sobre uno superior.
+    mejor_i = None
+    mejor_u = mejor_d = None
+    for i, umbral in enumerate(steps):
+        try:
+            u, d = float(umbral[0]), float(umbral[1])
+        except (TypeError, ValueError, IndexError):
+            # Config corrupta en ESTE tramo: se ignora ese tramo, no la
+            # funcion entera (el resto de tramos sigue operativo).
+            # import PEREZOSO: solo en la ruta de error (evita importar
+            # canalBot cuando todo esta correcto).
+            from canalBot import flag, ORIGEN_CODIGO
+            flag("RATCHET-CFG", ORIGEN_CODIGO,
+                 f"sl_ratchet_steps[{i}] no es (profit_min, dist): "
+                 f"tramo ignorado.", logging.WARNING)
+            continue
+        if profit_pct >= u and (mejor_u is None or u >= mejor_u):
+            mejor_i, mejor_u, mejor_d = i, u, d
+
+    if mejor_i is None:
+        return None                      # aun no se alcanzó ningun tramo
+    if not math.isfinite(mejor_d) or not (0 < mejor_d < 1):
+        # Distancia fuera de rango: un SL asi no protegeria nada.
+        # import PEREZOSO: solo en la ruta de error (evita importar
+        # canalBot cuando todo esta correcto).
+        from canalBot import flag, ORIGEN_CODIGO
+        flag("RATCHET-CFG", ORIGEN_CODIGO,
+             f"sl_ratchet_steps[{mejor_i}] dist={mejor_d} fuera de (0,1): "
+             f"escalón invalido, no se aplica.", logging.WARNING)
+        return None
+
+    # --- Precio de SL: LONG por debajo de la entrada, SHORT por encima ---
+    if side == "long":
+        sl_price = entry * (1.0 - mejor_d)
+    else:
+        sl_price = entry * (1.0 + mejor_d)
+
+    return {"step": mejor_i, "sl": sl_price,
+            "dist": mejor_d, "profit_min": mejor_u}
