@@ -26,7 +26,7 @@ SECCIONES (logica PURA: solo numeros, sin I/O):
 [TPO-2] EL TP ESTRUCTURAL (pivote/borde/rr_ratio/CODIGO-017) FUE ELIMINADO.
   Ahora hay DOS TPs porcentuales fijos sobre la entrada:
     TP1 = +/- tp1_pct (2%)  -> el llamador cierra tp1_close_frac (50%)
-    TP2 = +/- tp2_pct (3%)  -> el llamador cierra el RESTO (posicion total)
+    TP2 = +/- tp2_pct (5%)  -> el llamador cierra el RESTO (posicion total)
 
 QUE NO ESTA AQUI (sigue en canalBot.py - NO tocar):
   * Ordenes a Bitget (_update_stop_loss, create_order, cierres parciales),
@@ -89,7 +89,7 @@ def calcular_sl_tp(lado: str, precio: float, canal_up: float,
       [TPO-2] el TP estructural (pivote opuesto / borde / rr_ratio /
       CODIGO-017) fue ELIMINADO por decision del usuario:
         LONG  : tp1 = precio * (1 + tp1_pct)   (2% -> el llamador cierra 50%)
-                tp2 = precio * (1 + tp2_pct)   (3% -> el llamador cierra TODO)
+                tp2 = precio * (1 + tp2_pct)   (5% -> el llamador cierra TODO)
         SHORT : tp1 = precio * (1 - tp1_pct)
                 tp2 = precio * (1 - tp2_pct)
       No dependen del canal, de pivotes ni del SL.
@@ -455,7 +455,7 @@ def trail_debe_mover(side: str, objetivo: float, sl_actual: float,
 # [4] SL ESCALONADO (ratchet) - logica PURA de los tramos de beneficio
 # =============================================================================
 # Por que existe este bloque:
-#   El SL de entrada es FIJO en -5% (CONFIG [3.6]) y el TP2 cierra en +3%:
+#   El SL de entrada es FIJO en -5% (CONFIG [3.6]) y el TP2 cierra en +5% (tp2_pct):
 #   para que la estrategia sea rentable exige ~58.8% de aciertos (sin fees).
 #   El ratchet SUBE el stop en tramos discretos segun el beneficio ya
 #   conseguido, sin tocar TPs ni BE, y con eso baja el umbral de acierto:
