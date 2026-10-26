@@ -247,7 +247,7 @@ CONFIG = {
                                     #  en variables de entorno para operar)
     "risk_pct": 0.07,               # 7% del colateral arriesgado por trade
     "leverage": 10.0,               # Apalancamiento 10x en Bitget
-    "max_open_positions": 3,        # Maximo de posiciones abiertas simultaneas
+    "max_open_positions": 5,        # Maximo de posiciones abiertas simultaneas
     "sl_buffer_pct": 0.0070,        # Buffer "un poco por debajo/encima" del
                                     # pivot que toco el borde del canal (0.7%)
     "min_sl_dist_pct": 0.05,        # [SL FIJO 5%] LONG y SHORT: el SL siempre
@@ -267,7 +267,7 @@ CONFIG = {
     "tp1_pct": 0.02,                # TP1: +2% de precio a favor (10x -> +20%
                                     # de PnL sobre el margen del trade)
     "tp1_close_frac": 0.5,          # en TP1 se cierra el 50% de la posicion
-    "tp2_pct": 0.03,                # TP2: +3% de precio -> se cierra el
+    "tp2_pct": 0.05,                # TP2: +5% de precio -> se cierra el
                                     # RESTO (posicion completa)
     "tp_mode": "exchange",          # [TPO-3] "exchange": TP1/TP2 se colocan
                                     # como ordenes profit_plan EN BITGET
@@ -313,6 +313,7 @@ CONFIG = {
     #   profit >= +1.00%  ->  SL -4.00%  (sube 1.0% de precio)
     #   profit >= +1.50%  ->  SL -3.50%  (sube 1.5% de precio)
     #   profit >= +2.00%  ->  TP1 (+2%) y a partir de ahi manda el BE
+    #   profit >= +5.00%  ->  TP2 (+5%) cierre del RESTO (10x -> +50% PnL)
     #                         (+0.20%) [3.6c + 3.7]: FIN DE LA CADENA.
     # REGLAS (confirmadas por el usuario):
     #   * Monotono: el SL jamas retrocede. Si el precio vuelve a caer,
@@ -382,7 +383,7 @@ CONFIG = {
                                     # decision del usuario: la logica sigue
                                     # intacta en sl_tp.py [3]; para usarla
                                     # poner True (se activaria a 1:1 = +5%,
-                                    # inalcanzable con TP2 en +3%)
+                                    # inalcanzable con TP2 en +5%)
                                     # (0.3% - proteccion anti rate-limit 429)
 
     # -- [3.9] Cooldown tras perdidas --
@@ -2661,6 +2662,8 @@ class CanalBot:
         TABLA (profit = % de PRECIO a favor con mark price):
             profit >= +1.00%  ->  SL -4.00%   (sube 1.0% de precio)
             profit >= +1.50%  ->  SL -3.50%   (sube 1.5% de precio)
+            profit >= +5.00%  ->  TP2 +5%      cierre TOTAL
+        profit >= +5.00%  ->  TP2 +5%      cierre TOTAL
             profit >= +2.00%  ->  TP1 y de ahi manda el BE (+0.20%):
                                   por eso el bloque se corta en tp1_done.
 
