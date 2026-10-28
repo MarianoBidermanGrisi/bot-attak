@@ -299,6 +299,21 @@ CONFIG = {
                                     # (429/500/red)
     "corte_ema_retry_sec": 15.0,    # [EMA-CUT-RETRY] espera entre intentos
 
+    # -- [EMA9-CUT] Corte por EMA9 vs 20/50/100/200: cierre TOTAL por mercado --
+    # MOTIVO: complemento de corte_ema. Mientras ema20-cut mira la EMA20
+    # contra 50/100/200, esta regla mira la EMA9 (mucho mas reactiva) contra
+    # LAS CUATRO referencias (20/50/100/200). Al ser mas sensible dispara
+    # con mas frecuencia, por eso nace con llave propia y apagable sin
+    # tocar la regla original. Evaluacion CONJUNTO (Enfoque B: una sola
+    # descarga de velas por tick para ambas reglas) en _corte_gestionar().
+    "corte_ema9_enabled": True,     # [EMA9-CUT] activar el corte por EMA9
+    # "por que" clave propia: "ema_fast" global lo comparten la entrada
+    # (_emas) y min_bars; mutarlo romperia ambos flujos.
+    "corte_ema9_fast": 9,           # [EMA9-CUT] periodo rapido PROPIO
+    "corte_ema9_reintentos": 8,     # [EMA9-CUT-RETRY] intentos de cierre/
+                                    # descarga ante errores TRANSITORIOS
+    "corte_ema9_retry_sec": 15.0,   # [EMA9-CUT-RETRY] espera entre intentos
+
     # -- [3.6c] Gate del Break Even --
     "be_after_tp1": True,           # [BE-TP1] el BE SOLO se evalua DESPUES
                                     # de ejecutarse el TP1
@@ -520,15 +535,36 @@ FLAGS_CODIGO_DOC = {
     "EMA-CUT-DATOS": "Datos no evaluable fuera de excepcion (serie None, "
                      "<3 velas, NaN/inf en las 3 cerradas o warmup <200): "
                      "None -> no cortar. Origen: DATOS de mercado.",
-    "EMA-CUT-RETRY": "Transitorio: descarga de velas o evaluacion fallaron "
-                     "en un reintento de _corte_ema_gestionar (red/rate "
+    "EMA-CUT-RETRY": "Transitorio: descarga de velas o cierre fallaron "
+                     "en un reintento de _corte_gestionar (red/rate "
                      "limit/sin vela): se reintenta; NO corta.",
     "EMA-CUT-REJECT": "Reintentos agotados (corte_ema_reintentos) sin senal "
                       "evaluable: se descarta el corte por EMA este ciclo "
                       "(nunca se emite en calma, solo tras RETRY).",
-    "EMA-CUT-UNEXPECTED": "Excepcion inesperada en _corte_ema_gestionar "
-                          "(incluye mocks de test): se captura para no tumbar "
-                          "el ciclo de manage_positions; no se corta.",
+    "EMA-CUT-UNEXPECTED": "Excepcion inesperada en _corte_gestionar "
+                          "(o en _corte_ema_gestionar / mocks de test): se "
+                          "captura para no tumbar el ciclo de "
+                          "manage_positions; no se corta.",
+    # --- Flags de la feature [EMA9-CUT] (corte por EMA9 vs 20/50/100/200) ---
+    # Nota: la DESCARGA compartida con ema20-cut emite EMA-CUT-DATOS y
+    # EMA-CUT-UNEXPECTED (es la misma capa de datos, sin diagnostico
+    # duplicado); el flag RETRY lo asigna _corte_gestionar segun la regla
+    # activa (EMA-CUT-* si corre EMA20; EMA9-CUT-* si solo corre EMA9).
+    "EMA9-CUT-CODIGO": "Excepcion DENTRO de evaluar_corte_ema9() (claves "
+                       "ema_* o corte_ema9_fast faltantes): devuelve None y "
+                       "no se corta (fail-closed). Origen: codigo local.",
+    "EMA9-CUT-DATOS": "Datos no evaluable fuera de excepcion (serie None, "
+                      "<3 velas, NaN/inf o warmup <200): None -> no cortar. "
+                      "Origen: DATOS de mercado.",
+    "EMA9-CUT-RETRY": "Transitorio: descarga o cierre fallaron en un "
+                      "reintento de _corte_gestionar con SOLO la regla "
+                      "EMA9 activa (red/rate limit): se reintenta; NO corta.",
+    "EMA9-CUT-REJECT": "Reintentos agotados (corte_ema9_reintentos) sin "
+                       "senal evaluable: se descarta el corte EMA9 este "
+                       "ciclo (nunca se emite en calma, solo tras RETRY).",
+    "EMA9-CUT-UNEXPECTED": "Excepcion inesperada en _corte_gestionar "
+                           "asociada a la regla EMA9: se captura para no "
+                           "tumbar el ciclo; no se corta.",
     # CODIGO-017 ELIMINADO [TPO-2]: el TP estructural (pivote/borde/rr_ratio)
     # ya no existe; ahora son TP1/TP2 porcentuales (sl_tp.tp_accion).
 }
@@ -2964,18 +3000,18 @@ class CanalBot:
                     self.peak_prices[symbol] = min(self.peak_prices[symbol], mark)
 
                 # =====================================================
-                # 2.55) CORTE POR EMA [EMA-CUT] - PRIORIDAD "EMA MANDA"
-                #   Si la EMA20 pierde sostenidamente (2 velas cerradas)
-                #   contra 50/100/200 del MISMO lado que la posicion, la
-                #   tendencia esta rota: se cierra el 100% por mercado YA
-                #   y se `continue` -> ratchet, BE, deep adverse y
-                #   trailing NO corren en este tick (no quedan ordenes
-                #   vivas que ajustar). Solo evalua si hay config ON; si
-                #   no es evaluable/rechazado, la proteccion original
-                #   (SL/BE/TP) sigue intacta.
+                # 2.55) CORTE POR EMA [EMA-CUT + EMA9-CUT] - PRIORIDAD
+                #   "EMA MANDA": si CUALQUIERA regla (EMA20 vs 50/100/200
+                #   o EMA9 vs 20/50/100/200) confirma 2 velas cerradas
+                #   sostenidas del lado de la posicion, se cierra el 100%
+                #   por mercado YA y se `continue` -> ratchet, BE, deep
+                #   adverse y trailing NO corren en este tick. Descarga
+                #   compartida (Enfoque B); si no es evaluable/rechazado,
+                #   la proteccion original (SL/BE/TP) sigue intacta.
                 # =====================================================
-                if self.cfg.get("corte_ema_enabled"):
-                    if await self._corte_ema_gestionar(symbol, side):
+                if (self.cfg.get("corte_ema_enabled")
+                        or self.cfg.get("corte_ema9_enabled")):
+                    if await self._corte_gestionar(symbol, side):
                         continue
 
                 # =====================================================
@@ -3397,6 +3433,148 @@ class CanalBot:
         except Exception as e:
             flag("EMA-CUT-UNEXPECTED", origen_de_excepcion(e),
                  f"_corte_ema_gestionar({symbol}): "
+                 f"{type(e).__name__}: {e}", logging.ERROR)
+            return False
+
+    # -----------------------------------------------------------------
+    # [EMA9-CUT] Orquestador UNICO de ambas reglas de corte con descarga
+    # compartida (Enfoque B): una sola descarga por tick/simbolo alimenta
+    # evaluar_corte_ema (EMA20) y evaluar_corte_ema9 (EMA9). Se evita
+    # duplicar llamadas a la API (riesgo de 429) sin refactorizar la
+    # semantica original de la regla EMA20.
+    # -----------------------------------------------------------------
+    async def _corte_gestionar(self, symbol: str, side: str) -> bool:
+        """
+        Evalua en el mismo tick las DOS reglas de corte sobre los mismos
+        datos y cierra el 100% por mercado si CUALQUIERA confirma del
+        lado de la posicion abierta.
+
+        Porque un solo punto de orquestacion: el caller (loop 2.55) no
+        necesita saber cual regla esta activa; aqui se decide la prioridad
+        "EMA manda" (True -> `continue` sin ratchet/BE/trailing).
+
+        Returns:
+            True  -> alguna regla confirmo y el cierre se ejecuto
+                     (caller DEBE hacer `continue`).
+            False -> sin corte / no evaluable / rechazo; el caller sigue
+                     con la proteccion original (SL/BE/TP).
+
+        Flags: la capa de descarga mantiene EMA-CUT-RETRY/DATOS (comun);
+        los flags de rechazo final se eligen por la regla que disparo
+        (EMA-CUT-* si involucra EMA20; EMA9-CUT-* si solo EMA9).
+        """
+        try:
+            activa20 = bool(self.cfg.get("corte_ema_enabled"))
+            activa9 = bool(self.cfg.get("corte_ema9_enabled"))
+            if not activa20 and not activa9:
+                return False
+
+            tf = self.cfg.get("timeframe", "5m")
+            # Maximo de ambos configs: un cierre es proteccion de capital,
+            # se le da la ventana de reintentos mas generosa de las reglas
+            # activas.
+            max_intentos = max(
+                1,
+                int(self.cfg.get("corte_ema_reintentos", 8)),
+                int(self.cfg.get("corte_ema9_reintentos", 8))
+                if activa9 else 0,
+            )
+            espera = max(
+                float(self.cfg.get("corte_ema_retry_sec", 15.0)),
+                float(self.cfg.get("corte_ema9_retry_sec", 15.0))
+                if activa9 else 0.0,
+            )
+            # Codigo de retry elegido por la regla activa: si corre
+            # EMA20 el diagnostico es EMA-CUT-* (capa original); si solo
+            # corre EMA9, EMA9-CUT-* para no culpar a la regla equivocada.
+            codigo_retry = ("EMA-CUT-RETRY" if activa20
+                            else "EMA9-CUT-RETRY")
+
+            for intento in range(1, max_intentos + 1):
+                # Descarga UNICA compartida por ambas reglas (Enfoque B).
+                cerradas = await self._corte_ema_descargar(symbol, tf)
+                if cerradas is None:
+                    # Transitorio (datos/red/429): flag de la capa de
+                    # descarga y reintento mas tarde.
+                    flag(codigo_retry, ORIGEN_DATOS,
+                         f"{symbol}: descarga {tf} fallida "
+                         f"(intento {intento}/{max_intentos}).",
+                         logging.WARNING)
+                    await asyncio.sleep(espera)
+                    continue
+
+                senal20 = evaluar_corte_ema(cerradas["close"], self.cfg) \
+                    if activa20 else "none"
+                senal9 = evaluar_corte_ema9(cerradas["close"], self.cfg) \
+                    if activa9 else "none"
+
+                # Fail-closed global: si alguna regla no es evaluable
+                # (warmup/datos malos) NO se cierra jamas por esa pasada.
+                if senal20 is None or senal9 is None:
+                    log.debug(f"{symbol}: corte EMA no evaluable "
+                              f"(warmup/datos) -> sin accion.")
+                    return False
+
+                # Determinar que regla(s) confirman del MISMO lado que mi
+                # posicion: solo asi me afecta (lado contrario -> no).
+                golpe20 = (senal20 == side)
+                golpe9 = (senal9 == side)
+                if not (golpe20 or golpe9):
+                    return False
+
+                # CORTE CONFIRMADO: cierre TOTAL por mercado.
+                ok = await self.close_position(symbol)
+                if ok:
+                    if golpe20 and golpe9:
+                        etiqueta = "CORTE-EMA + EMA9 (ambas confirmadas)"
+                        detalle = ("EMA20 y EMA9 rostas 2 velas "
+                                   "sostenidas")
+                    elif golpe20:
+                        etiqueta = "CORTE-EMA"
+                        detalle = ("EMA20 rota 2 velas contra "
+                                   "50/100/200")
+                    else:
+                        etiqueta = "CORTE-EMA9"
+                        detalle = ("EMA9 cruza 20/50/100/200 con "
+                                   "2 velas sostenidas")
+                    log.info(f"{symbol} {etiqueta} [{side}]: {detalle}"
+                             f" -> cierre TOTAL por mercado "
+                             f"(intento {intento}).")
+                    await self.send_telegram(
+                        f"*{symbol}* {etiqueta} [{side.upper()}]: "
+                        f"{detalle} -> cierre total por mercado.")
+                    return True
+
+                # close_position ya dejo su flag (429/400/NET/500); aqui
+                # solo se marca el reintento del corte.
+                flag(codigo_retry, ORIGEN_BIBLIOTECA,
+                     f"{symbol}: cierre fallido "
+                     f"(intento {intento}/{max_intentos}).",
+                     logging.WARNING)
+                await asyncio.sleep(espera)
+
+            # Sin bandera de desesperacion el silencio pasaria
+            # desapercibido en produccion -> CRITICAL visible en Render.
+            # El flag se elige por la regla activa (diagnostico quirurgico).
+            if activa20:
+                flag("EMA-CUT-REJECT", ORIGEN_CODIGO,
+                     f"{symbol}: CORTE-EMA [{side}] agotado "
+                     f"({max_intentos} intentos) SIN cerrar la posicion.",
+                     logging.CRITICAL)
+            else:
+                flag("EMA9-CUT-REJECT", ORIGEN_CODIGO,
+                     f"{symbol}: CORTE-EMA9 [{side}] agotado "
+                     f"({max_intentos} intentos) SIN cerrar la posicion.",
+                     logging.CRITICAL)
+            return False
+        except Exception as e:
+            # Flag de excepcion decidido por regla activa: si solo corre
+            # EMA9, el origen inesperado pertenece a esa regla.
+            codigo = ("EMA-CUT-UNEXPECTED"
+                      if self.cfg.get("corte_ema_enabled")
+                      else "EMA9-CUT-UNEXPECTED")
+            flag(codigo, origen_de_excepcion(e),
+                 f"_corte_gestionar({symbol}): "
                  f"{type(e).__name__}: {e}", logging.ERROR)
             return False
 
@@ -4482,6 +4660,100 @@ def evaluar_corte_ema(close: pd.Series, cfg: dict) -> Optional[str]:
         # Fail-closed: cualquier error de calculo => no cortar.
         flag("EMA-CUT-CODIGO", origen_de_excepcion(e),
              f"evaluar_corte_ema: {type(e).__name__}: {e}", logging.ERROR)
+        return None
+
+
+# =============================================================================
+# [9.9b] CORTE POR EMA9 vs 20/50/100/200 - funcion PURA (sin red/exchange)
+# =============================================================================
+def evaluar_corte_ema9(close: pd.Series, cfg: dict) -> Optional[str]:
+    """
+    [EMA9-CUT] Detecta la rotura SOSTENIDA de la tendencia usando la EMA9
+    (rapida) contra CUATRO referencias: 20/50/100/200. En LONG exige
+    ema9 < (ema20, ema50, ema100, ema200); en SHORT el espejo.
+
+    "por que" 4 referencias y no 3: la EMA9 reacciona mucho antes que la
+    EMA20; exigirle que tambien pise la EMA20 (la propia fast de la regla
+    ema20-cut) evita cerrar por micro-cruces dentro de una tendencia sana.
+
+    "por que" 2 velas SOSTENIDAS (indices -2 y -3, cerradas): mismo
+    criterio que evaluar_corte_ema(); la vela en formacion repintaria el
+    cierre y generaria cortes fantasma.
+
+    FAIL-CLOSED identico al original: warmup de max(9, 20, 50, 100, 200)
+    velas; cualquier dato dudoso => None = NO CERRAR (manda SL/BE/TP).
+
+    Returns:
+        "long"  -> cortar LONG  (ema9 bajo las 4, 2 velas cerradas)
+        "short" -> cortar SHORT (ema9 sobre las 4, 2 velas cerradas)
+        "none"  -> evaluable, sin condicion de corte
+        None    -> no evaluable -> NO cortar
+    """
+    try:
+        # 3 velas cerradas minimas para el estado sostenido (-2 y -3);
+        # indices fijos para ignorar la vela en formacion (sin repintado).
+        if close is None or len(close) < 3:
+            flag("EMA9-CUT-DATOS", ORIGEN_DATOS,
+                 f"evaluar_corte_ema9: serie con {0 if close is None else len(close)} "
+                 f"velas (<3) -> no evaluable.", logging.WARNING)
+            return None
+
+        cierre = pd.to_numeric(close, errors="coerce").to_numpy(
+            dtype=float, copy=False)
+        if len(cierre) < 3 or not np.isfinite(cierre[-3:]).all():
+            flag("EMA9-CUT-DATOS", ORIGEN_DATOS,
+                 "evaluar_corte_ema9: NaN/inf en las 3 velas cerradas "
+                 "-> no evaluable.", logging.WARNING)
+            return None
+
+        # Rapido PROPIO de la regla (corte_ema9_fast); las referencias son
+        # SOLO-LECTURA de las claves globales (20/50/100/200): no se muta
+        # "ema_fast" porque lo comparten la entrada y min_bars.
+        fast_len = int(cfg["corte_ema9_fast"])
+        ref_len = (int(cfg["ema_fast"]), int(cfg["ema_mid"]),
+                   int(cfg["ema_slow"]), int(cfg["ema_cross"]))
+        # Warmup insuficiente => hay EMAs sin formar => no evaluar.
+        if len(cierre) < max(fast_len, *ref_len):
+            flag("EMA9-CUT-DATOS", ORIGEN_DATOS,
+                 f"evaluar_corte_ema9: solo {len(cierre)} velas "
+                 f"(warmup {max(fast_len, *ref_len)}) -> no evaluable.",
+                 logging.WARNING)
+            return None
+
+        serie = pd.Series(cierre)
+        ema_fast = MathPreservados.ema_tv(serie, fast_len)
+        # Las 4 referencias se calculan igual que en _emas()/evaluar_corte_ema.
+        emas_ref = [MathPreservados.ema_tv(serie, n) for n in ref_len]
+
+        # Estado en las 2 velas cerradas n-2 y n-3; cualquier valor no
+        # finito en cualquiera de las 5 EMAs anula la evaluacion.
+        for i in (-2, -3):
+            f = float(ema_fast.iloc[i])
+            vals = [float(e.iloc[i]) for e in emas_ref]
+            if not all(math.isfinite(v) for v in [f] + vals):
+                return None
+
+            # LONG roto: la EMA9 queda por debajo de TODAS las referencias.
+            long_roto = all(f < v for v in vals)
+            # SHORT roto: espejo exacto (f > todas).
+            short_roto = all(f > v for v in vals)
+
+            if not long_roto and not short_roto:
+                # Una sola vela fuera de condicion rompe la sostenibilidad.
+                return "none"
+
+        # Las 2 velas cumplen: decidir lado con el estado de n-2.
+        f_last = float(ema_fast.iloc[-2])
+        vals_last = [float(e.iloc[-2]) for e in emas_ref]
+        if all(f_last < v for v in vals_last):
+            return "long"
+        if all(f_last > v for v in vals_last):
+            return "short"
+        return "none"
+    except Exception as e:
+        # Fail-closed: cualquier error de calculo => no cortar.
+        flag("EMA9-CUT-CODIGO", origen_de_excepcion(e),
+             f"evaluar_corte_ema9: {type(e).__name__}: {e}", logging.ERROR)
         return None
 
 
